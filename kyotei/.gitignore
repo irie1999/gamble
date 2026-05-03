@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+data/raw_data.json
+models/lgb_model.txt
+models/model_meta.json
+results/
