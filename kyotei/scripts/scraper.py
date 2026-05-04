@@ -18,7 +18,16 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; KyoteiResearch/1.0)"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://www.boatrace.jp/",
 }
 
 # 全国24場コード
@@ -32,15 +41,21 @@ VENUE_CODES = {
 }
 
 
-def fetch(url: str, retries: int = 3) -> BeautifulSoup | None:
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
+
+def fetch(url: str, retries: int = 3, timeout: int = 30) -> BeautifulSoup | None:
     for i in range(retries):
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp = _session.get(url, timeout=timeout)
             resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or "utf-8"
             return BeautifulSoup(resp.text, "lxml")
         except Exception as e:
-            print(f"[fetch] {e} (試行 {i+1}/{retries})")
-            time.sleep(2 ** i)
+            wait = 2 ** i * 3
+            print(f"[fetch] {e} (試行 {i+1}/{retries}, {wait}秒待機)")
+            time.sleep(wait)
     return None
 
 
