@@ -150,8 +150,10 @@ def main():
                     if "払戻" in resp.text or "オッズ" in resp.text:
                         print(f"  → 払戻データあり")
 
-                    # テーブルを表示
-                    tables = pd.read_html(StringIO(resp.text), flavor="lxml")
+                    # テーブルを表示（XMLエンコーディング宣言を除去してからパース）
+                    import re as _re
+                    clean = _re.sub(r'<\?xml[^>]+\?>', '', resp.text)
+                    tables = pd.read_html(StringIO(clean), flavor="lxml")
                     print(f"  テーブル数: {len(tables)}")
                     for i, df in enumerate(tables[:10]):
                         print(f"    Table[{i}]: shape={df.shape}")
