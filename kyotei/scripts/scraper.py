@@ -3,6 +3,7 @@
 boatrace.jp の公式サイトからレース情報・選手成績・モーター成績を取得する
 """
 
+import os
 import time
 import json
 import re
@@ -43,6 +44,7 @@ VENUE_CODES = {
 
 # スレッドごとに独立したセッションを持つ
 _local = threading.local()
+_stop_event = threading.Event()  # モジュール全体で共有する停止フラグ
 
 
 def _get_session() -> requests.Session:
@@ -53,15 +55,19 @@ def _get_session() -> requests.Session:
     return _local.session
 
 
-def fetch(url: str, retries: int = 3, timeout: int = 30) -> BeautifulSoup | None:
+def fetch(url: str, retries: int = 3, timeout: int = 10) -> BeautifulSoup | None:
     session = _get_session()
     for i in range(retries):
+        if _stop_event.is_set():
+            return None
         try:
             resp = session.get(url, timeout=timeout)
             resp.raise_for_status()
             resp.encoding = resp.apparent_encoding or "utf-8"
             return BeautifulSoup(resp.text, "lxml")
         except Exception as e:
+            if _stop_event.is_set():
+                return None
             wait = 2 ** i * 3
             print(f"[fetch] {e} (試行 {i+1}/{retries}, {wait}秒待機)")
             time.sleep(wait)
@@ -308,12 +314,15 @@ def collect_data(
 
     records = list(existing_records) if existing_records else []
     lock = threading.Lock()
-    stop_event = threading.Event()
+    _stop_event.clear()
 
-    # Ctrl+C で中間保存して終了
+    # Ctrl+C で即座に保存して終了
     def _handler(sig, frame):
-        print("\n\n[中断] Ctrl+C → 保存して終了します...")
-        stop_event.set()
+        print("\n\n[中断] 保存して終了します...")
+        _stop_event.set()
+        with lock:
+            save_records(records, filename)
+        os._exit(0)
     signal.signal(signal.SIGINT, _handler)
 
     # 概算所要時間（並列化を考慮）
@@ -330,12 +339,12 @@ def collect_data(
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(_collect_venue_day, vc, date_str, sleep_sec, stop_event): vc
+                executor.submit(_collect_venue_day, vc, date_str, sleep_sec, _stop_event): vc
                 for vc in venue_codes
             }
             for future in as_completed(futures):
                 vc = futures[future]
-                if stop_event.is_set():
+                if _stop_event.is_set():
                     break
                 try:
                     venue_records = future.result()
@@ -356,9 +365,7 @@ def collect_data(
 
         current += timedelta(days=1)
 
-    with lock:
-        save_records(records, filename)
-
+    save_records(records, filename)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     return records
 
