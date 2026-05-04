@@ -134,9 +134,9 @@ def main():
         # keirin.jpのKCDが不明なので複数試す
         print("=== keirin.jp アクセステスト ===")
         print("岐阜のKCDを探します（kdreams.jpでは venue_code=43）")
-        test_date = "20260504"
+        test_date = "20260430"  # 過去の確定済みレース
 
-        # KCD=27 = 岐阜 (確認済み)
+        # KCD=27 = 大垣か岐阜周辺 (確認済み)、過去の確定済みレースで払戻を確認
         for kcd in ["27"]:
             url = f"{BASE_URL}?KCD={kcd}&KBI={test_date}&RNO=1"
             print(f"\n試行: KCD={kcd} → {url}")
