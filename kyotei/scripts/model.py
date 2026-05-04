@@ -182,7 +182,14 @@ def load_model() -> tuple:
     model_path = MODEL_DIR / "lgb_model.txt"
     meta_path = MODEL_DIR / "model_meta.json"
 
-    booster = lgb.Booster(model_file=str(model_path))
+    fd, tmp_name = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    try:
+        shutil.copy2(str(model_path), tmp_name)
+        booster = lgb.Booster(model_file=tmp_name)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
