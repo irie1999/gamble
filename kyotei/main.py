@@ -26,6 +26,9 @@ from betting import (
     pick_best_win_bet, simulate_session, print_session_report, DEDUCTION_RATE
 )
 
+sys.path.insert(0, str(Path(__file__).parent.parent))
+import report as html_report
+
 DATA_DIR = Path(__file__).parent / "data"
 MODEL_DIR = Path(__file__).parent / "models"
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -129,7 +132,7 @@ def _backtest_real(args):
 
     session = simulate_session(races, initial_bankroll=args.bankroll, min_edge=args.min_edge)
     print_session_report(session)
-    _save_results(session)
+    _save_results(session, html=getattr(args, "html", False))
 
 
 def _backtest_mock(args):
@@ -171,10 +174,10 @@ def _backtest_mock(args):
         kelly_frac=0.25,
     )
     print_session_report(session)
-    _save_results(session, "mock_backtest.json")
+    _save_results(session, "mock_backtest.json", html=getattr(args, "html", False))
 
 
-def _save_results(session, filename: str = "backtest_result.json") -> None:
+def _save_results(session, filename: str = "backtest_result.json", html: bool = False) -> None:
     result = {
         "initial_bankroll": session.initial_bankroll,
         "final_bankroll": session.final_bankroll,
@@ -194,14 +197,19 @@ def _save_results(session, filename: str = "backtest_result.json") -> None:
                 "odds": b.odds,
                 "bet_amount": b.bet_amount,
                 "expected_value": b.expected_value,
+                "win_flag": False,
             }
             for b in session.bets
         ],
     }
-    path = RESULTS_DIR / filename
-    with open(path, "w", encoding="utf-8") as f:
+    json_path = RESULTS_DIR / filename
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\n結果を保存しました: {path}")
+    print(f"\n結果を保存しました: {json_path}")
+
+    if html:
+        html_path = RESULTS_DIR / filename.replace(".json", ".html")
+        html_report.save_and_open(result, html_path, title="競艇バックテスト結果")
 
 
 def cmd_demo(args):
@@ -281,13 +289,13 @@ def cmd_demo(args):
 
     session = simulate_session(races, initial_bankroll=50000, min_edge=0.05)
     print_session_report(session)
-    _save_results(session, "demo_result.json")
+    _save_results(session, "demo_result.json", html=True)
 
     print("\n" + "=" * 60)
     print(" デモ完了！実データで使うには:")
     print("   python main.py collect --days 30")
     print("   python main.py train")
-    print("   python main.py backtest")
+    print("   python main.py backtest --html")
     print("=" * 60)
 
 
@@ -303,9 +311,10 @@ def main():
 
     p_bt = sub.add_parser("backtest", help="バックテスト")
     p_bt.add_argument("--bankroll", type=float, default=50000, help="初期資金（円）")
-    p_bt.add_argument("--min-edge", type=float, default=0.05, help="最低エッジ（デフォルト: 0.05）")
+    p_bt.add_argument("--min-edge", dest="min_edge", type=float, default=0.05)
+    p_bt.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
-    p_demo = sub.add_parser("demo", help="モックデータでデモ実行")
+    sub.add_parser("demo", help="モックデータでデモ実行")
 
     args = parser.parse_args()
 
