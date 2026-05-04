@@ -148,7 +148,11 @@ def predict_race(model: lgb.LGBMClassifier, race_df: pd.DataFrame, feature_cols:
 def save_model(result: dict) -> Path:
     """モデルと設定を保存"""
     model_path = MODEL_DIR / "lgb_model.txt"
-    result["model"].booster_.save_model(str(model_path))
+    tmp_path = model_path.with_suffix(".tmp")
+    result["model"].booster_.save_model(str(tmp_path))
+    if model_path.exists():
+        model_path.unlink()
+    tmp_path.rename(model_path)
 
     meta = {
         "feature_cols": result["feature_cols"],
