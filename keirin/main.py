@@ -115,6 +115,7 @@ def _backtest_real(args, bet_types):
 
     races = []
     for (date, venue, rno), race_df in df_test.groupby(["date", "venue_code", "race_no"]):
+        race_df = race_df.drop_duplicates(subset="car_no", keep="first")
         winner_row = race_df[race_df["win"] == 1]
         if winner_row.empty:
             continue

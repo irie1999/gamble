@@ -104,6 +104,7 @@ def pick_bets(
     cfg = BET_CONFIG.get(bet_type, BET_CONFIG["win"])
     min_edge, kelly_frac, max_combos, top_n = cfg
 
+    pred_df = pred_df.drop_duplicates(subset=no_col, keep="first")
     nos = pred_df[no_col].astype(int).tolist()
     probs = pred_df["win_prob"].values.astype(float)
     probs = probs / probs.sum()

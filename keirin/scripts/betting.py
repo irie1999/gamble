@@ -108,6 +108,7 @@ def pick_bets(
             if not leaders.empty:
                 df = leaders
 
+    df = df.drop_duplicates(subset=no_col, keep="first")
     nos = df[no_col].astype(int).tolist()
     probs = df["win_prob"].values.astype(float)
     probs = probs / probs.sum()

@@ -273,12 +273,6 @@ def save_and_open(
     auto_open: bool = True,
 ) -> Path:
     """HTMLを保存してブラウザで開く"""
-    # win_flag を付与（selections[0] が winner と一致したか）
-    bets = session_data.get("bets", [])
-    winner_map = {b["race_id"]: b["selections"][0] for b in bets}
-    for b in bets:
-        b["win_flag"] = False  # JSON保存時は winner 情報がないため False で初期化
-
     html = generate_html(session_data, title=title)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
