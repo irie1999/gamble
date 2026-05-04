@@ -1,21 +1,22 @@
 """
-競輪データ収集モジュール
-keirin.jp の公式サイトからレース情報・選手成績・バンク情報を取得する
+競輪データ収集モジュール（楽天Kドリームス版）
+keirin.kdreams.jp から日別・場別のレース結果を収集する
 """
 
 import os
+import re
 import time
 import json
-import re
 import signal
 import threading
+import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://keirin.jp"
+BASE_URL = "https://keirin.kdreams.jp"
 DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -27,12 +28,9 @@ HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Referer": "https://keirin.jp/",
 }
 
-# 全国競輪場（KCDコード: 場名）
+# KCDコード -> 場名（日本語）
 VENUE_CODES = {
     "11": "函館",   "12": "青森",   "13": "いわき平", "21": "弥彦",
     "22": "前橋",   "23": "取手",   "24": "宇都宮",   "25": "大宮",
@@ -75,7 +73,7 @@ def _get_session() -> requests.Session:
     return _local.session
 
 
-def fetch(url: str, retries: int = 3, timeout: int = 10) -> BeautifulSoup | None:
+def fetch(url: str, retries: int = 3, timeout: int = 15) -> BeautifulSoup | None:
     session = _get_session()
     for i in range(retries):
         if _stop_event.is_set():
@@ -94,204 +92,159 @@ def fetch(url: str, retries: int = 3, timeout: int = 10) -> BeautifulSoup | None
     return None
 
 
-def fetch_race_list(venue_code: str, date: str) -> list[dict]:
-    """指定場・日付のレース番号一覧を取得"""
-    url = f"{BASE_URL}/pc/dfw/dataplaza/guest/racelist?KBI={date}&KCD={venue_code}"
+def fetch_daily_races(date_str: str) -> list[dict]:
+    """日付別の全レース一覧を取得 (date_str: YYYYMMDD)"""
+    url = f"{BASE_URL}/raceresult/{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}/"
     soup = fetch(url)
     if soup is None:
         return []
 
-    seen = set()
     races = []
-    # RNO= を含むリンクからレース番号を収集
-    for a in soup.select("a[href*='RNO=']"):
-        href = a.get("href", "")
-        m = re.search(r"RNO=(\d+)", href, re.IGNORECASE)
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "showResult" not in href:
+            continue
+        m = re.search(r"/(\w+)/racedetail/(\d{16})/", href)
+        if not m:
+            continue
+        slug, race_id = m.group(1), m.group(2)
+        if race_id in seen:
+            continue
+        seen.add(race_id)
+
+        kcd = race_id[:2]
+        date = race_id[2:10]
+        race_no = int(race_id[14:16])
+
+        races.append({
+            "venue_slug": slug,
+            "race_id": race_id,
+            "venue_code": kcd,
+            "venue_name": VENUE_CODES.get(kcd, slug),
+            "date": date,
+            "race_no": race_no,
+        })
+    return races
+
+
+def parse_rider_table(table) -> list[dict]:
+    """Table 0 から選手情報を抽出"""
+    rows = table.find_all("tr")
+    riders = []
+    for tr in rows[2:]:  # 最初の2行はヘッダー
+        cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+        if len(cols) < 23:
+            continue
+        try:
+            car_no = int(cols[4])
+        except (ValueError, IndexError):
+            continue
+
+        name_full = cols[5]
+        # "中島 淳埼　玉/26/125" → name + pref/age/term
+        m = re.match(r"(.+?)([^/]+)/(\d+)/(\d+)$", name_full)
         if m:
-            rno = int(m.group(1))
-            if rno not in seen:
-                seen.add(rno)
-                races.append({
-                    "venue_code": venue_code,
-                    "venue_name": VENUE_CODES.get(venue_code, ""),
-                    "date": date,
-                    "race_no": rno,
-                })
-    return sorted(races, key=lambda r: r["race_no"])
+            player_name = m.group(1).strip()
+            age = _safe_int(m.group(3))
+            term = _safe_int(m.group(4))
+        else:
+            player_name = name_full
+            age, term = None, None
+
+        rider = {
+            "car_no": car_no,
+            "player_name": player_name,
+            "age": age,
+            "term": term,
+            "class": cols[6],
+            "kakushitsu": cols[7],
+            "gear": _safe_float(cols[8]),
+            "kyosoten": _safe_float(cols[9]),
+            "win_rate": _safe_float(cols[20], divisor=100),
+            "second_rate": _safe_float(cols[21], divisor=100),
+            "third_rate": _safe_float(cols[22], divisor=100),
+        }
+        riders.append(rider)
+    return riders
 
 
-def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
-    """出走表（選手・ライン・クラス）を取得"""
-    url = (
-        f"{BASE_URL}/pc/dfw/dataplaza/guest/raceprogram"
-        f"?KCD={venue_code}&KST={date}&RNO={race_no}"
-    )
+def parse_result_table(table) -> list[dict]:
+    """Table 34 から着順を抽出"""
+    rows = table.find_all("tr")
+    finish = []
+    for tr in rows[1:]:
+        cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+        if len(cols) < 4:
+            continue
+        try:
+            rank = int(cols[1])
+            car_no = int(cols[2])
+            finish.append({"rank": rank, "car_no": car_no})
+        except (ValueError, IndexError):
+            continue
+    return finish
+
+
+def fetch_race_detail(race: dict) -> list[dict] | None:
+    """レース詳細から選手＋着順データを取得"""
+    url = f"{BASE_URL}/{race['venue_slug']}/racedetail/{race['race_id']}/?pageType=showResult"
     soup = fetch(url)
     if soup is None:
         return None
 
-    venue_name = VENUE_CODES.get(venue_code, "")
+    tables = soup.find_all("table")
+    if len(tables) < 35:
+        return None
+
+    riders = parse_rider_table(tables[0])
+    finish_order = parse_result_table(tables[34])
+    if not riders or not finish_order:
+        return None
+
+    venue_name = race["venue_name"]
     bank_length = BANK_LENGTH.get(venue_name, 400)
 
-    riders = []
-
-    # racecard_table クラスを優先、なければ tbody の tr を探す
-    table = soup.select_one(".racecard_table")
-    rows = table.select("tr") if table else soup.select("tbody tr")
-
-    for row in rows:
-        cols = row.select("td")
-        if len(cols) < 5:
-            continue
-        try:
-            car_no_text = cols[0].get_text(strip=True)
-            if not car_no_text.isdigit():
-                continue
-            car_no = int(car_no_text)
-
-            line_no_text = cols[1].get_text(strip=True)
-            line_no = int(line_no_text) if line_no_text.isdigit() else 0
-
-            player_name = cols[2].get_text(strip=True)
-            player_id_tag = cols[2].select_one("a")
-            player_id = ""
-            if player_id_tag:
-                href = player_id_tag.get("href", "")
-                m = re.search(r"(\d{4,5})", href)
-                if m:
-                    player_id = m.group(1)
-
-            class_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
-            win_rate = _safe_float(cols[4].get_text(strip=True)) if len(cols) > 4 else None
-            second_rate = _safe_float(cols[5].get_text(strip=True)) if len(cols) > 5 else None
-            third_rate = _safe_float(cols[6].get_text(strip=True)) if len(cols) > 6 else None
-
-            riders.append({
-                "car_no": car_no,
-                "line_no": line_no,
-                "player_id": player_id,
-                "player_name": player_name,
-                "class": class_text,
-                "win_rate": win_rate,
-                "second_rate": second_rate,
-                "third_rate": third_rate,
-            })
-        except Exception:
-            continue
-
-    if not riders:
-        return None
-
-    # ライン情報の付与
-    line_counts = {}
+    records = []
     for r in riders:
-        ln = r["line_no"]
-        line_counts[ln] = line_counts.get(ln, 0) + 1
-
-    for r in riders:
-        r["line_size"] = line_counts.get(r["line_no"], 1)
-        r["is_line_leader"] = 1 if r["line_no"] > 0 and r["car_no"] == min(
-            [x["car_no"] for x in riders if x["line_no"] == r["line_no"]]
-        ) else 0
-
-    return {
-        "venue_code": venue_code,
-        "venue_name": venue_name,
-        "bank_length": bank_length,
-        "date": date,
-        "race_no": race_no,
-        "riders": riders,
-    }
+        rank = next((f["rank"] for f in finish_order if f["car_no"] == r["car_no"]), None)
+        records.append({
+            **r,
+            "line_no": 0,
+            "line_size": 1,
+            "is_line_leader": 0,
+            "venue_code": race["venue_code"],
+            "venue_name": venue_name,
+            "bank_length": bank_length,
+            "date": race["date"],
+            "race_no": race["race_no"],
+            "rank": rank,
+            "win": 1 if rank == 1 else 0,
+        })
+    return records
 
 
-def fetch_race_result(venue_code: str, date: str, race_no: int) -> dict | None:
-    """レース結果（着順）を取得"""
-    url = (
-        f"{BASE_URL}/pc/dfw/dataplaza/guest/raceresult"
-        f"?KCD={venue_code}&KBI={date}&RNO={race_no}"
-    )
-    soup = fetch(url)
-    if soup is None:
-        return None
-
-    finish_order = []
-
-    table = soup.select_one(".result_table")
-    rows = table.select("tr") if table else soup.select("tbody tr")
-
-    for row in rows:
-        cols = row.select("td")
-        if len(cols) < 2:
-            continue
-        try:
-            rank_text = cols[0].get_text(strip=True)
-            car_text = cols[1].get_text(strip=True)
-            if not rank_text.isdigit() or not car_text.isdigit():
-                continue
-            finish_order.append({"rank": int(rank_text), "car_no": int(car_text)})
-        except Exception:
-            continue
-
-    if not finish_order:
-        return None
-
-    winner = next((r["car_no"] for r in finish_order if r["rank"] == 1), None)
-    return {
-        "venue_code": venue_code,
-        "date": date,
-        "race_no": race_no,
-        "finish_order": finish_order,
-        "winner": winner,
-    }
-
-
-def _collect_venue_day(
-    venue_code: str,
+def _collect_day(
     date_str: str,
     sleep_sec: float,
     stop_event: threading.Event,
-    jitter: float = 0.0,
 ) -> list[dict]:
-    """1場1日分のデータを収集（スレッド内で実行）"""
-    if jitter > 0:
-        time.sleep(jitter)
+    """1日分のデータを収集"""
     if stop_event.is_set():
         return []
 
-    race_list = fetch_race_list(venue_code, date_str)
-    if not race_list:
+    races = fetch_daily_races(date_str)
+    if not races:
         return []
 
     records = []
-    for race_info in race_list:
+    for race in races:
         if stop_event.is_set():
             break
-        rno = race_info["race_no"]
-        card = fetch_race_card(venue_code, date_str, rno)
-        result = fetch_race_result(venue_code, date_str, rno)
-
-        if card is None or result is None:
-            time.sleep(sleep_sec)
-            continue
-
-        for rider in card["riders"]:
-            cn = rider["car_no"]
-            rank = next(
-                (r["rank"] for r in result["finish_order"] if r["car_no"] == cn),
-                None,
-            )
-            records.append({
-                **rider,
-                "venue_code": venue_code,
-                "venue_name": card["venue_name"],
-                "bank_length": card["bank_length"],
-                "date": date_str,
-                "race_no": rno,
-                "rank": rank,
-                "win": 1 if rank == 1 else 0,
-            })
+        race_records = fetch_race_detail(race)
+        if race_records:
+            records.extend(race_records)
         time.sleep(sleep_sec)
-
     return records
 
 
@@ -318,16 +271,14 @@ def save_records(records: list[dict], filename: str = "raw_data.json") -> Path:
 def collect_data(
     start_date: str,
     end_date: str,
-    venue_codes: list[str] | None = None,
+    venue_codes: list[str] | None = None,  # 互換性のため残すが kdreams.jp では使用しない
     sleep_sec: float = 1.0,
     existing_records: list[dict] | None = None,
     checkpoint_days: int = 7,
     filename: str = "raw_data.json",
     workers: int = 4,
 ) -> list[dict]:
-    if venue_codes is None:
-        venue_codes = list(VENUE_CODES.keys())
-
+    """期間内の全レースデータを収集（kdreams.jp、日別並列）"""
     start = datetime.strptime(start_date, "%Y%m%d")
     end = datetime.strptime(end_date, "%Y%m%d")
     total_days = (end - start).days + 1
@@ -344,66 +295,76 @@ def collect_data(
         os._exit(0)
     signal.signal(signal.SIGINT, _handler)
 
-    avg_venues_per_day = 5
-    est_sec = total_days * max(1, avg_venues_per_day / workers) * 12 * 2 * sleep_sec
-    print(f"収集日数: {total_days}日  並列数: {workers}場  概算所要時間: {est_sec/3600:.1f}時間")
+    # 1日あたり概算: 5場×7レース×1リクエスト + 1リクエスト(一覧)
+    est_sec = total_days * (5 * 7 + 1) * sleep_sec / max(1, workers)
+    print(f"収集日数: {total_days}日  並列数: {workers}日  概算所要時間: {est_sec/3600:.1f}時間")
 
     days_done = 0
     current = start
-
-    while current <= end and not _stop_event.is_set():
-        date_str = current.strftime("%Y%m%d")
-        print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
-
-        import random
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(
-                    _collect_venue_day, vc, date_str, sleep_sec, _stop_event,
-                    jitter=i * sleep_sec * 0.5 + random.uniform(0, sleep_sec * 0.5),
-                ): vc
-                for i, vc in enumerate(venue_codes)
-            }
-            for future in as_completed(futures):
-                vc = futures[future]
-                if _stop_event.is_set():
-                    break
-                try:
-                    venue_records = future.result()
-                    if venue_records:
-                        n_races = len(set(r["race_no"] for r in venue_records))
-                        print(f"  {VENUE_CODES.get(vc, vc)}: {n_races}レース ({len(venue_records)}件)")
-                        with lock:
-                            records.extend(venue_records)
-                except Exception as e:
-                    print(f"  [エラー] {VENUE_CODES.get(vc, vc)}: {e}")
-
-        days_done += 1
-
-        if checkpoint_days > 0 and days_done % checkpoint_days == 0:
-            print(f"  [チェックポイント] {days_done}日完了 → 保存中...")
-            with lock:
-                save_records(records, filename)
-
+    date_list = []
+    while current <= end:
+        date_list.append(current.strftime("%Y%m%d"))
         current += timedelta(days=1)
+
+    # 日付を並列で処理
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {}
+        for i, date_str in enumerate(date_list):
+            if _stop_event.is_set():
+                break
+            jitter = i * sleep_sec * 0.3 + random.uniform(0, sleep_sec * 0.3)
+            futures[executor.submit(_collect_day_with_jitter,
+                                     date_str, sleep_sec, _stop_event, jitter)] = date_str
+
+        for future in as_completed(futures):
+            date_str = futures[future]
+            if _stop_event.is_set():
+                break
+            try:
+                day_records = future.result()
+                with lock:
+                    records.extend(day_records)
+                    n = len(day_records)
+                    days_done += 1
+                    print(f"  {date_str}: {n}件  [{days_done}/{total_days}日完了, 累計{len(records)}件]")
+
+                    if checkpoint_days > 0 and days_done % checkpoint_days == 0:
+                        print(f"  [チェックポイント] 保存中...")
+                        save_records(records, filename)
+            except Exception as e:
+                print(f"  [エラー] {date_str}: {e}")
 
     save_records(records, filename)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     return records
 
 
-def _safe_float(text: str) -> float | None:
+def _collect_day_with_jitter(date_str, sleep_sec, stop_event, jitter):
+    if jitter > 0:
+        time.sleep(jitter)
+    return _collect_day(date_str, sleep_sec, stop_event)
+
+
+def _safe_float(text: str, divisor: float = 1.0) -> float | None:
     try:
-        return float(text.replace(",", "").strip())
+        v = float(text.replace(",", "").strip())
+        return v / divisor
+    except Exception:
+        return None
+
+
+def _safe_int(text: str) -> int | None:
+    try:
+        return int(text.strip())
     except Exception:
         return None
 
 
 if __name__ == "__main__":
     today = datetime.now()
-    start = (today - timedelta(days=3)).strftime("%Y%m%d")
+    start = (today - timedelta(days=2)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     print(f"収集期間: {start} → {end}")
-    records = collect_data(start, end, sleep_sec=1.0, workers=4)
+    records = collect_data(start, end, sleep_sec=2.0, workers=2)
     if not records:
-        print("データが取得できませんでした（開催なし or ネットワークエラー）")
+        print("データが取得できませんでした")
