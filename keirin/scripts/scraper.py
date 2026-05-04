@@ -32,18 +32,19 @@ HEADERS = {
     "Referer": "https://keirin.jp/",
 }
 
-# 全国競輪場（場コード: 場名）
+# 全国競輪場（KCDコード: 場名）
 VENUE_CODES = {
-    "11": "函館", "12": "青森", "13": "いわき平", "14": "弥彦",
-    "15": "前橋", "16": "取手", "17": "宇都宮", "18": "大宮",
-    "19": "西武園", "20": "京王閣", "21": "立川", "22": "松戸",
-    "23": "千葉", "24": "川崎", "25": "平塚", "26": "小田原",
-    "27": "伊東", "28": "静岡", "29": "豊橋", "30": "岐阜",
-    "31": "大垣", "32": "四日市", "33": "松阪", "34": "奈良",
-    "35": "向日町", "36": "和歌山", "37": "岸和田", "38": "玉野",
-    "39": "広島", "40": "防府", "41": "高松", "42": "小松島",
-    "43": "高知", "44": "松山", "45": "小倉", "46": "久留米",
-    "47": "武雄", "48": "佐世保", "49": "別府", "50": "熊本",
+    "11": "函館",   "12": "青森",   "13": "いわき平", "21": "弥彦",
+    "22": "前橋",   "23": "取手",   "24": "宇都宮",   "25": "大宮",
+    "26": "西武園", "27": "京王閣", "28": "立川",     "31": "松戸",
+    "32": "千葉",   "34": "川崎",   "35": "平塚",     "36": "小田原",
+    "37": "伊東",   "38": "静岡",   "42": "名古屋",   "43": "岐阜",
+    "44": "大垣",   "45": "豊橋",   "46": "富山",     "47": "松阪",
+    "48": "四日市", "51": "福井",   "53": "奈良",     "54": "向日町",
+    "55": "和歌山", "56": "岸和田", "61": "玉野",     "62": "広島",
+    "63": "防府",   "71": "高松",   "73": "小松島",   "74": "高知",
+    "75": "松山",   "81": "小倉",   "83": "久留米",   "84": "武雄",
+    "85": "佐世保", "86": "別府",   "87": "熊本",
 }
 
 BANK_LENGTH = {
@@ -57,6 +58,7 @@ BANK_LENGTH = {
     "広島": 400, "防府": 400, "高松": 400, "小松島": 333,
     "高知": 333, "松山": 333, "小倉": 400, "久留米": 400,
     "武雄": 400, "佐世保": 400, "別府": 400, "熊本": 400,
+    "名古屋": 400, "富山": 400, "福井": 400,
 }
 
 CLASS_ORDER = ["S1", "S2", "A1", "A2", "A3", "B1"]
@@ -93,16 +95,18 @@ def fetch(url: str, retries: int = 3, timeout: int = 10) -> BeautifulSoup | None
 
 
 def fetch_race_list(venue_code: str, date: str) -> list[dict]:
-    url = f"{BASE_URL}/pc/guest/keirinschedule/raceprogram/?jcd={venue_code}&hd={date}"
+    """指定場・日付のレース番号一覧を取得"""
+    url = f"{BASE_URL}/pc/dfw/dataplaza/guest/racelist?KBI={date}&KCD={venue_code}"
     soup = fetch(url)
     if soup is None:
         return []
 
-    races = []
     seen = set()
-    for a in soup.select("a[href*='rno=']"):
+    races = []
+    # RNO= を含むリンクからレース番号を収集
+    for a in soup.select("a[href*='RNO=']"):
         href = a.get("href", "")
-        m = re.search(r"rno=(\d+)", href)
+        m = re.search(r"RNO=(\d+)", href, re.IGNORECASE)
         if m:
             rno = int(m.group(1))
             if rno not in seen:
@@ -113,13 +117,14 @@ def fetch_race_list(venue_code: str, date: str) -> list[dict]:
                     "date": date,
                     "race_no": rno,
                 })
-    return races
+    return sorted(races, key=lambda r: r["race_no"])
 
 
 def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
+    """出走表（選手・ライン・クラス）を取得"""
     url = (
-        f"{BASE_URL}/pc/guest/keirinschedule/raceprogram/racecard/"
-        f"?jcd={venue_code}&hd={date}&rno={race_no}"
+        f"{BASE_URL}/pc/dfw/dataplaza/guest/raceprogram"
+        f"?KCD={venue_code}&KST={date}&RNO={race_no}"
     )
     soup = fetch(url)
     if soup is None:
@@ -129,25 +134,36 @@ def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
     bank_length = BANK_LENGTH.get(venue_name, 400)
 
     riders = []
-    for row in soup.select("tbody tr"):
+
+    # racecard_table クラスを優先、なければ tbody の tr を探す
+    table = soup.select_one(".racecard_table")
+    rows = table.select("tr") if table else soup.select("tbody tr")
+
+    for row in rows:
         cols = row.select("td")
-        if len(cols) < 6:
+        if len(cols) < 5:
             continue
         try:
-            car_no = int(cols[0].get_text(strip=True))
+            car_no_text = cols[0].get_text(strip=True)
+            if not car_no_text.isdigit():
+                continue
+            car_no = int(car_no_text)
+
             line_no_text = cols[1].get_text(strip=True)
             line_no = int(line_no_text) if line_no_text.isdigit() else 0
+
             player_name = cols[2].get_text(strip=True)
             player_id_tag = cols[2].select_one("a")
             player_id = ""
             if player_id_tag:
-                m = re.search(r"toban=(\d+)", player_id_tag.get("href", ""))
+                href = player_id_tag.get("href", "")
+                m = re.search(r"(\d{4,5})", href)
                 if m:
                     player_id = m.group(1)
 
-            class_text = cols[3].get_text(strip=True)
-            win_rate = _safe_float(cols[4].get_text(strip=True))
-            second_rate = _safe_float(cols[5].get_text(strip=True))
+            class_text = cols[3].get_text(strip=True) if len(cols) > 3 else ""
+            win_rate = _safe_float(cols[4].get_text(strip=True)) if len(cols) > 4 else None
+            second_rate = _safe_float(cols[5].get_text(strip=True)) if len(cols) > 5 else None
             third_rate = _safe_float(cols[6].get_text(strip=True)) if len(cols) > 6 else None
 
             riders.append({
@@ -166,6 +182,7 @@ def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
     if not riders:
         return None
 
+    # ライン情報の付与
     line_counts = {}
     for r in riders:
         ln = r["line_no"]
@@ -188,23 +205,30 @@ def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
 
 
 def fetch_race_result(venue_code: str, date: str, race_no: int) -> dict | None:
+    """レース結果（着順）を取得"""
     url = (
-        f"{BASE_URL}/pc/guest/keirinschedule/raceresult/"
-        f"?jcd={venue_code}&hd={date}&rno={race_no}"
+        f"{BASE_URL}/pc/dfw/dataplaza/guest/raceresult"
+        f"?KCD={venue_code}&KBI={date}&RNO={race_no}"
     )
     soup = fetch(url)
     if soup is None:
         return None
 
     finish_order = []
-    for row in soup.select("tbody tr"):
+
+    table = soup.select_one(".result_table")
+    rows = table.select("tr") if table else soup.select("tbody tr")
+
+    for row in rows:
         cols = row.select("td")
         if len(cols) < 2:
             continue
         try:
-            rank = int(cols[0].get_text(strip=True))
-            car_no = int(cols[1].get_text(strip=True))
-            finish_order.append({"rank": rank, "car_no": car_no})
+            rank_text = cols[0].get_text(strip=True)
+            car_text = cols[1].get_text(strip=True)
+            if not rank_text.isdigit() or not car_text.isdigit():
+                continue
+            finish_order.append({"rank": int(rank_text), "car_no": int(car_text)})
         except Exception:
             continue
 
@@ -233,6 +257,7 @@ def _collect_venue_day(
         time.sleep(jitter)
     if stop_event.is_set():
         return []
+
     race_list = fetch_race_list(venue_code, date_str)
     if not race_list:
         return []
@@ -300,10 +325,6 @@ def collect_data(
     filename: str = "raw_data.json",
     workers: int = 4,
 ) -> list[dict]:
-    """
-    期間内の全レースデータを並列収集する
-    workers: 同時並行で処理する場の数（デフォルト4）
-    """
     if venue_codes is None:
         venue_codes = list(VENUE_CODES.keys())
 
