@@ -159,15 +159,17 @@ def fetch_daily_schedule(date_str: str) -> list[dict]:
 
 
 def parse_rider_table(table) -> list[dict]:
-    """Table 0 から選手情報を抽出"""
+    """選手情報テーブルを解析。car_no が col[4] にある行を対象とする"""
     rows = table.find_all("tr")
     riders = []
-    for tr in rows[2:]:  # 最初の2行はヘッダー
+    for tr in rows:
         cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
         if len(cols) < 23:
             continue
         try:
             car_no = int(cols[4])
+            if not (1 <= car_no <= 9):
+                continue
         except (ValueError, IndexError):
             continue
 
@@ -199,21 +201,49 @@ def parse_rider_table(table) -> list[dict]:
     return riders
 
 
+def _find_rider_table(tables) -> list[dict]:
+    """全テーブルをスキャンして最も多くのライダーを含むテーブルを返す"""
+    best = []
+    for table in tables:
+        riders = parse_rider_table(table)
+        if len(riders) > len(best):
+            best = riders
+    return best
+
+
 def parse_result_table(table) -> list[dict]:
-    """Table 34 から着順を抽出"""
+    """着順テーブルを解析。rank=1-9, car_no=1-9 の行を対象とする"""
     rows = table.find_all("tr")
     finish = []
-    for tr in rows[1:]:
+    for tr in rows:
         cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-        if len(cols) < 4:
+        if len(cols) < 3:
             continue
-        try:
-            rank = int(cols[1])
-            car_no = int(cols[2])
-            finish.append({"rank": rank, "car_no": car_no})
-        except (ValueError, IndexError):
-            continue
+        # Try both (cols[0],cols[1]) and (cols[1],cols[2]) as rank/car_no positions
+        for ri, ci in [(0, 1), (1, 2)]:
+            try:
+                rank = int(cols[ri])
+                car_no = int(cols[ci])
+                if 1 <= rank <= 9 and 1 <= car_no <= 9:
+                    finish.append({"rank": rank, "car_no": car_no})
+                    break
+            except (ValueError, IndexError):
+                continue
     return finish
+
+
+def _find_result_table(tables) -> list[dict]:
+    """全テーブルをスキャンして最も完全な着順テーブルを返す"""
+    best = []
+    for table in tables:
+        finish = parse_result_table(table)
+        # 有効な着順セット（重複なし、1位が存在する）
+        ranks = {f["rank"] for f in finish}
+        cars = {f["car_no"] for f in finish}
+        if len(finish) >= 3 and len(ranks) == len(finish) and len(cars) == len(finish) and 1 in ranks:
+            if len(finish) > len(best):
+                best = finish
+    return best
 
 
 def parse_lineup_text(text: str) -> dict[int, dict]:
@@ -389,7 +419,7 @@ def fetch_entry_detail(race: dict) -> list[dict] | None:
         tables = soup.find_all("table")
         if not tables:
             continue
-        riders = parse_rider_table(tables[0])
+        riders = _find_rider_table(tables)
         if riders:
             soup_used = soup
             break
@@ -428,11 +458,8 @@ def fetch_race_detail(race: dict) -> list[dict] | None:
         return None
 
     tables = soup.find_all("table")
-    if len(tables) < 35:
-        return None
-
-    riders = parse_rider_table(tables[0])
-    finish_order = parse_result_table(tables[34])
+    riders = _find_rider_table(tables)
+    finish_order = _find_result_table(tables)
     if not riders or not finish_order:
         return None
 
@@ -505,29 +532,31 @@ def _collect_day(
     date_str: str,
     sleep_sec: float,
     stop_event: threading.Event,
-) -> tuple[list[dict], dict]:
-    """1日分のデータを収集。戻り値: (records, {race_id: odds})"""
+) -> tuple[list[dict], dict, int]:
+    """1日分のデータを収集。戻り値: (records, {race_id: odds}, detail_races_count)"""
     if stop_event.is_set():
-        return [], {}
+        return [], {}, 0
 
     races = fetch_daily_races(date_str)
     if not races:
-        return [], {}
+        return [], {}, 0
 
     records = []
     odds_day = {}
+    detail_races = 0
     for race in races:
         if stop_event.is_set():
             break
         race_records = fetch_race_detail(race)
         if race_records:
             records.extend(race_records)
+            detail_races += 1
         # オッズ取得（単勝・複勝・2連単・2連複）
         odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
         if odds:
             odds_day[race["race_id"]] = odds
         time.sleep(sleep_sec)
-    return records, odds_day
+    return records, odds_day, detail_races
 
 
 def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], str | None]:
@@ -604,13 +633,13 @@ def collect_data(
             if _stop_event.is_set():
                 break
             try:
-                day_records, day_odds = future.result()
+                day_records, day_odds, detail_races = future.result()
                 with lock:
                     records.extend(day_records)
                     all_odds.update(day_odds)
                     n = len(day_records)
                     days_done += 1
-                    print(f"  {date_str}: {n}件 オッズ{len(day_odds)}レース  [{days_done}/{total_days}日完了, 累計{len(records)}件]")
+                    print(f"  {date_str}: {n}件 ({detail_races}R結果/オッズ{len(day_odds)}R)  [{days_done}/{total_days}日完了, 累計{len(records)}件]")
 
                     if checkpoint_days > 0 and days_done % checkpoint_days == 0:
                         print(f"  [チェックポイント] 保存中...")
