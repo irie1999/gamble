@@ -202,14 +202,24 @@ def parse_rider_table(table) -> list[dict]:
     return riders
 
 
+def _is_valid_rider_set(riders: list[dict]) -> bool:
+    """有効なレース選手セットか確認: 車番1始まり連続・重複なし・6〜9人"""
+    if not riders:
+        return False
+    car_nos = sorted(r["car_no"] for r in riders)
+    n = len(car_nos)
+    return (6 <= n <= 9 and
+            len(car_nos) == len(set(car_nos)) and  # 重複なし
+            car_nos == list(range(1, n + 1)))        # 1,2,...,N
+
+
 def _find_rider_table(tables) -> list[dict]:
-    """全テーブルをスキャンして最も多くのライダーを含むテーブルを返す"""
-    best = []
+    """有効な選手テーブル（車番1〜N連続・重複なし）を最初に返す"""
     for table in tables:
         riders = parse_rider_table(table)
-        if len(riders) > len(best):
-            best = riders
-    return best
+        if _is_valid_rider_set(riders):
+            return riders
+    return []
 
 
 def parse_result_table(table) -> list[dict]:
@@ -234,17 +244,17 @@ def parse_result_table(table) -> list[dict]:
 
 
 def _find_result_table(tables) -> list[dict]:
-    """全テーブルをスキャンして最も完全な着順テーブルを返す"""
-    best = []
+    """有効な着順テーブル（rank/car_no ともに重複なし・1位あり・3〜9人）を最初に返す"""
     for table in tables:
         finish = parse_result_table(table)
-        # 有効な着順セット（重複なし、1位が存在する）
         ranks = {f["rank"] for f in finish}
         cars = {f["car_no"] for f in finish}
-        if len(finish) >= 3 and len(ranks) == len(finish) and len(cars) == len(finish) and 1 in ranks:
-            if len(finish) > len(best):
-                best = finish
-    return best
+        if (len(finish) >= 3 and
+                len(ranks) == len(finish) and
+                len(cars) == len(finish) and
+                1 in ranks):
+            return finish
+    return []
 
 
 def parse_lineup_text(text: str) -> dict[int, dict]:
@@ -304,8 +314,8 @@ def parse_odds_table(soup, bet_type: str) -> dict:
     tables = soup.find_all("table")
 
     if bet_type in ("win", "place"):
-        # 全テーブルからcar_no→oddsのマッピングを持つものを全て収集
-        all_candidates = []
+        # 単勝・複勝はページ別URL。car_no→odds テーブルを探す。
+        # 有効条件: 3〜9エントリ (1レース分), オッズは1.0〜99.9
         for table in tables:
             t_odds: dict = {}
             for tr in table.find_all("tr"):
@@ -314,20 +324,10 @@ def parse_odds_table(soup, bet_type: str) -> dict:
                     continue
                 car = _safe_int(cols[0])
                 val = _safe_float(cols[-1])
-                if car and val and val > 1.0:
+                if car and val and 1.0 < val < 100.0:
                     t_odds[(car,)] = val
-            if len(t_odds) >= 3:
-                all_candidates.append(t_odds)
-
-        if not all_candidates:
-            return odds
-
-        if bet_type == "win":
-            # 単勝は最も高いオッズ平均を持つテーブル
-            return max(all_candidates, key=lambda d: sum(d.values()) / len(d))
-        else:
-            # 複勝は最も低いオッズ平均を持つテーブル（複勝オッズ < 単勝オッズ）
-            return min(all_candidates, key=lambda d: sum(d.values()) / len(d))
+            if 3 <= len(t_odds) <= 9:
+                return t_odds
 
     elif bet_type in ("exacta", "quinella"):
         for table in tables:
