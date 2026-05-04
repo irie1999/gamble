@@ -8,7 +8,7 @@ Usage:
 import json
 import sys
 from pathlib import Path
-from collections import defaultdict
+from collections import defaultdict, Counter
 
 DATA_DIR = Path(__file__).parent.parent / "data"
 
@@ -51,6 +51,14 @@ def show_day_summary(records, target_date):
     print(f"  レース数: {total_races}  選手数: {total_riders}  会場数: {len(venues)}")
     print(f"  平均選手/レース: {total_riders/total_races:.1f}")
 
+    # 選手数分布
+    race_sizes = [len(riders) for races in venues.values() for riders in races.values()]
+    size_dist = Counter(race_sizes)
+    print(f"\n  【レースあたり選手数の分布】")
+    for sz in sorted(size_dist):
+        bar = "█" * size_dist[sz]
+        print(f"    {sz}人: {size_dist[sz]:>3}レース  {bar}")
+
     # 欠損値チェック
     key_cols = ["car_no", "player_name", "class", "kyosoten", "win_rate", "rank", "win"]
     print(f"\n  【フィールド欠損チェック】")
@@ -66,14 +74,17 @@ def show_day_summary(records, target_date):
         ns = sum(len(v) for v in races.values())
         print(f"  {venue:<8} {nr:>6} {ns/nr:>6.1f}")
 
-    # 1レース分のサンプル表示
-    sample_venue = list(venues.keys())[0]
-    sample_rno = list(venues[sample_venue].keys())[0]
-    sample_riders = venues[sample_venue][sample_rno]
-    print(f"\n  【サンプル: {sample_venue} R{sample_rno}】")
-    print(f"  {'車番':>3} {'選手名':<10} {'クラス':<4} {'競走得点':>6} {'勝率':>5} {'着順':>4}")
-    for r in sorted(sample_riders, key=lambda x: x.get("car_no", 0)):
-        print(f"  {r.get('car_no','?'):>3} {r.get('player_name','?'):<10} "
+    # 1レース分のサンプル表示（9人レースがあればそれを優先）
+    best_venue, best_rno, best_riders = None, None, []
+    for venue, races in venues.items():
+        for rno, riders in races.items():
+            if len(riders) > len(best_riders):
+                best_venue, best_rno, best_riders = venue, rno, riders
+
+    print(f"\n  【サンプル: {best_venue} R{best_rno} ({len(best_riders)}人)】")
+    print(f"  {'車番':>3} {'選手名':<14} {'クラス':<4} {'競走得点':>6} {'勝率':>5} {'着順':>4}")
+    for r in sorted(best_riders, key=lambda x: x.get("car_no", 0)):
+        print(f"  {r.get('car_no','?'):>3} {r.get('player_name','?'):<14} "
               f"{r.get('class','?'):<4} {r.get('kyosoten') or '-':>6} "
               f"{(r.get('win_rate') or 0):.1%} {r.get('rank') or '?':>4}")
 
@@ -85,16 +96,34 @@ def show_odds_summary(odds_data, target_date):
         return
 
     print(f"\n  【オッズデータ: {len(day_odds)}レース】")
+
+    # 全レースの単勝・複勝平均を集計して比較
+    win_avgs, place_avgs = [], []
+    for d in day_odds.values():
+        if "win" in d:
+            vals = list(d["win"].values())
+            if vals:
+                win_avgs.append(sum(vals) / len(vals))
+        if "place" in d:
+            vals = list(d["place"].values())
+            if vals:
+                place_avgs.append(sum(vals) / len(vals))
+
+    if win_avgs and place_avgs:
+        wa = sum(win_avgs) / len(win_avgs)
+        pa = sum(place_avgs) / len(place_avgs)
+        status = "✓ 正常" if pa < wa else "✗ 異常（複勝 >= 単勝）"
+        print(f"  単勝平均オッズ: {wa:.2f}  複勝平均オッズ: {pa:.2f}  {status}")
+
+    # 1レース詳細サンプル
     sample_rid = list(day_odds.keys())[0]
     sample = day_odds[sample_rid]
-    print(f"  サンプル race_id: {sample_rid}")
-    print(f"  取得済み賭け式: {list(sample.keys())}")
+    print(f"\n  サンプル race_id: {sample_rid}")
     for bt, d in sample.items():
         vals = list(d.values())
         if vals:
-            print(f"    {bt}: {len(vals)}組合せ  "
-                  f"MIN={min(vals):.1f}  MAX={max(vals):.1f}  "
-                  f"AVG={sum(vals)/len(vals):.1f}")
+            print(f"    {bt:<10}: {len(vals):>3}組合せ  "
+                  f"MIN={min(vals):.1f}  MAX={max(vals):.1f}  AVG={sum(vals)/len(vals):.1f}")
 
 
 def main():
@@ -104,9 +133,8 @@ def main():
     if len(sys.argv) > 1:
         target = sys.argv[1]
     else:
-        # 最新日
-        dates = sorted({r["date"] for r in records})
-        target = dates[0]  # 最も古い日（最初に収集）
+        dates = sorted({r["date"] for r in records}, reverse=True)
+        target = dates[0]  # 最新日
         print(f"日付未指定: {target} を表示します")
 
     show_day_summary(records, target)
