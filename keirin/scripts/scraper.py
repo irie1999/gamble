@@ -45,6 +45,19 @@ VENUE_CODES = {
     "85": "佐世保", "86": "別府",   "87": "熊本",
 }
 
+# ライン先頭役割
+LEADER_ROLES = {"先行", "押え先行", "自力", "逃げ"}
+
+# 賭け式 → kdreams.jp kakeshikiType パラメータ
+ODDS_KAKESHIKI = {
+    "win":      "tanshyo",
+    "place":    "hukushyo",
+    "exacta":   "2rentan",
+    "quinella": "2hukurentan",
+    "trifecta": "3rentan",
+    "trio":     "3hukurentan",
+}
+
 BANK_LENGTH = {
     "函館": 333, "青森": 400, "いわき平": 400, "弥彦": 400,
     "前橋": 333, "取手": 400, "宇都宮": 333, "大宮": 400,
@@ -203,8 +216,171 @@ def parse_result_table(table) -> list[dict]:
     return finish
 
 
+def parse_lineup_text(text: str) -> dict[int, dict]:
+    """
+    "3先行 1追込 8追込 ｜ 2押え先行 7追込 9追込" を解析
+    Returns: {car_no: {line_no, line_size, is_line_leader}}
+    """
+    result = {}
+    groups = re.split(r'[｜|／]', text)
+    for line_no, group in enumerate(groups, 1):
+        tokens = re.findall(r'(\d+)(先行|押え先行|追込|自力|マーク|番手|逃げ|差し|捲り)?', group)
+        valid = [(int(c), r) for c, r in tokens if c.isdigit() and 1 <= int(c) <= 9]
+        for i, (car_no, role) in enumerate(valid):
+            is_leader = (i == 0) or bool(role and role in LEADER_ROLES)
+            result[car_no] = {
+                "line_no": line_no,
+                "line_size": len(valid),
+                "is_line_leader": 1 if is_leader else 0,
+            }
+    return result
+
+
+def parse_lineup_from_soup(soup) -> dict[int, dict]:
+    """HTMLから並び予想テキストを探して解析。見つからなければ空dict。"""
+    # kdreams.jp の並び予想はテキストノードまたはdivに含まれる
+    candidates = []
+
+    # テキストノードから探す
+    for node in soup.find_all(string=re.compile(r'\d+(?:先行|追込|押え先行)')):
+        candidates.append(node.strip())
+
+    # 要素のテキストから探す（div, p, td, span）
+    for tag in soup.find_all(['div', 'p', 'td', 'span', 'li']):
+        t = tag.get_text(strip=True)
+        if re.search(r'\d+(?:先行|追込)', t) and len(t) < 200:
+            candidates.append(t)
+
+    # 最もライン区切りが多いものを選ぶ
+    best, best_count = {}, 0
+    for text in candidates:
+        parsed = parse_lineup_text(text)
+        if len(parsed) > best_count:
+            best, best_count = parsed, len(parsed)
+
+    return best if best_count >= 3 else {}
+
+
+def parse_odds_table(soup, bet_type: str) -> dict:
+    """
+    オッズページのHTMLからオッズを抽出する。
+    Returns: {selection_tuple: odds_float}
+      単勝/複勝: {(car_no,): odds}
+      2連単/2連複: {(car1, car2): odds}
+      3連単/3連複: {(car1, car2, car3): odds}
+    """
+    odds: dict = {}
+    tables = soup.find_all("table")
+
+    if bet_type in ("win", "place"):
+        for table in tables:
+            for tr in table.find_all("tr"):
+                cols = [td.get_text(strip=True).replace(",", "") for td in tr.find_all(["td", "th"])]
+                if len(cols) < 2:
+                    continue
+                car = _safe_int(cols[0])
+                val = _safe_float(cols[-1])
+                if car and val and val > 1.0:
+                    odds[(car,)] = val
+            if len(odds) >= 3:
+                return odds
+
+    elif bet_type in ("exacta", "quinella"):
+        for table in tables:
+            rows = table.find_all("tr")
+            if len(rows) < 3:
+                continue
+            # ヘッダー行から列の車番を取得
+            header_cells = rows[0].find_all(["td", "th"])
+            col_cars = [_safe_int(c.get_text(strip=True)) for c in header_cells]
+            for tr in rows[1:]:
+                cells = tr.find_all(["td", "th"])
+                if not cells:
+                    continue
+                row_car = _safe_int(cells[0].get_text(strip=True))
+                if not row_car:
+                    continue
+                for j, td in enumerate(cells[1:], 1):
+                    if j >= len(col_cars) or not col_cars[j]:
+                        continue
+                    col_car = col_cars[j]
+                    if row_car == col_car:
+                        continue
+                    val = _safe_float(td.get_text(strip=True).replace(",", ""))
+                    if not val or val <= 1.0:
+                        continue
+                    if bet_type == "exacta":
+                        odds[(row_car, col_car)] = val
+                    else:
+                        key = tuple(sorted([row_car, col_car]))
+                        if key not in odds:
+                            odds[key] = val
+            if len(odds) >= 3:
+                return odds
+
+    elif bet_type in ("trifecta", "trio"):
+        # 3連系は1着ごとにページが分かれている場合があるため
+        # テーブルが巨大な場合はフラットに全セルを走査
+        for table in tables:
+            rows = table.find_all("tr")
+            if len(rows) < 3:
+                continue
+            header_cells = rows[0].find_all(["td", "th"])
+            col_cars = [_safe_int(c.get_text(strip=True)) for c in header_cells]
+            first_col_vals = [_safe_int(tr.find(["td","th"]).get_text(strip=True)) if tr.find(["td","th"]) else None for tr in rows[1:]]
+            if not any(first_col_vals):
+                continue
+            for tr, row_car in zip(rows[1:], first_col_vals):
+                if not row_car:
+                    continue
+                cells = tr.find_all(["td", "th"])
+                for j, td in enumerate(cells[1:], 1):
+                    if j >= len(col_cars) or not col_cars[j]:
+                        continue
+                    col_car = col_cars[j]
+                    val = _safe_float(td.get_text(strip=True).replace(",", ""))
+                    if not val or val <= 1.0:
+                        continue
+                    if bet_type == "trifecta":
+                        # row=1着, col=2着 (3着は不明のためスキップ)
+                        pass
+                    else:
+                        key = tuple(sorted([row_car, col_car]))
+                        # trio は3人組なので不完全 → スキップ
+                        pass
+            # trio/trifecta は3着情報が必要のため現時点ではスキップ
+            break
+
+    return odds
+
+
+def fetch_race_odds(race: dict, bet_types: list[str] | None = None) -> dict[str, dict]:
+    """
+    レースの実オッズを全賭け式分取得する。
+    Returns: {bet_type: {selection_tuple: odds}}
+    注: trifecta/trio は3着まで取得できないため省略
+    """
+    if bet_types is None:
+        bet_types = ["win", "place", "exacta", "quinella"]
+    result: dict[str, dict] = {}
+    for bt in bet_types:
+        ktype = ODDS_KAKESHIKI.get(bt)
+        if not ktype:
+            continue
+        url = (f"{BASE_URL}/{race['venue_slug']}/racedetail/{race['race_id']}/"
+               f"?pageType=odds&kakeshikiType={ktype}")
+        soup = fetch(url)
+        if soup is None:
+            continue
+        parsed = parse_odds_table(soup, bt)
+        if parsed:
+            result[bt] = parsed
+    return result
+
+
 def fetch_entry_detail(race: dict) -> list[dict] | None:
     """出走表から選手情報を取得（レース前・結果なし）"""
+    soup_used = None
     for page_type in ["", "?pageType=showEntry", "?pageType=showResult"]:
         url = f"{BASE_URL}/{race['venue_slug']}/racedetail/{race['race_id']}/{page_type}"
         soup = fetch(url)
@@ -215,9 +391,13 @@ def fetch_entry_detail(race: dict) -> list[dict] | None:
             continue
         riders = parse_rider_table(tables[0])
         if riders:
+            soup_used = soup
             break
     else:
         return None
+
+    # 並び予想を解析
+    lineup = parse_lineup_from_soup(soup_used) if soup_used else {}
 
     venue_name = race["venue_name"]
     bank_length = BANK_LENGTH.get(venue_name, 400)
@@ -225,9 +405,9 @@ def fetch_entry_detail(race: dict) -> list[dict] | None:
     return [
         {
             **r,
-            "line_no": 0,
-            "line_size": 1,
-            "is_line_leader": 0,
+            "line_no": lineup.get(r["car_no"], {}).get("line_no", 0),
+            "line_size": lineup.get(r["car_no"], {}).get("line_size", 1),
+            "is_line_leader": lineup.get(r["car_no"], {}).get("is_line_leader", 0),
             "venue_code": race["venue_code"],
             "venue_name": venue_name,
             "bank_length": bank_length,
@@ -256,17 +436,22 @@ def fetch_race_detail(race: dict) -> list[dict] | None:
     if not riders or not finish_order:
         return None
 
+    # 並び予想を解析
+    lineup = parse_lineup_from_soup(soup)
+
     venue_name = race["venue_name"]
     bank_length = BANK_LENGTH.get(venue_name, 400)
 
     records = []
     for r in riders:
-        rank = next((f["rank"] for f in finish_order if f["car_no"] == r["car_no"]), None)
+        car_no = r["car_no"]
+        rank = next((f["rank"] for f in finish_order if f["car_no"] == car_no), None)
+        linfo = lineup.get(car_no, {"line_no": 0, "line_size": 1, "is_line_leader": 0})
         records.append({
             **r,
-            "line_no": 0,
-            "line_size": 1,
-            "is_line_leader": 0,
+            "line_no": linfo["line_no"],
+            "line_size": linfo["line_size"],
+            "is_line_leader": linfo["is_line_leader"],
             "venue_code": race["venue_code"],
             "venue_name": venue_name,
             "bank_length": bank_length,

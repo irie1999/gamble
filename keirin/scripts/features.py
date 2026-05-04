@@ -36,6 +36,19 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce")
         df[col] = df[col].fillna(df[col].median())
 
+    race_key = ["date", "venue_code", "race_no"]
+
+    # --- 競走得点（kyosoten） ---
+    if "kyosoten" in df.columns:
+        df["kyosoten"] = pd.to_numeric(df["kyosoten"], errors="coerce")
+        df["kyosoten"] = df["kyosoten"].fillna(df["kyosoten"].median())
+        race_mean_ks = df.groupby(race_key)["kyosoten"].transform("mean")
+        race_std_ks = df.groupby(race_key)["kyosoten"].transform("std").replace(0, np.nan)
+        df["kyosoten_rel"] = (df["kyosoten"] - race_mean_ks) / race_std_ks.fillna(1)
+    else:
+        df["kyosoten"] = 0.0
+        df["kyosoten_rel"] = 0.0
+
     # 3着内率（勝率+2着率+3着率の代理）
     df["top3_rate"] = df["win_rate"] + df["second_rate"].fillna(0) + df["third_rate"].fillna(0)
 
@@ -45,7 +58,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["is_line_leader"] = pd.to_numeric(df["is_line_leader"], errors="coerce").fillna(0).astype(int)
 
     # ラインの平均勝率（ライン全体の強さ）
-    race_key = ["date", "venue_code", "race_no"]
     line_key = race_key + ["line_no"]
     line_mean_wr = df[df["line_no"] > 0].groupby(line_key)["win_rate"].transform("mean")
     df["line_avg_win_rate"] = line_mean_wr.fillna(df["win_rate"])
@@ -92,6 +104,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 FEATURE_COLS = [
     "car_no",
     "class_enc",
+    "kyosoten",
+    "kyosoten_rel",
     "win_rate",
     "second_rate",
     "third_rate",

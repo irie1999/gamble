@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
 from scraper import (
     collect_data, save_records, load_existing_records, VENUE_CODES,
-    fetch_daily_schedule, fetch_entry_detail,
+    fetch_daily_schedule, fetch_entry_detail, fetch_race_odds,
 )
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
@@ -273,10 +273,22 @@ def cmd_predict(args):
         })
 
         nos = df["car_no"].astype(int).tolist()
-        market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
-        market_p = np.clip(market_p, 0.01, 1)
-        market_p /= market_p.sum()
-        odds_dict = make_mock_odds(nos, market_p, bet_types, noise=0.0)
+
+        # 実オッズを取得（取れなければモックオッズにフォールバック）
+        real_odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
+        if real_odds:
+            odds_dict = real_odds
+            # trifecta/trio はモックで補完
+            market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
+            market_p = np.clip(market_p, 0.01, 1)
+            market_p /= market_p.sum()
+            mock = make_mock_odds(nos, market_p, [bt for bt in bet_types if bt not in real_odds], noise=0.0)
+            odds_dict.update(mock)
+        else:
+            market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
+            market_p = np.clip(market_p, 0.01, 1)
+            market_p /= market_p.sum()
+            odds_dict = make_mock_odds(nos, market_p, bet_types, noise=0.0)
 
         pred_sorted = pred_df.sort_values("win_prob", ascending=False)
         pred_str = " > ".join(
