@@ -325,7 +325,7 @@ def collect_data(
     days_done = 0
     current = start
 
-    while current <= end and not stop_event.is_set():
+    while current <= end and not _stop_event.is_set():
         date_str = current.strftime("%Y%m%d")
         print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
 
