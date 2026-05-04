@@ -7,7 +7,8 @@ import time
 import json
 import re
 import signal
-import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
@@ -18,7 +19,16 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; KeirinResearch/1.0)"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Referer": "https://keirin.jp/",
 }
 
 # 全国競輪場（場コード: 場名）
@@ -35,7 +45,6 @@ VENUE_CODES = {
     "47": "武雄", "48": "佐世保", "49": "別府", "50": "熊本",
 }
 
-# バンク周長別特性（短バンクほどインが有利）
 BANK_LENGTH = {
     "函館": 333, "青森": 400, "いわき平": 400, "弥彦": 400,
     "前橋": 333, "取手": 400, "宇都宮": 333, "大宮": 400,
@@ -51,21 +60,33 @@ BANK_LENGTH = {
 
 CLASS_ORDER = ["S1", "S2", "A1", "A2", "A3", "B1"]
 
+_local = threading.local()
 
-def fetch(url: str, retries: int = 3) -> BeautifulSoup | None:
+
+def _get_session() -> requests.Session:
+    if not hasattr(_local, "session"):
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        _local.session = s
+    return _local.session
+
+
+def fetch(url: str, retries: int = 3, timeout: int = 30) -> BeautifulSoup | None:
+    session = _get_session()
     for i in range(retries):
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
+            resp = session.get(url, timeout=timeout)
             resp.raise_for_status()
+            resp.encoding = resp.apparent_encoding or "utf-8"
             return BeautifulSoup(resp.text, "lxml")
         except Exception as e:
-            print(f"[fetch] {e} (試行 {i+1}/{retries})")
-            time.sleep(2 ** i)
+            wait = 2 ** i * 3
+            print(f"[fetch] {e} (試行 {i+1}/{retries}, {wait}秒待機)")
+            time.sleep(wait)
     return None
 
 
 def fetch_race_list(venue_code: str, date: str) -> list[dict]:
-    """指定場・日付のレース一覧を取得 (date: YYYYMMDD)"""
     url = f"{BASE_URL}/pc/guest/keirinschedule/raceprogram/?jcd={venue_code}&hd={date}"
     soup = fetch(url)
     if soup is None:
@@ -90,7 +111,6 @@ def fetch_race_list(venue_code: str, date: str) -> list[dict]:
 
 
 def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
-    """出走表（選手・ライン・クラス）を取得"""
     url = (
         f"{BASE_URL}/pc/guest/keirinschedule/raceprogram/racecard/"
         f"?jcd={venue_code}&hd={date}&rno={race_no}"
@@ -162,7 +182,6 @@ def fetch_race_card(venue_code: str, date: str, race_no: int) -> dict | None:
 
 
 def fetch_race_result(venue_code: str, date: str, race_no: int) -> dict | None:
-    """レース結果（着順）を取得"""
     url = (
         f"{BASE_URL}/pc/guest/keirinschedule/raceresult/"
         f"?jcd={venue_code}&hd={date}&rno={race_no}"
@@ -196,8 +215,51 @@ def fetch_race_result(venue_code: str, date: str, race_no: int) -> dict | None:
     }
 
 
+def _collect_venue_day(
+    venue_code: str,
+    date_str: str,
+    sleep_sec: float,
+    stop_event: threading.Event,
+) -> list[dict]:
+    """1場1日分のデータを収集（スレッド内で実行）"""
+    race_list = fetch_race_list(venue_code, date_str)
+    if not race_list:
+        return []
+
+    records = []
+    for race_info in race_list:
+        if stop_event.is_set():
+            break
+        rno = race_info["race_no"]
+        card = fetch_race_card(venue_code, date_str, rno)
+        result = fetch_race_result(venue_code, date_str, rno)
+
+        if card is None or result is None:
+            time.sleep(sleep_sec)
+            continue
+
+        for rider in card["riders"]:
+            cn = rider["car_no"]
+            rank = next(
+                (r["rank"] for r in result["finish_order"] if r["car_no"] == cn),
+                None,
+            )
+            records.append({
+                **rider,
+                "venue_code": venue_code,
+                "venue_name": card["venue_name"],
+                "bank_length": card["bank_length"],
+                "date": date_str,
+                "race_no": rno,
+                "rank": rank,
+                "win": 1 if rank == 1 else 0,
+            })
+        time.sleep(sleep_sec)
+
+    return records
+
+
 def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], str | None]:
-    """既存データを読み込み、最終収集日を返す"""
     path = DATA_DIR / filename
     if not path.exists():
         return [], None
@@ -225,12 +287,11 @@ def collect_data(
     existing_records: list[dict] | None = None,
     checkpoint_days: int = 7,
     filename: str = "raw_data.json",
+    workers: int = 4,
 ) -> list[dict]:
     """
-    期間内の全レースデータを収集してリストで返す
-    start_date / end_date: YYYYMMDD
-    existing_records: 既存データ（インクリメンタル収集時に渡す）
-    checkpoint_days:  N日ごとに中間保存する（0で無効）
+    期間内の全レースデータを並列収集する
+    workers: 同時並行で処理する場の数（デフォルト4）
     """
     if venue_codes is None:
         venue_codes = list(VENUE_CODES.keys())
@@ -240,75 +301,54 @@ def collect_data(
     total_days = (end - start).days + 1
 
     records = list(existing_records) if existing_records else []
+    lock = threading.Lock()
+    stop_event = threading.Event()
 
-    # Ctrl+C で中間保存して終了
-    interrupted = False
     def _handler(sig, frame):
-        nonlocal interrupted
-        interrupted = True
-        print("\n\n[中断] Ctrl+C を検知 → データを保存して終了します...")
+        print("\n\n[中断] Ctrl+C → 保存して終了します...")
+        stop_event.set()
     signal.signal(signal.SIGINT, _handler)
 
-    # 所要時間の概算（1日あたり平均5場×12レース×2リクエスト×sleep_sec）
-    est_sec = total_days * 5 * 12 * 2 * sleep_sec
-    est_h = est_sec / 3600
-    print(f"収集日数: {total_days}日  概算所要時間: {est_h:.1f}時間")
+    avg_venues_per_day = 5
+    est_sec = total_days * max(1, avg_venues_per_day / workers) * 12 * 2 * sleep_sec
+    print(f"収集日数: {total_days}日  並列数: {workers}場  概算所要時間: {est_sec/3600:.1f}時間")
 
     days_done = 0
     current = start
-    while current <= end and not interrupted:
+
+    while current <= end and not stop_event.is_set():
         date_str = current.strftime("%Y%m%d")
         print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
 
-        for venue_code in venue_codes:
-            if interrupted:
-                break
-            race_list = fetch_race_list(venue_code, date_str)
-            if not race_list:
-                continue
-            venue_name = VENUE_CODES.get(venue_code, venue_code)
-            print(f"  {venue_name}: {len(race_list)}レース")
-
-            for race_info in race_list:
-                if interrupted:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_collect_venue_day, vc, date_str, sleep_sec, stop_event): vc
+                for vc in venue_codes
+            }
+            for future in as_completed(futures):
+                vc = futures[future]
+                if stop_event.is_set():
                     break
-                rno = race_info["race_no"]
-                card = fetch_race_card(venue_code, date_str, rno)
-                result = fetch_race_result(venue_code, date_str, rno)
-
-                if card is None or result is None:
-                    time.sleep(sleep_sec)
-                    continue
-
-                for rider in card["riders"]:
-                    cn = rider["car_no"]
-                    rank = next(
-                        (r["rank"] for r in result["finish_order"] if r["car_no"] == cn),
-                        None,
-                    )
-                    records.append({
-                        **rider,
-                        "venue_code": venue_code,
-                        "venue_name": card["venue_name"],
-                        "bank_length": card["bank_length"],
-                        "date": date_str,
-                        "race_no": rno,
-                        "rank": rank,
-                        "win": 1 if rank == 1 else 0,
-                    })
-                time.sleep(sleep_sec)
+                try:
+                    venue_records = future.result()
+                    if venue_records:
+                        n_races = len(set(r["race_no"] for r in venue_records))
+                        print(f"  {VENUE_CODES.get(vc, vc)}: {n_races}レース ({len(venue_records)}件)")
+                        with lock:
+                            records.extend(venue_records)
+                except Exception as e:
+                    print(f"  [エラー] {VENUE_CODES.get(vc, vc)}: {e}")
 
         days_done += 1
 
-        # チェックポイント保存
         if checkpoint_days > 0 and days_done % checkpoint_days == 0:
             print(f"  [チェックポイント] {days_done}日完了 → 保存中...")
-            save_records(records, filename)
+            with lock:
+                save_records(records, filename)
 
         current += timedelta(days=1)
 
-    # 中断または完了時の最終保存
-    if interrupted or days_done > 0:
+    with lock:
         save_records(records, filename)
 
     signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -327,6 +367,6 @@ if __name__ == "__main__":
     start = (today - timedelta(days=3)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     print(f"収集期間: {start} → {end}")
-    records = collect_data(start, end, sleep_sec=1.5)
+    records = collect_data(start, end, sleep_sec=1.0, workers=4)
     if not records:
         print("データが取得できませんでした（開催なし or ネットワークエラー）")

@@ -66,6 +66,7 @@ def cmd_collect(args):
         existing_records=existing_records,
         checkpoint_days=7,
         filename="raw_data.json",
+        workers=args.workers,
     )
 
 
@@ -294,6 +295,8 @@ def main():
                            help="既存データを無視して全期間再収集")
     p_collect.add_argument("--sleep", type=float, default=1.5,
                            help="リクエスト間隔（秒、デフォルト: 1.5）")
+    p_collect.add_argument("--workers", type=int, default=4,
+                           help="並列処理数（デフォルト: 4）")
 
     sub.add_parser("train", help="モデル学習")
 
