@@ -24,12 +24,11 @@ from model import (
     train_evaluate, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config,
 )
-from betting import (
-    simulate_session, print_session_report, DEDUCTION_RATE,
-)
+from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
+from prob import ALL_BET_TYPES, BET_TYPE_NAMES
 
 DATA_DIR = Path(__file__).parent / "data"
 MODEL_DIR = Path(__file__).parent / "models"
@@ -70,15 +69,16 @@ def cmd_train(args):
 def cmd_backtest(args):
     raw_path = DATA_DIR / "raw_data.json"
     model_path = MODEL_DIR / "lgb_model.txt"
+    bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
     if raw_path.exists() and model_path.exists():
         print("実モデルでバックテスト実行...")
-        _backtest_real(args)
+        _backtest_real(args, bet_types)
     else:
         print("モデル or データが未作成のためモックデータでバックテスト実行...")
-        _backtest_mock(args)
+        _backtest_mock(args, bet_types)
 
 
-def _backtest_real(args):
+def _backtest_real(args, bet_types):
     import lightgbm as lgb
     booster, feature_cols, meta = load_model()
 
@@ -98,6 +98,7 @@ def _backtest_real(args):
         if winner_row.empty:
             continue
         winner = int(winner_row["car_no"].values[0])
+        finish = [winner] + [c for c in race_df["car_no"].tolist() if c != winner]
 
         X = race_df[[c for c in feature_cols if c in race_df.columns]].values
         probs = booster.predict(X)
@@ -107,73 +108,57 @@ def _backtest_real(args):
             "car_no": race_df["car_no"].values,
             "player_name": race_df["player_name"].values,
             "win_prob": probs,
-            "is_line_leader": race_df.get("is_line_leader", pd.Series([0] * len(race_df))).values,
-            "line_no": race_df.get("line_no", pd.Series([0] * len(race_df))).values,
+            "is_line_leader": race_df.get("is_line_leader", pd.Series([0]*len(race_df))).values,
+            "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
+        nos = race_df["car_no"].astype(int).tolist()
+        uniform_p = np.ones(len(nos)) / len(nos)
+        odds = make_mock_odds(nos, uniform_p, bet_types, noise=0.03)
+        races.append({"race_id": f"{date}_{venue}_{rno}", "pred_df": pred_df,
+                       "odds": odds, "finish_order": finish})
 
-        n = len(race_df)
-        dummy_odds = {j: round((1 - DEDUCTION_RATE) / (1 / n), 1) for j in race_df["car_no"].tolist()}
-
-        races.append({
-            "race_id": f"{date}_{venue}_{rno}",
-            "pred_df": pred_df,
-            "odds": dummy_odds,
-            "winner": winner,
-        })
-
-    session = simulate_session(
-        races,
-        initial_bankroll=args.bankroll,
-        min_edge=args.min_edge,
-        line_leader_only=args.line_leader,
-    )
+    session = simulate_session(races, initial_bankroll=args.bankroll,
+                               bet_types=bet_types, line_leader_only=args.line_leader)
     print_session_report(session)
     _save_results(session, html=getattr(args, "html", False))
 
 
-def _backtest_mock(args):
+def _backtest_mock(args, bet_types):
     np.random.seed(42)
     races = []
     for i in range(300):
         n = np.random.choice([7, 8, 9])
-        true_probs = np.random.dirichlet(np.ones(n) * 2)
-        winner = np.random.choice(range(1, n + 1), p=true_probs)
+        nos = list(range(1, n + 1))
+        true_p = np.random.dirichlet(np.ones(n) * 2)
+        finish = list(np.random.choice(nos, size=min(n, 3), replace=False, p=true_p))
+        while len(finish) < 3:
+            finish.append(nos[len(finish)])
 
-        market_probs = true_probs + np.random.normal(0, 0.03, n)
-        market_probs = np.clip(market_probs, 0.01, 1)
-        market_probs /= market_probs.sum()
+        market_p = true_p + np.random.normal(0, 0.03, n)
+        market_p = np.clip(market_p, 0.005, 1)
+        market_p /= market_p.sum()
 
-        pred_probs = true_probs + np.random.normal(0, 0.015, n)
-        pred_probs = np.clip(pred_probs, 0.005, 1)
-        pred_probs /= pred_probs.sum()
-
-        market_odds = {j: round((1 - DEDUCTION_RATE) / market_probs[j - 1], 1) for j in range(1, n + 1)}
+        pred_p = true_p + np.random.normal(0, 0.015, n)
+        pred_p = np.clip(pred_p, 0.005, 1)
+        pred_p /= pred_p.sum()
 
         line_configs = _generate_line_config(n)
         pred_df = pd.DataFrame({
             "car_no": [c for _, c in line_configs],
             "player_name": [f"選手{c}" for _, c in line_configs],
-            "win_prob": pred_probs[:len(line_configs)],
+            "win_prob": pred_p[:len(line_configs)],
             "is_line_leader": [
                 1 if c == min(cc for ll, cc in line_configs if ll == ln) and ln > 0 else 0
                 for ln, c in line_configs
             ],
             "line_no": [ln for ln, _ in line_configs],
         })
+        odds = make_mock_odds(nos, market_p, bet_types, noise=0.0)
+        races.append({"race_id": f"mock_{i+1:03d}", "pred_df": pred_df,
+                       "odds": odds, "finish_order": finish})
 
-        races.append({
-            "race_id": f"mock_{i+1:03d}",
-            "pred_df": pred_df,
-            "odds": market_odds,
-            "winner": winner,
-        })
-
-    session = simulate_session(
-        races,
-        initial_bankroll=args.bankroll,
-        min_edge=args.min_edge,
-        line_leader_only=args.line_leader,
-    )
+    session = simulate_session(races, initial_bankroll=args.bankroll,
+                               bet_types=bet_types, line_leader_only=args.line_leader)
     print_session_report(session)
     _save_results(session, "mock_backtest.json", html=getattr(args, "html", False))
 
@@ -256,30 +241,31 @@ def cmd_demo(args):
         if winner_row.empty:
             continue
         winner = int(winner_row["car_no"].values[0])
+        finish = [winner] + [c for c in race_df["car_no"].tolist() if c != winner]
 
         pred_df_race = predict_race(result["model"], race_df, result["feature_cols"])
 
         n = len(race_df)
-        # 市場オッズ：均等確率に少しノイズ（市場の非効率を模擬）
-        market_p = np.full(n, 1.0 / n) + np.random.normal(0, 0.02, n)
+        market_p = np.full(n, 1.0 / n) + np.random.normal(0, 0.03, n)
         market_p = np.clip(market_p, 0.01, 1)
         market_p /= market_p.sum()
-        car_nos = race_df["car_no"].tolist()
-        market_odds = {car_nos[i]: round((1 - DEDUCTION_RATE) / market_p[i], 1) for i in range(n)}
+        car_nos = race_df["car_no"].astype(int).tolist()
+        odds = make_mock_odds(car_nos, market_p, ALL_BET_TYPES, noise=0.0)
 
         races.append({
             "race_id": f"{date}_{rno}",
             "pred_df": pred_df_race,
-            "odds": market_odds,
-            "winner": winner,
+            "odds": odds,
+            "finish_order": finish,
         })
 
-    print("\n  全選手対象:")
-    session = simulate_session(races, initial_bankroll=50000, min_edge=0.05)
+    print("\n  全選手対象（全賭け式）:")
+    session = simulate_session(races, initial_bankroll=50000, bet_types=ALL_BET_TYPES)
     print_session_report(session)
 
-    print("\n  ライン先頭のみ:")
-    session2 = simulate_session(races, initial_bankroll=50000, min_edge=0.05, line_leader_only=True)
+    print("\n  ライン先頭のみ（全賭け式）:")
+    session2 = simulate_session(races, initial_bankroll=50000, bet_types=ALL_BET_TYPES,
+                                line_leader_only=True)
     print_session_report(session2)
 
     _save_results(session, "demo_result.json", html=True)
@@ -339,7 +325,8 @@ def main():
 
     p_bt = sub.add_parser("backtest", help="バックテスト")
     p_bt.add_argument("--bankroll", type=float, default=50000)
-    p_bt.add_argument("--min-edge", dest="min_edge", type=float, default=0.05)
+    p_bt.add_argument("--bet-types", dest="bet_types", type=str, default=None,
+                      help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
     p_bt.add_argument("--line-leader", dest="line_leader", action="store_true",
                       help="ライン先頭のみ対象")
     p_bt.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")

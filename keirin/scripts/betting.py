@@ -1,28 +1,43 @@
 """
 競輪ベッティング戦略モジュール
-Kelly基準で賭け金を最適化し、期待値プラスのレースのみ購入する
-競輪は7〜9人出走のため、控除率・ランダム基準が競艇と異なる
+単勝 / 複勝 / 2車単 / 2車複 / 3連単 / 3連複 に対応
+競輪固有のライン先頭フィルタも選択可能
 """
 
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES
 
-DEDUCTION_RATE = 0.25  # 競輪の控除率（約25%）
+DEDUCTION_RATE = 0.25
+
+# 賭け式ごとのデフォルト設定（競輪は出走人数が多いため少し厳しめ）
+BET_CONFIG = {
+    "win":      (0.05, 0.25, 1,  9),
+    "place":    (0.05, 0.20, 1,  9),
+    "exacta":   (0.07, 0.15, 3, 20),
+    "quinella": (0.07, 0.15, 3, 10),
+    "trifecta": (0.08, 0.10, 6, 30),
+    "trio":     (0.07, 0.12, 4, 15),
+}
 
 
 @dataclass
 class BettingResult:
     race_id: str
-    bet_type: str       # "win" / "exacta"
-    selections: tuple   # (車番, ...) の組み合わせ
+    bet_type: str
+    selections: tuple
     predicted_prob: float
     implied_prob: float
     edge: float
     odds: float
     bet_amount: int
     expected_value: float
+    win_flag: bool = False
 
 
 @dataclass
@@ -35,8 +50,8 @@ class SessionResult:
 
     @property
     def roi(self) -> float:
-        total_bet = sum(b.bet_amount for b in self.bets)
-        return (self.final_bankroll - self.initial_bankroll) / total_bet if total_bet > 0 else 0.0
+        tb = self.total_bet
+        return (self.final_bankroll - self.initial_bankroll) / tb if tb > 0 else 0.0
 
     @property
     def total_bet(self) -> int:
@@ -47,79 +62,83 @@ class SessionResult:
         return self.final_bankroll - self.initial_bankroll
 
 
-def kelly_fraction(prob: float, odds: float, fraction: float = 0.25) -> float:
-    """1/4ケリー基準（保守的）"""
+def kelly_fraction(prob: float, odds: float, frac: float) -> float:
     b = odds - 1.0
     q = 1.0 - prob
-    kelly = (b * prob - q) / b
-    return max(0.0, kelly) * fraction
+    k = (b * prob - q) / b if b > 0 else 0.0
+    return max(0.0, k) * frac
 
 
 def calc_bet_amount(
     bankroll: float,
     prob: float,
     odds: float,
+    kelly_frac: float,
+    max_ratio: float = 0.05,
+    max_amount: int = 3000,
     min_bet: int = 100,
-    max_bet_ratio: float = 0.05,
-    max_bet_amount: int = 3000,
-    kelly_frac: float = 0.25,
 ) -> int:
-    """
-    Kelly基準賭け金計算（100円単位）
-    max_bet_ratioとmax_bet_amountの小さい方で上限制限
-    """
-    fraction = kelly_fraction(prob, odds, kelly_frac)
-    amount = bankroll * fraction
-    upper = min(bankroll * max_bet_ratio, max_bet_amount)
+    frac = kelly_fraction(prob, odds, kelly_frac)
+    amount = bankroll * frac
+    upper = min(bankroll * max_ratio, max_amount)
     amount = min(amount, upper)
     return (int(max(0.0, amount)) // min_bet) * min_bet
 
 
-def evaluate_bet(
-    predicted_prob: float,
-    odds: float,
-    min_edge: float = 0.05,
-) -> tuple[bool, float, float]:
-    implied_prob = 1.0 / odds
-    edge = predicted_prob - implied_prob
-    expected_value = predicted_prob * odds
-    should_bet = edge >= min_edge and expected_value > 1.0
-    return should_bet, edge, expected_value
-
-
-def pick_best_win_bet(
+def pick_bets(
     pred_df: pd.DataFrame,
-    odds_dict: dict[int, float],
+    odds_dict: dict,
     bankroll: float,
-    min_edge: float = 0.05,
-    kelly_frac: float = 0.25,
+    bet_type: str = "win",
+    no_col: str = "car_no",
+    line_leader_only: bool = False,
 ) -> list[BettingResult]:
     """
-    単勝で期待値プラスの選手を選択してベット
-    pred_df: car_no, win_prob 列を持つDF（競輪は car_no）
+    賭け式に応じたベットを選択して返す
+    line_leader_only: Trueのときライン先頭選手のみ単勝・複勝の対象にする
     """
+    cfg = BET_CONFIG.get(bet_type, BET_CONFIG["win"])
+    min_edge, kelly_frac, max_combos, top_n = cfg
+
+    df = pred_df.copy()
+    # ライン先頭フィルタ（単勝・複勝のみ適用）
+    if line_leader_only and bet_type in ("win", "place"):
+        if "is_line_leader" in df.columns:
+            leaders = df[(df["is_line_leader"] == 1) | (df.get("line_no", 0) == 0)]
+            if not leaders.empty:
+                df = leaders
+
+    nos = df[no_col].astype(int).tolist()
+    probs = df["win_prob"].values.astype(float)
+    probs = probs / probs.sum()
+
+    candidates = top_combinations(probs, bet_type, nos, top_n=top_n)
+
     bets = []
-    for _, row in pred_df.iterrows():
-        car_no = int(row["car_no"])
-        prob = float(row["win_prob"])
-        odds = odds_dict.get(car_no)
+    for sel, pred_prob in candidates:
+        if len(bets) >= max_combos:
+            break
+        odds = odds_dict.get(sel) or odds_dict.get(sel[0] if len(sel) == 1 else sel)
         if odds is None or odds <= 1.0:
             continue
 
-        should_bet, edge, ev = evaluate_bet(prob, odds, min_edge)
-        if not should_bet:
+        implied = 1.0 / odds
+        edge = pred_prob - implied
+        ev = pred_prob * odds
+
+        if edge < min_edge or ev <= 1.0:
             continue
 
-        amount = calc_bet_amount(bankroll, prob, odds, kelly_frac=kelly_frac, max_bet_amount=3000)
+        amount = calc_bet_amount(bankroll, pred_prob, odds, kelly_frac)
         if amount < 100:
             continue
 
         bets.append(BettingResult(
             race_id="",
-            bet_type="win",
-            selections=(car_no,),
-            predicted_prob=prob,
-            implied_prob=1.0 / odds,
+            bet_type=bet_type,
+            selections=sel,
+            predicted_prob=pred_prob,
+            implied_prob=implied,
             edge=edge,
             odds=odds,
             bet_amount=amount,
@@ -129,62 +148,76 @@ def pick_best_win_bet(
     return bets
 
 
-def pick_line_leader_bet(
-    pred_df: pd.DataFrame,
-    odds_dict: dict[int, float],
-    bankroll: float,
-    min_edge: float = 0.05,
-    kelly_frac: float = 0.25,
-) -> list[BettingResult]:
-    """
-    ライン先頭選手のみを対象に単勝ベット（競輪固有戦略）
-    ライン先頭が最も有利なため、先頭に絞ることで的中率を上げる
-    """
-    if "is_line_leader" not in pred_df.columns:
-        return pick_best_win_bet(pred_df, odds_dict, bankroll, min_edge, kelly_frac)
+def check_win(bet: BettingResult, finish_order: list[int]) -> bool:
+    sel = bet.selections
+    bt = bet.bet_type
+    if len(finish_order) < 3:
+        return False
+    top1, top2, top3 = finish_order[0], finish_order[1], finish_order[2]
 
-    leaders = pred_df[(pred_df["is_line_leader"] == 1) | (pred_df.get("line_no", 0) == 0)]
-    return pick_best_win_bet(leaders, odds_dict, bankroll, min_edge, kelly_frac)
+    if bt == "win":
+        return sel[0] == top1
+    elif bt == "place":
+        return sel[0] in (top1, top2, top3)
+    elif bt == "exacta":
+        return sel[0] == top1 and sel[1] == top2
+    elif bt == "quinella":
+        return set(sel) == {top1, top2}
+    elif bt == "trifecta":
+        return sel[0] == top1 and sel[1] == top2 and sel[2] == top3
+    elif bt == "trio":
+        return set(sel) == {top1, top2, top3}
+    return False
 
 
 def simulate_session(
     races: list[dict],
-    initial_bankroll: float = 10000.0,
-    min_edge: float = 0.05,
-    kelly_frac: float = 0.25,
-    bet_type: str = "win",
+    initial_bankroll: float = 50000.0,
+    bet_types: list[str] | None = None,
     line_leader_only: bool = False,
+    no_col: str = "car_no",
 ) -> SessionResult:
     """
     バックテスト
-    races: [{"pred_df": ..., "odds": ..., "winner": int, ...}, ...]
-    line_leader_only: Trueのときラインリーダーのみ対象
+    races 各要素:
+      pred_df:       win_prob 付きDF
+      odds:          {bet_type: {sel_tuple: odds}}
+      finish_order:  [1着車番, 2着車番, 3着車番, ...]
+      race_id:       文字列
     """
+    if bet_types is None:
+        bet_types = ALL_BET_TYPES
+
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
 
     for race in races:
         pred_df = race["pred_df"]
-        odds = race["odds"]
-        winner = race["winner"]
+        odds_all = race["odds"]
+        finish_order = race["finish_order"]
         race_id = race.get("race_id", "")
 
-        if line_leader_only:
-            bets = pick_line_leader_bet(pred_df, odds, bankroll, min_edge, kelly_frac)
-        else:
-            bets = pick_best_win_bet(pred_df, odds, bankroll, min_edge, kelly_frac)
+        for bt in bet_types:
+            odds_dict = odds_all.get(bt, {})
+            if not odds_dict:
+                continue
 
-        for bet in bets:
-            bet.race_id = race_id
-            bankroll -= bet.bet_amount
+            new_bets = pick_bets(
+                pred_df, odds_dict, bankroll, bt, no_col, line_leader_only
+            )
 
-            if bet.bet_type == "win" and bet.selections[0] == winner:
-                bankroll += bet.bet_amount * bet.odds
-                session.wins += 1
-            else:
-                session.losses += 1
+            for bet in new_bets:
+                bet.race_id = race_id
+                bankroll -= bet.bet_amount
+                bet.win_flag = check_win(bet, finish_order)
 
-            session.bets.append(bet)
+                if bet.win_flag:
+                    bankroll += bet.bet_amount * bet.odds
+                    session.wins += 1
+                else:
+                    session.losses += 1
+
+                session.bets.append(bet)
 
     session.final_bankroll = bankroll
     return session
@@ -193,69 +226,116 @@ def simulate_session(
 def print_session_report(session: SessionResult) -> None:
     total = session.wins + session.losses
     win_rate = session.wins / total if total > 0 else 0
-    print(f"\n=== ベッティングセッション結果 ===")
+    print(f"\n{'='*55}")
+    print(f"  ベッティング結果")
+    print(f"{'='*55}")
     print(f"  初期資金:   {session.initial_bankroll:>10,.0f}円")
     print(f"  最終資金:   {session.final_bankroll:>10,.0f}円")
     print(f"  損益:       {session.profit:>+10,.0f}円")
     print(f"  ROI:        {session.roi:>+9.1%}")
     print(f"  総賭け金:   {session.total_bet:>10,.0f}円")
-    print(f"  賭け回数:   {total}回 (的中{session.wins}回 / 外れ{session.losses}回)")
+    print(f"  賭け回数:   {total}回  (的中{session.wins} / 外れ{session.losses})")
     print(f"  的中率:     {win_rate:.1%}")
-    if total > 0:
-        print(f"  平均賭け金: {session.total_bet/total:>10,.0f}円")
-    if session.bets:
-        evs = [b.expected_value for b in session.bets]
-        edges = [b.edge for b in session.bets]
-        print(f"\n  平均期待値: {np.mean(evs):.3f}倍")
-        print(f"  平均エッジ: {np.mean(edges):+.1%}")
+
+    by_type: dict[str, dict] = {}
+    for b in session.bets:
+        bt = b.bet_type
+        if bt not in by_type:
+            by_type[bt] = {"bets": 0, "wins": 0, "spent": 0, "payout": 0.0}
+        by_type[bt]["bets"] += 1
+        by_type[bt]["spent"] += b.bet_amount
+        if b.win_flag:
+            by_type[bt]["wins"] += 1
+            by_type[bt]["payout"] += b.bet_amount * b.odds
+
+    if by_type:
+        print(f"\n  {'賭け式':<8} {'回数':>5} {'的中':>5} {'的中率':>7} {'賭け金':>10} {'回収':>10} {'ROI':>8}")
+        print(f"  {'-'*56}")
+        for bt, d in by_type.items():
+            wr = d['wins'] / d['bets'] if d['bets'] else 0
+            roi = (d['payout'] - d['spent']) / d['spent'] if d['spent'] else 0
+            name = BET_TYPE_NAMES.get(bt, bt)
+            print(f"  {name:<8} {d['bets']:>5} {d['wins']:>5} {wr:>7.1%} "
+                  f"{d['spent']:>9,}円 {d['payout']:>9,.0f}円 {roi:>+7.1%}")
+
+
+def make_mock_odds(
+    nos: list[int],
+    probs: np.ndarray,
+    bet_types: list[str],
+    noise: float = 0.03,
+) -> dict[str, dict]:
+    from prob import (
+        win_prob, place_prob, exacta_prob, quinella_prob,
+        trifecta_prob, trio_prob,
+    )
+    from itertools import permutations, combinations
+
+    idx = {no: i for i, no in enumerate(nos)}
+    n = len(nos)
+    mp = probs + np.random.normal(0, noise, n)
+    mp = np.clip(mp, 0.005, 1)
+    mp = mp / mp.sum()
+
+    def to_odds(p: float) -> float:
+        return round((1 - DEDUCTION_RATE) / max(p, 0.005) * 10) / 10
+
+    result: dict[str, dict] = {}
+    for bt in bet_types:
+        d: dict = {}
+        if bt == "win":
+            for no in nos:
+                d[(no,)] = to_odds(win_prob(mp, idx[no]))
+        elif bt == "place":
+            for no in nos:
+                d[(no,)] = to_odds(place_prob(mp, idx[no]))
+        elif bt == "exacta":
+            for a, b in permutations(nos, 2):
+                d[(a, b)] = to_odds(exacta_prob(mp, idx[a], idx[b]))
+        elif bt == "quinella":
+            for a, b in combinations(nos, 2):
+                d[(a, b)] = to_odds(quinella_prob(mp, idx[a], idx[b]))
+        elif bt == "trifecta":
+            for a, b, c in permutations(nos, 3):
+                d[(a, b, c)] = to_odds(trifecta_prob(mp, idx[a], idx[b], idx[c]))
+        elif bt == "trio":
+            for combo in combinations(nos, 3):
+                a, b, c = combo
+                d[combo] = to_odds(trio_prob(mp, idx[a], idx[b], idx[c]))
+        result[bt] = d
+    return result
 
 
 if __name__ == "__main__":
-    np.random.seed(0)
+    np.random.seed(42)
 
-    # 競輪モックデータ（8人出走）
-    # 現実に近い設定：市場（オッズ）は群衆の推測、モデルは真の確率に近い
-    N_RIDERS = 8
     races = []
     for i in range(200):
-        # 真の勝率（実際に起こる確率）
-        true_probs = np.array([0.20, 0.16, 0.14, 0.13, 0.12, 0.10, 0.09, 0.06])
-        true_probs /= true_probs.sum()
-        winner = np.random.choice(range(1, N_RIDERS + 1), p=true_probs)
+        n = np.random.choice([7, 8, 9])
+        nos = list(range(1, n + 1))
+        true_p = np.random.dirichlet(np.ones(n) * 2)
+        finish = list(np.random.choice(nos, size=min(n, 3), replace=False, p=true_p))
+        while len(finish) < 3:
+            finish.append(nos[len(finish)])
 
-        # 市場確率（群衆の見立て）：人気馬を過大評価しがち
-        market_probs = true_probs + np.random.normal(0, 0.03, N_RIDERS)
-        market_probs = np.clip(market_probs, 0.01, 1)
-        market_probs /= market_probs.sum()
-
-        # オッズは市場確率から決まる（控除率25%込み）
-        market_odds = {j: round((1 - DEDUCTION_RATE) / market_probs[j - 1], 1)
-                       for j in range(1, N_RIDERS + 1)}
-
-        # モデル予測（真の確率に近い・ノイズは市場より小さい）
-        pred_probs = true_probs + np.random.normal(0, 0.015, N_RIDERS)
-        pred_probs = np.clip(pred_probs, 0.005, 1)
-        pred_probs /= pred_probs.sum()
+        pred_p = true_p + np.random.normal(0, 0.015, n)
+        pred_p = np.clip(pred_p, 0.005, 1)
+        pred_p /= pred_p.sum()
 
         pred_df = pd.DataFrame({
-            "car_no": range(1, N_RIDERS + 1),
-            "player_name": [f"選手{j}" for j in range(1, N_RIDERS + 1)],
-            "win_prob": pred_probs,
-            "is_line_leader": [1, 0, 0, 1, 0, 1, 0, 1],
-            "line_no": [1, 1, 1, 2, 2, 3, 3, 0],
+            "car_no": nos, "win_prob": pred_p,
+            "player_name": [f"選手{j}" for j in nos],
+            "is_line_leader": [1 if j % 3 == 1 else 0 for j in nos],
+            "line_no": [(j - 1) // 3 + 1 for j in nos],
         })
+        odds = make_mock_odds(nos, true_p, ALL_BET_TYPES, noise=0.03)
+        races.append({"race_id": f"mock_{i+1:03d}", "pred_df": pred_df,
+                       "odds": odds, "finish_order": finish})
 
-        races.append({
-            "race_id": f"mock_{i+1:03d}",
-            "pred_df": pred_df,
-            "odds": market_odds,
-            "winner": winner,
-        })
-
-    print("--- 全選手対象 ---")
-    session = simulate_session(races, initial_bankroll=50000, min_edge=0.05)
-    print_session_report(session)
-
-    print("\n--- ライン先頭のみ ---")
-    session2 = simulate_session(races, initial_bankroll=50000, min_edge=0.05, line_leader_only=True)
-    print_session_report(session2)
+    for bet_types in [["win"], ["trifecta"], ALL_BET_TYPES]:
+        label = " + ".join(BET_TYPE_NAMES[bt] for bt in bet_types)
+        print(f"\n{'━'*55}")
+        print(f"  賭け式: {label}")
+        print(f"{'━'*55}")
+        session = simulate_session(races, initial_bankroll=50000, bet_types=bet_types)
+        print_session_report(session)
