@@ -99,7 +99,7 @@ def fetch_payout(kcd: str, kbi: str, rno: int) -> dict | None:
         html = resp.text
 
         # ページ内のすべてのテーブルを取得
-        tables = pd.read_html(StringIO(html))
+        tables = pd.read_html(StringIO(html), flavor="lxml")
         print(f"テーブル数: {len(tables)}")
 
         for i, df in enumerate(tables):
@@ -136,8 +136,8 @@ def main():
         print("岐阜のKCDを探します（kdreams.jpでは venue_code=43）")
         test_date = "20260504"
 
-        # 岐阜が含まれているKCDを探す
-        for kcd in ["26", "27", "43"]:
+        # KCD=27 = 岐阜 (確認済み)
+        for kcd in ["27"]:
             url = f"{BASE_URL}?KCD={kcd}&KBI={test_date}&RNO=1"
             print(f"\n試行: KCD={kcd} → {url}")
             try:
@@ -151,10 +151,12 @@ def main():
                         print(f"  → 払戻データあり")
 
                     # テーブルを表示
-                    tables = pd.read_html(StringIO(resp.text))
+                    tables = pd.read_html(StringIO(resp.text), flavor="lxml")
                     print(f"  テーブル数: {len(tables)}")
-                    for i, df in enumerate(tables[:5]):
-                        print(f"    Table[{i}]: {df.shape} columns={list(df.columns)[:5]}")
+                    for i, df in enumerate(tables[:10]):
+                        print(f"    Table[{i}]: shape={df.shape}")
+                        print(df.to_string())
+                        print()
             except Exception as e:
                 print(f"  エラー: {e}")
         return
