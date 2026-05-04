@@ -95,16 +95,20 @@ def fetch_payout(kcd: str, kbi: str, rno: int) -> dict | None:
             print(f"アクセス失敗: {resp.status_code}")
             return None
 
-        resp.encoding = resp.apparent_encoding or "utf-8"
-        html = resp.text
+        import re as _re
+        html = _re.sub(r'<\?xml[^>]+\?>', '', resp.content.decode("utf-8", errors="replace"))
 
-        # ページ内のすべてのテーブルを取得
         tables = pd.read_html(StringIO(html), flavor="lxml")
         print(f"テーブル数: {len(tables)}")
 
+        payout_keywords = ["単勝", "複勝", "2車単", "2車複", "3連単", "3連複", "ワイド", "払戻"]
         for i, df in enumerate(tables):
-            print(f"\n  Table[{i}]: shape={df.shape}")
-            print(df.head(10).to_string())
+            text = df.to_string()
+            if any(kw in text for kw in payout_keywords):
+                print(f"\n  ★払戻関連 Table[{i}]: shape={df.shape}")
+                print(df.to_string())
+            else:
+                print(f"  Table[{i}]: shape={df.shape}  {str(list(df.columns))[:60]}")
 
         return tables
 
