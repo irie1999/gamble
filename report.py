@@ -8,6 +8,32 @@ from pathlib import Path
 from datetime import datetime
 
 
+VENUE_CODES = {
+    "11": "函館",   "12": "青森",   "13": "いわき平", "21": "弥彦",
+    "22": "前橋",   "23": "取手",   "24": "宇都宮",   "25": "大宮",
+    "26": "西武園", "27": "京王閣", "28": "立川",     "31": "松戸",
+    "32": "千葉",   "34": "川崎",   "35": "平塚",     "36": "小田原",
+    "37": "伊東",   "38": "静岡",   "42": "名古屋",   "43": "岐阜",
+    "44": "大垣",   "45": "豊橋",   "46": "富山",     "47": "松阪",
+    "48": "四日市", "51": "福井",   "53": "奈良",     "54": "向日町",
+    "55": "和歌山", "56": "岸和田", "61": "玉野",     "62": "広島",
+    "63": "防府",   "71": "高松",   "73": "小松島",   "74": "高知",
+    "75": "松山",   "81": "小倉",   "83": "久留米",   "84": "武雄",
+    "85": "佐世保", "86": "別府",   "87": "熊本",
+}
+
+
+def _format_race_id(race_id: str) -> str:
+    """20260416_31_1 → 松戸 2026-04-16 R1"""
+    parts = race_id.split("_")
+    if len(parts) == 3:
+        date, venue_code, race_no = parts
+        venue = VENUE_CODES.get(venue_code, venue_code)
+        d = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) == 8 else date
+        return f"{venue} {d} R{race_no}"
+    return race_id
+
+
 def generate_html(session_data: dict, title: str = "バックテスト結果") -> str:
     bets = session_data.get("bets", [])
     initial = session_data["initial_bankroll"]
@@ -47,7 +73,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
         bet_rows += f"""
         <tr class="{row_class}">
           <td>{i+1}</td>
-          <td>{b['race_id']}</td>
+          <td>{_format_race_id(b['race_id'])}</td>
           <td>{b['bet_type']}</td>
           <td>{b['selections']}</td>
           <td>{b['predicted_prob']:.3f}</td>
