@@ -221,7 +221,13 @@ def cmd_predict(args):
     booster, feature_cols, meta = load_model()
     mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
 
-    date_str = args.date or datetime.now().strftime("%Y%m%d")
+    if args.date:
+        date_str = args.date
+    elif getattr(args, "today", False):
+        date_str = datetime.now().strftime("%Y%m%d")
+    else:
+        # デフォルトは明日（出走表は前日公開のため）
+        date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
     bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
     bankroll = args.bankroll
 
@@ -733,9 +739,11 @@ def main():
 
     sub.add_parser("demo", help="デモ実行")
 
-    p_pred = sub.add_parser("predict", help="本日のシグナル生成")
+    p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日）")
     p_pred.add_argument("--date", type=str, default=None,
-                        help="対象日 YYYYMMDD（デフォルト: 今日）")
+                        help="対象日 YYYYMMDD（デフォルト: 明日）")
+    p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
+    p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（Kelly計算用、デフォルト: 50000）")
     p_pred.add_argument("--bet-types", dest="bet_types", type=str, default=None,
