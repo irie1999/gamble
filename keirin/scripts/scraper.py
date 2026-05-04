@@ -92,18 +92,13 @@ def fetch(url: str, retries: int = 3, timeout: int = 15) -> BeautifulSoup | None
     return None
 
 
-def fetch_daily_races(date_str: str) -> list[dict]:
-    """日付別の全レース一覧を取得 (date_str: YYYYMMDD)"""
-    url = f"{BASE_URL}/raceresult/{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}/"
-    soup = fetch(url)
-    if soup is None:
-        return []
-
+def _parse_race_links(soup, require_page_type: str | None = None) -> list[dict]:
+    """ページ内のレースリンクを解析して race dict のリストを返す"""
     races = []
     seen = set()
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if "showResult" not in href:
+        if require_page_type and require_page_type not in href:
             continue
         m = re.search(r"/(\w+)/racedetail/(\d{16})/", href)
         if not m:
@@ -125,6 +120,28 @@ def fetch_daily_races(date_str: str) -> list[dict]:
             "date": date,
             "race_no": race_no,
         })
+    return races
+
+
+def fetch_daily_races(date_str: str) -> list[dict]:
+    """日付別の全レース一覧を取得（結果確定済み）(date_str: YYYYMMDD)"""
+    url = f"{BASE_URL}/raceresult/{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}/"
+    soup = fetch(url)
+    if soup is None:
+        return []
+    return _parse_race_links(soup, require_page_type="showResult")
+
+
+def fetch_daily_schedule(date_str: str) -> list[dict]:
+    """日付別の全出走予定を取得（結果未確定も含む）(date_str: YYYYMMDD)"""
+    url = f"{BASE_URL}/raceresult/{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}/"
+    soup = fetch(url)
+    if soup is None:
+        return []
+    # まず結果リンクで取得、なければ全racedetailリンクを取得
+    races = _parse_race_links(soup, require_page_type="showResult")
+    if not races:
+        races = _parse_race_links(soup, require_page_type=None)
     return races
 
 
@@ -184,6 +201,43 @@ def parse_result_table(table) -> list[dict]:
         except (ValueError, IndexError):
             continue
     return finish
+
+
+def fetch_entry_detail(race: dict) -> list[dict] | None:
+    """出走表から選手情報を取得（レース前・結果なし）"""
+    for page_type in ["", "?pageType=showEntry", "?pageType=showResult"]:
+        url = f"{BASE_URL}/{race['venue_slug']}/racedetail/{race['race_id']}/{page_type}"
+        soup = fetch(url)
+        if soup is None:
+            continue
+        tables = soup.find_all("table")
+        if not tables:
+            continue
+        riders = parse_rider_table(tables[0])
+        if riders:
+            break
+    else:
+        return None
+
+    venue_name = race["venue_name"]
+    bank_length = BANK_LENGTH.get(venue_name, 400)
+
+    return [
+        {
+            **r,
+            "line_no": 0,
+            "line_size": 1,
+            "is_line_leader": 0,
+            "venue_code": race["venue_code"],
+            "venue_name": venue_name,
+            "bank_length": bank_length,
+            "date": race["date"],
+            "race_no": race["race_no"],
+            "rank": None,
+            "win": 0,
+        }
+        for r in riders
+    ]
 
 
 def fetch_race_detail(race: dict) -> list[dict] | None:

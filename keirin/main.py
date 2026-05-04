@@ -18,13 +18,16 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
-from scraper import collect_data, save_records, load_existing_records, VENUE_CODES
+from scraper import (
+    collect_data, save_records, load_existing_records, VENUE_CODES,
+    fetch_daily_schedule, fetch_entry_detail,
+)
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
     train_evaluate, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config,
 )
-from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds
+from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds, pick_bets
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
@@ -36,6 +39,185 @@ RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 CLASS_MAP_RATE = {"S1": 0.28, "S2": 0.22, "A1": 0.17, "A2": 0.13, "A3": 0.10, "B1": 0.07}
+
+
+def cmd_predict(args):
+    """今日の出走表からベッティングシグナルを生成"""
+    model_path = MODEL_DIR / "lgb_model.txt"
+    if not model_path.exists():
+        print("モデルが未学習です。先に `python main.py train` を実行してください")
+        return
+
+    booster, feature_cols, meta = load_model()
+    mean_auc = meta.get("metrics", {}).get("mean_auc", 0)
+
+    date_str = args.date or datetime.now().strftime("%Y%m%d")
+    bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
+    bankroll = args.bankroll
+
+    print(f"\n{'='*60}")
+    print(f"  競輪ベッティングシグナル  {date_str}")
+    print(f"  モデルAUC: {mean_auc:.4f}  資金: {bankroll:,.0f}円")
+    print(f"{'='*60}\n")
+
+    races = fetch_daily_schedule(date_str)
+    if not races:
+        print(f"{date_str} のレース情報が取得できませんでした")
+        print("※ネットワーク接続またはkdreams.jpへのアクセスを確認してください")
+        return
+
+    print(f"{len(races)}レース検出\n")
+
+    any_signal = False
+    signal_rows = []
+
+    for race in sorted(races, key=lambda r: (r["venue_code"], r["race_no"])):
+        records = fetch_entry_detail(race)
+        if not records:
+            continue
+
+        df = pd.DataFrame(records).drop_duplicates(subset="car_no", keep="first")
+        df_feat = build_features(df)
+
+        feat_cols_available = [c for c in feature_cols if c in df_feat.columns]
+        X = df_feat[feat_cols_available].fillna(0).values
+        if len(X) == 0:
+            continue
+
+        probs = booster.predict(X)
+        probs /= probs.sum()
+
+        pred_df = pd.DataFrame({
+            "car_no": df["car_no"].values,
+            "player_name": df["player_name"].values,
+            "win_prob": probs,
+            "is_line_leader": df["is_line_leader"].fillna(0).astype(int).values,
+            "line_no": df["line_no"].fillna(0).astype(int).values,
+        })
+
+        nos = df["car_no"].astype(int).tolist()
+        market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
+        market_p = np.clip(market_p, 0.01, 1)
+        market_p /= market_p.sum()
+        odds_dict = make_mock_odds(nos, market_p, bet_types, noise=0.0)
+
+        race_bets = []
+        for bt in bet_types:
+            bets = pick_bets(pred_df, odds_dict.get(bt, {}), bankroll, bt)
+            race_bets.extend(bets)
+
+        if not race_bets:
+            continue
+
+        any_signal = True
+        header = f"{race['venue_name']} R{race['race_no']}"
+        print(f"【{header}】")
+
+        pred_sorted = pred_df.sort_values("win_prob", ascending=False)
+        parts = []
+        for _, row in pred_sorted.iterrows():
+            parts.append(f"{int(row['car_no'])}番({row['win_prob']:.0%})")
+        print(f"  予測: {' > '.join(parts)}")
+
+        for b in race_bets:
+            bt_name = BET_TYPE_NAMES.get(b.bet_type, b.bet_type)
+            sels = list(b.selections)
+            print(f"  ▶ {bt_name} {sels}  オッズ{b.odds:.1f}倍  "
+                  f"推奨額 {b.bet_amount:,}円  エッジ {b.edge:+.3f}  EV {b.expected_value:.2f}")
+            signal_rows.append({
+                "venue": race["venue_name"],
+                "race_no": race["race_no"],
+                "bet_type": bt_name,
+                "selections": str(sels),
+                "odds": b.odds,
+                "bet_amount": b.bet_amount,
+                "edge": b.edge,
+                "ev": b.expected_value,
+                "pred_prob": b.predicted_prob,
+            })
+        print()
+
+    if not any_signal:
+        print("本日のシグナルはありません（エッジ不足）")
+        return
+
+    total_bet = sum(r["bet_amount"] for r in signal_rows)
+    print(f"合計推奨ベット額: {total_bet:,}円 / {len(signal_rows)}件")
+    print("\n⚠ オッズは過去勝率ベースの推定値です。実際のオッズで金額を調整してください。\n")
+
+    if args.html:
+        _save_signal_html(signal_rows, date_str, mean_auc, bankroll)
+
+
+def _save_signal_html(signal_rows: list[dict], date_str: str, auc: float, bankroll: float) -> None:
+    rows_html = ""
+    for r in signal_rows:
+        rows_html += f"""
+        <tr>
+          <td>{r['venue']} R{r['race_no']}</td>
+          <td>{r['bet_type']}</td>
+          <td>{r['selections']}</td>
+          <td>{r['pred_prob']:.1%}</td>
+          <td>{r['odds']:.1f}倍</td>
+          <td><span style="color:{'#4ade80' if r['edge']>=0 else '#f87171'}">{r['edge']:+.3f}</span></td>
+          <td>{r['ev']:.2f}</td>
+          <td><strong>{r['bet_amount']:,}円</strong></td>
+        </tr>"""
+
+    total = sum(r["bet_amount"] for r in signal_rows)
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head><meta charset="UTF-8"><title>競輪シグナル {date_str}</title>
+<style>
+  * {{box-sizing:border-box;margin:0;padding:0}}
+  body {{font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}}
+  .header {{background:#1e293b;padding:2rem;border-bottom:1px solid #334155}}
+  .header h1 {{font-size:1.6rem;font-weight:700}}
+  .header .sub {{color:#94a3b8;margin-top:.3rem;font-size:.9rem}}
+  .container {{max-width:1200px;margin:0 auto;padding:2rem}}
+  .kpi {{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
+  .kpi-card {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
+  .kpi-card .label {{font-size:.75rem;color:#64748b;text-transform:uppercase}}
+  .kpi-card .value {{font-size:1.4rem;font-weight:700;color:#f1f5f9;margin-top:.2rem}}
+  .section {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem}}
+  table {{width:100%;border-collapse:collapse;font-size:.88rem}}
+  th {{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
+  td {{padding:.55rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
+  tr:hover td {{background:#263347}}
+  .warn {{background:#1e3a2f;border:1px solid #166534;border-radius:8px;padding:1rem;margin-top:1.5rem;color:#4ade80;font-size:.88rem}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>📡 競輪ベッティングシグナル</h1>
+  <div class="sub">対象日: {date_str} ／ 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデルAUC: {auc:.4f}</div>
+</div>
+<div class="container">
+  <div class="kpi">
+    <div class="kpi-card"><div class="label">シグナル件数</div><div class="value">{len(signal_rows)}件</div></div>
+    <div class="kpi-card"><div class="label">合計推奨ベット額</div><div class="value">¥{total:,}</div></div>
+    <div class="kpi-card"><div class="label">資金</div><div class="value">¥{bankroll:,.0f}</div></div>
+  </div>
+  <div class="section">
+    <table>
+      <thead><tr>
+        <th>レース</th><th>賭け式</th><th>選択</th>
+        <th>予測P</th><th>オッズ(推定)</th><th>エッジ</th><th>EV</th><th>推奨額</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+  </div>
+  <div class="warn">
+    ⚠ オッズは過去勝率ベースの推定値です。実際のオッズを確認してから賭け額を調整してください。
+  </div>
+</div>
+</body></html>"""
+
+    path = RESULTS_DIR / f"signal_{date_str}.html"
+    path.write_text(html, encoding="utf-8")
+    print(f"シグナルレポート保存: {path}")
+    import webbrowser
+    webbrowser.open(path.as_uri())
 
 
 def cmd_collect(args):
@@ -366,6 +548,15 @@ def main():
 
     sub.add_parser("demo", help="デモ実行")
 
+    p_pred = sub.add_parser("predict", help="本日のシグナル生成")
+    p_pred.add_argument("--date", type=str, default=None,
+                        help="対象日 YYYYMMDD（デフォルト: 今日）")
+    p_pred.add_argument("--bankroll", type=float, default=50000,
+                        help="資金（Kelly計算用、デフォルト: 50000）")
+    p_pred.add_argument("--bet-types", dest="bet_types", type=str, default=None,
+                        help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
+    p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+
     args = parser.parse_args()
     if args.command == "collect":
         cmd_collect(args)
@@ -375,6 +566,8 @@ def main():
         cmd_backtest(args)
     elif args.command == "demo":
         cmd_demo(args)
+    elif args.command == "predict":
+        cmd_predict(args)
     else:
         parser.print_help()
 
