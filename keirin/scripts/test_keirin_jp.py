@@ -169,9 +169,6 @@ def main():
                             found = True
                     if not found:
                         print(f"  (払戻テーブルなし)")
-                        elif i < 5:
-                            print(f"\n  Table[{i}]: shape={df.shape}")
-                            print(df.head(3).to_string())
             except Exception as e:
                 print(f"  エラー: {e}")
         return
