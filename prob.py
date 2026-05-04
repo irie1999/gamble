@@ -76,6 +76,18 @@ def trio_prob(probs: np.ndarray, i: int, j: int, k: int) -> float:
     return min(float(p), 1.0)
 
 
+def wide_prob(probs: np.ndarray, i: int, j: int) -> float:
+    """ワイド：{i,j} が3着以内に両方入る"""
+    n = len(probs)
+    p = 0.0
+    for k in range(n):
+        if k == i or k == j:
+            continue
+        for perm in permutations([i, j, k]):
+            p += harville_p3(probs, *perm)
+    return min(float(p), 1.0)
+
+
 def top_combinations(
     probs: np.ndarray,
     bet_type: str,
@@ -122,6 +134,10 @@ def top_combinations(
             a, b, c = combo
             results.append((combo, trio_prob(p, idx[a], idx[b], idx[c])))
 
+    elif bet_type == "wide":
+        for a, b in combinations(nos, 2):
+            results.append(((a, b), wide_prob(p, idx[a], idx[b])))
+
     results.sort(key=lambda x: x[1], reverse=True)
     return results[:top_n] if top_n else results
 
@@ -134,9 +150,13 @@ BET_TYPE_NAMES = {
     "quinella": "2連複",
     "trifecta": "3連単",
     "trio":     "3連複",
+    "wide":     "ワイド",
 }
 
 ALL_BET_TYPES = list(BET_TYPE_NAMES.keys())
+
+# keirin.jpで実際に販売される賭け式（競輪標準）
+KEIRIN_BET_TYPES = ["trifecta", "trio", "wide"]
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ from betting import simulate_session, print_session_report, make_mock_odds, pick
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
-from prob import ALL_BET_TYPES, BET_TYPE_NAMES
+from prob import ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
 
 DATA_DIR = Path(__file__).parent / "data"
 MODEL_DIR = Path(__file__).parent / "models"
@@ -66,7 +66,7 @@ def cmd_compare(args):
     test_days = len(dates) - split_idx
 
     # 全賭け式でオッズを生成しておく（各戦略がサブセットを選ぶ）
-    races_full = _build_races(booster, feature_cols, df_test, ALL_BET_TYPES)
+    races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES)
 
     target_strategies = (
         args.strategies.split(",") if getattr(args, "strategies", None)
@@ -232,7 +232,7 @@ def cmd_predict(args):
     else:
         # デフォルトは明日（出走表は前日公開のため）
         date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
-    bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
+    bet_types = args.bet_types.split(",") if args.bet_types else KEIRIN_BET_TYPES
     bankroll = args.bankroll
 
     print(f"\n{'='*60}")
@@ -295,7 +295,7 @@ def cmd_predict(args):
 
         # フォールバック: kdreams.jp スクレイピング
         if not odds_dict:
-            odds_dict = fetch_race_odds(race, bet_types=["exacta", "quinella"])
+            odds_dict = fetch_race_odds(race, bet_types=["trifecta", "trio", "wide"])
 
         if not odds_dict:
             continue
@@ -502,7 +502,7 @@ def cmd_train(args):
 def cmd_backtest(args):
     raw_path = DATA_DIR / "raw_data.json"
     model_path = MODEL_DIR / "lgb_model.txt"
-    bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
+    bet_types = args.bet_types.split(",") if args.bet_types else KEIRIN_BET_TYPES
     if not raw_path.exists():
         print("データがありません。先に `python main.py collect` を実行してください")
         return

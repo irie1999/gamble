@@ -1,6 +1,6 @@
 """
 競輪ベッティング戦略モジュール
-単勝 / 複勝 / 2車単 / 2車複 / 3連単 / 3連複 に対応
+3連単 / 3連複 / ワイド に対応（keirin.jpで実際に販売される賭け式）
 競輪固有のライン先頭フィルタも選択可能
 """
 
@@ -11,7 +11,7 @@ import pandas as pd
 from dataclasses import dataclass, field
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES
+from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES, KEIRIN_BET_TYPES
 
 DEDUCTION_RATE = 0.25
 
@@ -21,75 +21,64 @@ BET_CONFIG = {
     "place":    (0.05, 0.20, 1,  9),
     "exacta":   (0.07, 0.15, 3, 20),
     "quinella": (0.07, 0.15, 3, 10),
-    "trifecta": (0.08, 0.10, 6, 30),
-    "trio":     (0.07, 0.12, 4, 15),
+    "trifecta": (0.08, 0.10, 5, 30),
+    "trio":     (0.07, 0.12, 3, 15),
+    "wide":     (0.05, 0.15, 3, 10),
 }
 
 # ---- 戦略プリセット ----
 # 各戦略: bet_config / bet_types / line_leader_only / min_odds / max_odds
+# keirin.jpで実際に販売される賭け式: trifecta / trio / wide
 STRATEGIES: dict[str, dict] = {
-    "conservative": {
-        "description": "堅実：高エッジ・小Kelly・単勝複勝のみ",
-        "bet_types": ["win", "place"],
+    "balanced": {
+        "description": "バランス：3連単・3連複・ワイド（標準）",
+        "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
         "min_odds": 1.0, "max_odds": 9999,
-        "bet_config": {
-            "win":   (0.10, 0.15, 1, 5),
-            "place": (0.10, 0.10, 1, 5),
-        },
+        "bet_config": BET_CONFIG,
     },
-    "balanced": {
-        "description": "バランス：デフォルト設定・全賭け式",
-        "bet_types": ALL_BET_TYPES,
+    "trifecta_only": {
+        "description": "3連単のみ：高配当狙い",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": {"trifecta": (0.08, 0.10, 5, 30)},
+    },
+    "trio_wide": {
+        "description": "3連複＋ワイド：堅実連複",
+        "bet_types": ["trio", "wide"],
         "line_leader_only": False,
         "min_odds": 1.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
     },
     "aggressive": {
         "description": "積極：低エッジ閾値・大Kelly・全賭け式",
-        "bet_types": ALL_BET_TYPES,
+        "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
         "min_odds": 1.0, "max_odds": 9999,
         "bet_config": {
-            "win":      (0.03, 0.35, 2,  9),
-            "place":    (0.03, 0.30, 2,  9),
-            "exacta":   (0.04, 0.25, 5, 30),
-            "quinella": (0.04, 0.25, 5, 20),
             "trifecta": (0.04, 0.20, 8, 50),
             "trio":     (0.04, 0.20, 5, 25),
+            "wide":     (0.03, 0.25, 5, 15),
         },
     },
-    "single_only": {
-        "description": "単系：単勝・複勝のみ（標準設定）",
-        "bet_types": ["win", "place"],
-        "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
-        "bet_config": BET_CONFIG,
-    },
-    "combo_only": {
-        "description": "連系：2連複・3連複・2連単・3連単のみ",
-        "bet_types": ["exacta", "quinella", "trifecta", "trio"],
-        "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
-        "bet_config": BET_CONFIG,
-    },
     "favorite": {
-        "description": "本命狙い：オッズ5倍以下のみ",
-        "bet_types": ALL_BET_TYPES,
+        "description": "本命狙い：オッズ10倍以下のみ",
+        "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 5.0,
+        "min_odds": 1.0, "max_odds": 10.0,
         "bet_config": BET_CONFIG,
     },
     "longshot": {
-        "description": "穴狙い：オッズ10倍以上のみ",
-        "bet_types": ALL_BET_TYPES,
+        "description": "穴狙い：オッズ20倍以上のみ",
+        "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 10.0, "max_odds": 9999,
+        "min_odds": 20.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
     },
     "line_leader": {
         "description": "ライン先頭：競輪固有の先頭選手に絞る",
-        "bet_types": ["win", "place"],
+        "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": True,
         "min_odds": 1.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
