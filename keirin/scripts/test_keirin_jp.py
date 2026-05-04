@@ -138,10 +138,10 @@ def main():
         # keirin.jpのKCDが不明なので複数試す
         print("=== keirin.jp アクセステスト ===")
         print("岐阜のKCDを探します（kdreams.jpでは venue_code=43）")
-        test_date = "20260430"  # 過去の確定済みレース
+        test_date = "20260201"  # raw_data.jsonにある確定済みレース
 
-        # KCD=27 = 大垣か岐阜周辺 (確認済み)、過去の確定済みレースで払戻を確認
-        for kcd in ["27"]:
+        # 20260201の開催会場: 久留米(42?)・伊東(23?)・岐阜(26?)・松阪(29?) を試す
+        for kcd in ["23", "26", "27", "29", "42", "40", "39"]:
             url = f"{BASE_URL}?KCD={kcd}&KBI={test_date}&RNO=1"
             print(f"\n試行: KCD={kcd} → {url}")
             try:
@@ -154,19 +154,21 @@ def main():
                     if "払戻" in resp.text or "オッズ" in resp.text:
                         print(f"  → 払戻データあり")
 
-                    # テーブルを表示（XMLエンコーディング宣言を除去してからパース）
                     import re as _re
-                    clean = _re.sub(r'<\?xml[^>]+\?>', '', resp.text)
+                    clean = _re.sub(r'<\?xml[^>]+\?>', '', resp.content.decode("utf-8", errors="replace"))
                     tables = pd.read_html(StringIO(clean), flavor="lxml")
                     print(f"  テーブル数: {len(tables)}")
 
-                    # 払戻・オッズ関連テーブルを探す
-                    payout_keywords = ["単勝", "複勝", "2連単", "2連複", "3連単", "3連複", "払戻"]
+                    payout_keywords = ["単勝", "複勝", "2車単", "2車複", "3連単", "3連複", "ワイド", "払戻"]
+                    found = False
                     for i, df in enumerate(tables):
                         text = df.to_string()
                         if any(kw in text for kw in payout_keywords):
-                            print(f"\n  ★払戻関連 Table[{i}]: shape={df.shape}")
+                            print(f"  ★払戻関連 Table[{i}]: shape={df.shape}")
                             print(df.to_string())
+                            found = True
+                    if not found:
+                        print(f"  (払戻テーブルなし)")
                         elif i < 5:
                             print(f"\n  Table[{i}]: shape={df.shape}")
                             print(df.head(3).to_string())
