@@ -20,13 +20,13 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
     win_rate = wins / total if total > 0 else 0
     total_bet = session_data["total_bet"]
 
-    # 資産推移の計算
+    # 資産推移の計算（win_flag を使用）
     equity_labels = ["開始"]
     equity_values = [initial]
     running = initial
     for b in bets:
         running -= b["bet_amount"]
-        if b["selections"][0] == b.get("winner"):
+        if b.get("win_flag", False):
             running += b["bet_amount"] * b["odds"]
         equity_labels.append(b["race_id"])
         equity_values.append(round(running, 0))
@@ -57,10 +57,8 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
           <td>{result_badge}</td>
         </tr>"""
 
-    equity_js = (
-        f"labels: {json.dumps(equity_labels[:200])},"
-        f"data: {json.dumps(equity_values[:200])}"
-    )
+    equity_labels_js = json.dumps(equity_labels[:500])
+    equity_values_js = json.dumps(equity_values[:500])
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -191,19 +189,21 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
 </div>
 
 <script>
+const equityLabels = {equity_labels_js};
+const equityData = {equity_values_js};
 const eq = document.getElementById('equityChart').getContext('2d');
 new Chart(eq, {{
   type: 'line',
   data: {{
-    {equity_js},
+    labels: equityLabels,
     datasets: [{{
       label: '資産推移',
-      data: data,
+      data: equityData,
       borderColor: '{profit_color}',
       backgroundColor: '{profit_color}22',
       fill: true,
       tension: 0.3,
-      pointRadius: data.length > 80 ? 0 : 3,
+      pointRadius: equityData.length > 80 ? 0 : 3,
       borderWidth: 2,
     }}]
   }},

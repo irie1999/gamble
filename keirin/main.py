@@ -133,8 +133,11 @@ def _backtest_real(args, bet_types):
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
         nos = race_df["car_no"].astype(int).tolist()
-        uniform_p = np.ones(len(nos)) / len(nos)
-        odds = make_mock_odds(nos, uniform_p, bet_types, noise=0.03)
+        # 選手の過去勝率をオッズ計算の基準にする（均等割りより現実的）
+        market_p = race_df["win_rate"].fillna(1 / len(nos)).values.astype(float)
+        market_p = np.clip(market_p, 0.01, 1)
+        market_p /= market_p.sum()
+        odds = make_mock_odds(nos, market_p, bet_types, noise=0.05)
         races.append({"race_id": f"{date}_{venue}_{rno}", "pred_df": pred_df,
                        "odds": odds, "finish_order": finish})
 
@@ -319,7 +322,7 @@ def _save_results(session, filename: str = "backtest_result.json", html: bool = 
                 "odds": b.odds,
                 "bet_amount": b.bet_amount,
                 "expected_value": b.expected_value,
-                "win_flag": False,
+                "win_flag": b.win_flag,
             }
             for b in session.bets
         ],
