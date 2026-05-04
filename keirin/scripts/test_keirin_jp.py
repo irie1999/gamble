@@ -159,16 +159,18 @@ def main():
                     tables = pd.read_html(StringIO(clean), flavor="lxml")
                     print(f"  テーブル数: {len(tables)}")
 
-                    payout_keywords = ["単勝", "複勝", "2車単", "2車複", "3連単", "3連複", "ワイド", "払戻"]
-                    found = False
-                    for i, df in enumerate(tables):
-                        text = df.to_string()
-                        if any(kw in text for kw in payout_keywords):
-                            print(f"  ★払戻関連 Table[{i}]: shape={df.shape}")
-                            print(df.to_string())
-                            found = True
-                    if not found:
-                        print(f"  (払戻テーブルなし)")
+                    # 生HTMLで実際の払戻金額を探す（"円"付きの数値）
+                    import re as _re2
+                    # 払戻金は "1,540円" や "410円" のような形式
+                    amounts = _re2.findall(r'[\d,]+円', clean)
+                    if amounts:
+                        print(f"  → 金額付き文字列: {amounts[:20]}")
+                    # 「単勝」「複勝」の前後50文字を抽出
+                    for kw in ["単勝", "複勝", "2車単", "3連単"]:
+                        for m in _re2.finditer(kw, clean):
+                            ctx = clean[max(0, m.start()-10):m.end()+60]
+                            print(f"  [{kw}] ...{ctx.strip()[:80]}...")
+                            break  # 最初の1件のみ
             except Exception as e:
                 print(f"  エラー: {e}")
         return
