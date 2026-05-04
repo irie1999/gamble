@@ -22,6 +22,10 @@ from scraper import (
     collect_data, save_records, load_existing_records, VENUE_CODES,
     fetch_daily_schedule, fetch_entry_detail, fetch_race_odds, load_odds_data,
 )
+from keirin_jp import (
+    fetch_race_page, get_payout_odds, fetch_live_odds, fetch_today_races,
+    get_race_encp, VENUE_CODE_TO_KCD,
+)
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
     train_evaluate, predict_race, save_model, load_model,
@@ -274,8 +278,25 @@ def cmd_predict(args):
 
         nos = df["car_no"].astype(int).tolist()
 
-        # 実オッズのみ使用。取れなければこのレースはスキップ
-        odds_dict = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
+        # keirin.jp ライブオッズを優先取得
+        odds_dict = {}
+        kcd = VENUE_CODE_TO_KCD.get(str(race.get("venue_code", "")))
+        if kcd:
+            try:
+                jdata = fetch_race_page(kcd, date_str, race["race_no"])
+                if jdata:
+                    encp = get_race_encp(jdata, race["race_no"])
+                    if encp:
+                        odds_dict = fetch_live_odds(encp, ["exacta", "quinella", "trifecta", "trio"])
+                    if not odds_dict:
+                        odds_dict = get_payout_odds(jdata)
+            except Exception:
+                pass
+
+        # フォールバック: kdreams.jp スクレイピング
+        if not odds_dict:
+            odds_dict = fetch_race_odds(race, bet_types=["exacta", "quinella"])
+
         if not odds_dict:
             continue
 
@@ -492,8 +513,23 @@ def cmd_backtest(args):
     _backtest_real(args, bet_types)
 
 
+def _fetch_keirin_jp_odds(venue_code: str, date: str, race_no: int) -> dict:
+    """keirin.jp から払戻金をオッズとして取得する。失敗時は空dict。"""
+    kcd = VENUE_CODE_TO_KCD.get(str(venue_code))
+    if kcd is None:
+        return {}
+    try:
+        jdata = fetch_race_page(kcd, date, race_no)
+        if jdata:
+            return get_payout_odds(jdata)
+    except Exception:
+        pass
+    return {}
+
+
 def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
-    """バックテスト用レースリストを構築（モデル予測 + 実オッズ）"""
+    """バックテスト用レースリストを構築（モデル予測 + 払戻オッズ）"""
+    # keirin.jp 払戻データを優先。取れない場合は scraper 収集の odds_data にフォールバック
     if odds_data is None:
         odds_data = load_odds_data()
 
@@ -519,14 +555,15 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # 実オッズのみ使用。なければそのレースはスキップ
-        race_id_key = race_df["race_no"].iloc[0]  # scraper の race_id 形式で検索
-        # odds_data のキーは scraper の race_id（16桁）、ここでは date_venue_rno 形式で近似検索
-        odds = {}
-        for rid, od in odds_data.items():
-            if rid[2:10] == date and rid[:2] == venue and int(rid[14:16]) == rno:
-                odds = od
-                break
+        # keirin.jp 払戻データを優先取得
+        odds = _fetch_keirin_jp_odds(venue, date, rno)
+
+        # フォールバック: scraper収集の odds_data
+        if not odds and odds_data:
+            for rid, od in odds_data.items():
+                if rid[2:10] == date and rid[:2] == venue and int(rid[14:16]) == rno:
+                    odds = od
+                    break
 
         if not odds:
             skipped += 1
@@ -536,7 +573,7 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
                        "odds": odds, "finish_order": finish})
 
     if skipped:
-        print(f"  ※オッズデータなし: {skipped}レーススキップ（`collect` で再収集するとオッズも取得されます）")
+        print(f"  ※オッズデータなし: {skipped}レーススキップ")
     return races
 
 
