@@ -42,6 +42,8 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
             '<span class="badge win">的中</span>' if is_win
             else '<span class="badge loss">外れ</span>'
         )
+        pnl = b["bet_amount"] * (b["odds"] - 1) if is_win else -b["bet_amount"]
+        pnl_color = "#4ade80" if pnl >= 0 else "#f87171"
         bet_rows += f"""
         <tr class="{row_class}">
           <td>{i+1}</td>
@@ -55,6 +57,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
           <td>{b['bet_amount']:,}円</td>
           <td>{b['expected_value']:.3f}</td>
           <td>{result_badge}</td>
+          <td style="color:{pnl_color};font-weight:600">{pnl:+,.0f}円</td>
         </tr>"""
 
     equity_labels_js = json.dumps(equity_labels[:500])
@@ -178,7 +181,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
           <tr>
             <th>#</th><th>レースID</th><th>種別</th><th>選択</th>
             <th>予測P</th><th>市場P</th><th>エッジ</th>
-            <th>オッズ</th><th>賭け金</th><th>EV</th><th>結果</th>
+            <th>オッズ</th><th>賭け金</th><th>EV</th><th>結果</th><th>損益</th>
           </tr>
         </thead>
         <tbody>{bet_rows}</tbody>
