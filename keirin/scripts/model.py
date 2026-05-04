@@ -5,6 +5,9 @@ LightGBMで各選手の勝利確率を推定する
 """
 
 import json
+import os
+import shutil
+import tempfile
 import warnings
 from pathlib import Path
 
@@ -140,11 +143,18 @@ def predict_race(
 
 def save_model(result: dict) -> Path:
     model_path = MODEL_DIR / "lgb_model.txt"
-    tmp_path = model_path.with_suffix(".tmp")
-    result["model"].booster_.save_model(str(tmp_path))
-    if model_path.exists():
-        model_path.unlink()
-    tmp_path.rename(model_path)
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    # Write to system temp dir first to avoid OneDrive/cloud sync locks
+    fd, tmp_name = tempfile.mkstemp(suffix=".txt")
+    os.close(fd)
+    try:
+        result["model"].booster_.save_model(tmp_name)
+        if model_path.exists():
+            model_path.unlink()
+        shutil.copy2(tmp_name, str(model_path))
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
     meta = {
         "feature_cols": result["feature_cols"],
