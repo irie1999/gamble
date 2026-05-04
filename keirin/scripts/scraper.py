@@ -174,12 +174,13 @@ def parse_rider_table(table) -> list[dict]:
             continue
 
         name_full = cols[5]
-        # "中島 淳埼　玉/26/125" → name + pref/age/term
-        m = re.match(r"(.+?)([^/]+)/(\d+)/(\d+)$", name_full)
-        if m:
-            player_name = m.group(1).strip()
-            age = _safe_int(m.group(3))
-            term = _safe_int(m.group(4))
+        # "中島 淳埼　玉/26/125" → name_pref / age / term
+        # rsplit で末尾の /age/term を切り離す（姓名と都道府県は連結のまま保持）
+        parts = name_full.rsplit("/", 2)
+        if len(parts) == 3:
+            player_name = parts[0].strip()
+            age = _safe_int(parts[1])
+            term = _safe_int(parts[2])
         else:
             player_name = name_full
             age, term = None, None
@@ -303,7 +304,10 @@ def parse_odds_table(soup, bet_type: str) -> dict:
     tables = soup.find_all("table")
 
     if bet_type in ("win", "place"):
+        # 全テーブルからcar_no→oddsのマッピングを持つものを全て収集
+        all_candidates = []
         for table in tables:
+            t_odds: dict = {}
             for tr in table.find_all("tr"):
                 cols = [td.get_text(strip=True).replace(",", "") for td in tr.find_all(["td", "th"])]
                 if len(cols) < 2:
@@ -311,9 +315,19 @@ def parse_odds_table(soup, bet_type: str) -> dict:
                 car = _safe_int(cols[0])
                 val = _safe_float(cols[-1])
                 if car and val and val > 1.0:
-                    odds[(car,)] = val
-            if len(odds) >= 3:
-                return odds
+                    t_odds[(car,)] = val
+            if len(t_odds) >= 3:
+                all_candidates.append(t_odds)
+
+        if not all_candidates:
+            return odds
+
+        if bet_type == "win":
+            # 単勝は最も高いオッズ平均を持つテーブル
+            return max(all_candidates, key=lambda d: sum(d.values()) / len(d))
+        else:
+            # 複勝は最も低いオッズ平均を持つテーブル（複勝オッズ < 単勝オッズ）
+            return min(all_candidates, key=lambda d: sum(d.values()) / len(d))
 
     elif bet_type in ("exacta", "quinella"):
         for table in tables:
