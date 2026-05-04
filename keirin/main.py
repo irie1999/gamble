@@ -244,7 +244,8 @@ def cmd_predict(args):
 
     print(f"{len(races)}レース検出\n")
 
-    any_signal = False
+    top_n = getattr(args, "top_n", 20)
+    min_ev = getattr(args, "min_ev", 1.5)
     signal_rows = []
 
     for race in sorted(races, key=lambda r: (r["venue_code"], r["race_no"])):
@@ -277,70 +278,89 @@ def cmd_predict(args):
         market_p /= market_p.sum()
         odds_dict = make_mock_odds(nos, market_p, bet_types, noise=0.0)
 
-        race_bets = []
-        for bt in bet_types:
-            bets = pick_bets(pred_df, odds_dict.get(bt, {}), bankroll, bt)
-            race_bets.extend(bets)
-
-        if not race_bets:
-            continue
-
-        any_signal = True
-        header = f"{race['venue_name']} R{race['race_no']}"
-        print(f"【{header}】")
-
         pred_sorted = pred_df.sort_values("win_prob", ascending=False)
-        parts = []
-        for _, row in pred_sorted.iterrows():
-            parts.append(f"{int(row['car_no'])}番({row['win_prob']:.0%})")
-        print(f"  予測: {' > '.join(parts)}")
+        pred_str = " > ".join(
+            f"{int(r['car_no'])}番({r['win_prob']:.0%})"
+            for _, r in pred_sorted.iterrows()
+        )
 
-        for b in race_bets:
-            bt_name = BET_TYPE_NAMES.get(b.bet_type, b.bet_type)
-            sels = list(b.selections)
-            print(f"  ▶ {bt_name} {sels}  オッズ{b.odds:.1f}倍  "
-                  f"推奨額 {b.bet_amount:,}円  エッジ {b.edge:+.3f}  EV {b.expected_value:.2f}")
-            signal_rows.append({
-                "venue": race["venue_name"],
-                "race_no": race["race_no"],
-                "bet_type": bt_name,
-                "selections": str(sels),
-                "odds": b.odds,
-                "bet_amount": b.bet_amount,
-                "edge": b.edge,
-                "ev": b.expected_value,
-                "pred_prob": b.predicted_prob,
-            })
-        print()
+        for bt in bet_types:
+            for b in pick_bets(pred_df, odds_dict.get(bt, {}), bankroll, bt):
+                if b.expected_value < min_ev:
+                    continue
+                signal_rows.append({
+                    "venue": race["venue_name"],
+                    "race_no": race["race_no"],
+                    "bet_type": BET_TYPE_NAMES.get(b.bet_type, b.bet_type),
+                    "selections": str(list(b.selections)),
+                    "odds": b.odds,
+                    "bet_amount": b.bet_amount,
+                    "edge": b.edge,
+                    "ev": b.expected_value,
+                    "pred_prob": b.predicted_prob,
+                    "pred_str": pred_str,
+                })
 
-    if not any_signal:
-        print("本日のシグナルはありません（エッジ不足）")
+    if not signal_rows:
+        print(f"シグナルがありません（EV≥{min_ev} の条件を満たすベットなし）")
         return
 
-    total_bet = sum(r["bet_amount"] for r in signal_rows)
-    print(f"合計推奨ベット額: {total_bet:,}円 / {len(signal_rows)}件")
-    print("\n⚠ オッズは過去勝率ベースの推定値です。実際のオッズで金額を調整してください。\n")
+    # EV 降順でソートし上位 top_n を「おすすめ」とする
+    signal_rows.sort(key=lambda x: x["ev"], reverse=True)
+    top_picks = signal_rows[:top_n]
+
+    print(f"\n━━━ TOP {top_n} おすすめベット（EV順） ━━━")
+    print(f"{'#':<3} {'レース':<10} {'賭け式':<6} {'選択':<12} "
+          f"{'予測P':>6} {'オッズ':>8} {'エッジ':>7} {'EV':>5} {'推奨額':>8}")
+    print("-" * 72)
+    for i, r in enumerate(top_picks, 1):
+        print(f"{i:<3} {r['venue']} R{r['race_no']:<4} {r['bet_type']:<6} "
+              f"{r['selections']:<12} {r['pred_prob']:>5.1%} {r['odds']:>6.1f}倍 "
+              f"{r['edge']:>+6.3f} {r['ev']:>5.2f} {r['bet_amount']:>7,}円")
+
+    total_top = sum(r["bet_amount"] for r in top_picks)
+    print(f"\n合計推奨額（TOP{top_n}）: {total_top:,}円")
+    print(f"全シグナル: {len(signal_rows)}件（EV≥{min_ev}）")
+    print("\n⚠ オッズは推定値です。実際のオッズを確認してから賭け額を調整してください。\n")
 
     if args.html:
-        _save_signal_html(signal_rows, date_str, mean_auc, bankroll)
+        _save_signal_html(signal_rows, top_picks, date_str, mean_auc, bankroll, top_n)
 
 
-def _save_signal_html(signal_rows: list[dict], date_str: str, auc: float, bankroll: float) -> None:
-    rows_html = ""
-    for r in signal_rows:
-        rows_html += f"""
-        <tr>
+def _save_signal_html(
+    signal_rows: list[dict],
+    top_picks: list[dict],
+    date_str: str,
+    auc: float,
+    bankroll: float,
+    top_n: int = 20,
+) -> None:
+    def make_row(r: dict, highlight: bool = False) -> str:
+        bg = ' style="background:#1a2e1a"' if highlight else ""
+        return f"""
+        <tr{bg}>
           <td>{r['venue']} R{r['race_no']}</td>
           <td>{r['bet_type']}</td>
           <td>{r['selections']}</td>
           <td>{r['pred_prob']:.1%}</td>
           <td>{r['odds']:.1f}倍</td>
           <td><span style="color:{'#4ade80' if r['edge']>=0 else '#f87171'}">{r['edge']:+.3f}</span></td>
-          <td>{r['ev']:.2f}</td>
+          <td><strong style="color:#fbbf24">{r['ev']:.2f}</strong></td>
           <td><strong>{r['bet_amount']:,}円</strong></td>
         </tr>"""
 
-    total = sum(r["bet_amount"] for r in signal_rows)
+    top_rows_html = "".join(make_row(r, highlight=True) for r in top_picks)
+    all_rows_html = "".join(make_row(r) for r in signal_rows)
+
+    total_top = sum(r["bet_amount"] for r in top_picks)
+    total_all = sum(r["bet_amount"] for r in signal_rows)
+
+    table_header = """
+      <thead><tr>
+        <th>レース</th><th>賭け式</th><th>選択</th>
+        <th>予測P</th><th>オッズ(推定)</th><th>エッジ</th><th>EV</th><th>推奨額</th>
+      </tr></thead>"""
+
     html = f"""<!DOCTYPE html>
 <html lang="ja">
 <head><meta charset="UTF-8"><title>競輪シグナル {date_str}</title>
@@ -355,7 +375,10 @@ def _save_signal_html(signal_rows: list[dict], date_str: str, auc: float, bankro
   .kpi-card {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
   .kpi-card .label {{font-size:.75rem;color:#64748b;text-transform:uppercase}}
   .kpi-card .value {{font-size:1.4rem;font-weight:700;color:#f1f5f9;margin-top:.2rem}}
-  .section {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem}}
+  .section {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem;margin-bottom:1.5rem}}
+  .section h2 {{font-size:.95rem;font-weight:600;color:#94a3b8;margin-bottom:1rem;text-transform:uppercase}}
+  .top-badge {{display:inline-block;background:#d97706;color:#fff;font-size:.7rem;font-weight:700;
+               border-radius:4px;padding:.1rem .4rem;margin-right:.4rem;vertical-align:middle}}
   table {{width:100%;border-collapse:collapse;font-size:.88rem}}
   th {{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
   td {{padding:.55rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
@@ -370,19 +393,28 @@ def _save_signal_html(signal_rows: list[dict], date_str: str, auc: float, bankro
 </div>
 <div class="container">
   <div class="kpi">
-    <div class="kpi-card"><div class="label">シグナル件数</div><div class="value">{len(signal_rows)}件</div></div>
-    <div class="kpi-card"><div class="label">合計推奨ベット額</div><div class="value">¥{total:,}</div></div>
+    <div class="kpi-card"><div class="label">全シグナル</div><div class="value">{len(signal_rows)}件</div></div>
+    <div class="kpi-card"><div class="label">おすすめ TOP{top_n}</div><div class="value" style="color:#fbbf24">{len(top_picks)}件</div></div>
+    <div class="kpi-card"><div class="label">TOP推奨額合計</div><div class="value" style="color:#fbbf24">¥{total_top:,}</div></div>
     <div class="kpi-card"><div class="label">資金</div><div class="value">¥{bankroll:,.0f}</div></div>
   </div>
+
   <div class="section">
+    <h2><span class="top-badge">TOP {top_n}</span> おすすめベット（EV順）</h2>
     <table>
-      <thead><tr>
-        <th>レース</th><th>賭け式</th><th>選択</th>
-        <th>予測P</th><th>オッズ(推定)</th><th>エッジ</th><th>EV</th><th>推奨額</th>
-      </tr></thead>
-      <tbody>{rows_html}</tbody>
+      {table_header}
+      <tbody>{top_rows_html}</tbody>
     </table>
   </div>
+
+  <div class="section">
+    <h2>全シグナル一覧（{len(signal_rows)}件）</h2>
+    <table>
+      {table_header}
+      <tbody>{all_rows_html}</tbody>
+    </table>
+  </div>
+
   <div class="warn">
     ⚠ オッズは過去勝率ベースの推定値です。実際のオッズを確認してから賭け額を調整してください。
   </div>
@@ -748,6 +780,10 @@ def main():
                         help="資金（Kelly計算用、デフォルト: 50000）")
     p_pred.add_argument("--bet-types", dest="bet_types", type=str, default=None,
                         help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
+    p_pred.add_argument("--top", dest="top_n", type=int, default=20,
+                        help="おすすめ表示件数（EV上位、デフォルト: 20）")
+    p_pred.add_argument("--min-ev", dest="min_ev", type=float, default=1.5,
+                        help="最低EV閾値（デフォルト: 1.5）")
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     args = parser.parse_args()
