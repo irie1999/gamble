@@ -6,6 +6,8 @@ boatrace.jp の公式サイトからレース情報・選手成績・モータ�
 import time
 import json
 import re
+import signal
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 import requests
@@ -198,35 +200,82 @@ def fetch_race_result(venue_code: str, date: str, race_no: int) -> dict | None:
     }
 
 
+def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], str | None]:
+    """既存データを読み込み、最終収集日を返す"""
+    path = DATA_DIR / filename
+    if not path.exists():
+        return [], None
+    with open(path, encoding="utf-8") as f:
+        records = json.load(f)
+    if not records:
+        return [], None
+    latest_date = max(r["date"] for r in records)
+    return records, latest_date
+
+
+def save_records(records: list[dict], filename: str = "raw_data.json") -> Path:
+    path = DATA_DIR / filename
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+    print(f"\n保存完了: {path} ({len(records)}件)")
+    return path
+
+
 def collect_data(
     start_date: str,
     end_date: str,
     venue_codes: list[str] | None = None,
     sleep_sec: float = 1.0,
+    existing_records: list[dict] | None = None,
+    checkpoint_days: int = 7,
+    filename: str = "raw_data.json",
 ) -> list[dict]:
     """
     期間内の全レースデータを収集してリストで返す
     start_date / end_date: YYYYMMDD
+    existing_records: 既存データ（インクリメンタル収集時に渡す）
+    checkpoint_days:  N日ごとに中間保存する（0で無効）
     """
     if venue_codes is None:
         venue_codes = list(VENUE_CODES.keys())
 
     start = datetime.strptime(start_date, "%Y%m%d")
     end = datetime.strptime(end_date, "%Y%m%d")
-    records = []
+    total_days = (end - start).days + 1
 
+    records = list(existing_records) if existing_records else []
+
+    # Ctrl+C で中間保存して終了
+    interrupted = False
+    def _handler(sig, frame):
+        nonlocal interrupted
+        interrupted = True
+        print("\n\n[中断] Ctrl+C を検知 → データを保存して終了します...")
+    signal.signal(signal.SIGINT, _handler)
+
+    # 所要時間の概算（1日あたり平均5場×12レース×3リクエスト×sleep_sec）
+    est_sec = total_days * 5 * 12 * 3 * sleep_sec
+    est_h = est_sec / 3600
+    print(f"収集日数: {total_days}日  概算所要時間: {est_h:.1f}時間")
+
+    days_done = 0
     current = start
-    while current <= end:
+    while current <= end and not interrupted:
         date_str = current.strftime("%Y%m%d")
-        print(f"\n=== {date_str} ===")
+        elapsed_ratio = days_done / total_days if total_days > 0 else 0
+        print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
 
         for venue_code in venue_codes:
+            if interrupted:
+                break
             race_list = fetch_race_list(venue_code, date_str)
             if not race_list:
                 continue
             print(f"  {VENUE_CODES.get(venue_code, venue_code)}: {len(race_list)}レース")
 
             for race_info in race_list:
+                if interrupted:
+                    break
                 rno = race_info["race_no"]
                 card = fetch_race_card(venue_code, date_str, rno)
                 result = fetch_race_result(venue_code, date_str, rno)
@@ -255,17 +304,21 @@ def collect_data(
                     })
                 time.sleep(sleep_sec)
 
+        days_done += 1
+
+        # チェックポイント保存
+        if checkpoint_days > 0 and days_done % checkpoint_days == 0:
+            print(f"  [チェックポイント] {days_done}日完了 → 保存中...")
+            save_records(records, filename)
+
         current += timedelta(days=1)
 
+    # 中断または完了時の最終保存
+    if interrupted or days_done > 0:
+        save_records(records, filename)
+
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
     return records
-
-
-def save_records(records: list[dict], filename: str = "raw_data.json") -> Path:
-    path = DATA_DIR / filename
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
-    print(f"\n保存完了: {path} ({len(records)}件)")
-    return path
 
 
 def _safe_float(text: str) -> float | None:
@@ -276,13 +329,10 @@ def _safe_float(text: str) -> float | None:
 
 
 if __name__ == "__main__":
-    # 直近3日分・全場を収集するサンプル実行
     today = datetime.now()
     start = (today - timedelta(days=3)).strftime("%Y%m%d")
     end = today.strftime("%Y%m%d")
     print(f"収集期間: {start} → {end}")
     records = collect_data(start, end, sleep_sec=1.5)
-    if records:
-        save_records(records)
-    else:
+    if not records:
         print("データが取得できませんでした（開催なし or ネットワークエラー）")

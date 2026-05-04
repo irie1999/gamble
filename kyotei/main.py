@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 # スクリプトディレクトリをパスに追加
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
-from scraper import collect_data, save_records, VENUE_CODES
+from scraper import collect_data, save_records, load_existing_records, VENUE_CODES
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import train_evaluate, predict_race, save_model, load_model, print_feature_importance
 from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds
@@ -35,21 +35,38 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 
 def cmd_collect(args):
-    """実際のサイトからデータを収集する"""
     today = datetime.now()
     end_date = today.strftime("%Y%m%d")
-    start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
-
     venue_codes = args.venues.split(",") if args.venues else None
-    print(f"収集期間: {start_date} → {end_date}")
-    print(f"対象場: {venue_codes or '全24場'}")
 
-    records = collect_data(start_date, end_date, venue_codes=venue_codes, sleep_sec=1.5)
-    if records:
-        save_records(records, "raw_data.json")
-        print(f"\n収集完了: {len(records)}件")
+    existing_records = []
+    if not args.full:
+        existing_records, latest_date = load_existing_records("raw_data.json")
+        if latest_date:
+            # 最終収集日の翌日から再開
+            resume_date = (datetime.strptime(latest_date, "%Y%m%d") + timedelta(days=1))
+            start_date = resume_date.strftime("%Y%m%d")
+            print(f"既存データ: {len(existing_records)}件 (最終: {latest_date})")
+            print(f"増分収集: {start_date} → {end_date}")
+            if start_date > end_date:
+                print("最新データがあります。収集不要です。")
+                return
+        else:
+            start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
+            print(f"新規収集: {start_date} → {end_date}")
     else:
-        print("データが取得できませんでした")
+        start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
+        print(f"全期間収集（--full）: {start_date} → {end_date}")
+
+    print(f"対象場: {venue_codes or '全24場'}")
+    collect_data(
+        start_date, end_date,
+        venue_codes=venue_codes,
+        sleep_sec=args.sleep,
+        existing_records=existing_records,
+        checkpoint_days=7,
+        filename="raw_data.json",
+    )
 
 
 def cmd_train(args):
@@ -269,8 +286,14 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     p_collect = sub.add_parser("collect", help="データ収集")
-    p_collect.add_argument("--days", type=int, default=30)
-    p_collect.add_argument("--venues", type=str, default=None)
+    p_collect.add_argument("--days", type=int, default=365,
+                           help="収集日数（新規 or --full 時。デフォルト: 365日）")
+    p_collect.add_argument("--venues", type=str, default=None,
+                           help="場コードカンマ区切り（デフォルト: 全24場）")
+    p_collect.add_argument("--full", action="store_true",
+                           help="既存データを無視して全期間再収集")
+    p_collect.add_argument("--sleep", type=float, default=1.5,
+                           help="リクエスト間隔（秒、デフォルト: 1.5）")
 
     sub.add_parser("train", help="モデル学習")
 
