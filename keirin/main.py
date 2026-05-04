@@ -27,7 +27,7 @@ from model import (
     train_evaluate, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config,
 )
-from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds, pick_bets
+from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds, pick_bets, STRATEGIES
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
@@ -39,6 +39,169 @@ RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 CLASS_MAP_RATE = {"S1": 0.28, "S2": 0.22, "A1": 0.17, "A2": 0.13, "A3": 0.10, "B1": 0.07}
+
+
+def cmd_compare(args):
+    """全戦略をバックテストして比較レポートを生成"""
+    model_path = MODEL_DIR / "lgb_model.txt"
+    if not model_path.exists():
+        print("モデルが未学習です。先に `python main.py train` を実行してください")
+        return
+
+    booster, feature_cols, meta = load_model()
+    mean_auc = meta.get("metrics", {}).get("mean_auc", 0)
+
+    with open(DATA_DIR / "raw_data.json", encoding="utf-8") as f:
+        records = json.load(f)
+    df = pd.DataFrame(records)
+    df_feat = build_features(df)
+
+    dates = sorted(df_feat["date"].unique())
+    split_idx = int(len(dates) * 0.8)
+    df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
+    test_days = len(dates) - split_idx
+
+    # 全賭け式でオッズを生成しておく（各戦略がサブセットを選ぶ）
+    races_full = _build_races(booster, feature_cols, df_test, ALL_BET_TYPES)
+
+    target_strategies = (
+        args.strategies.split(",") if getattr(args, "strategies", None)
+        else list(STRATEGIES.keys())
+    )
+
+    results = []
+    print(f"\nモデルAUC: {mean_auc:.4f}  テスト期間: {test_days}日  レース数: {len(races_full)}\n")
+    print(f"{'戦略':<14} {'ROI':>8} {'損益':>12} {'回数':>6} {'的中率':>7} {'賭け金':>12} {'説明'}")
+    print("-" * 80)
+
+    for name in target_strategies:
+        strat = STRATEGIES.get(name)
+        if strat is None:
+            print(f"  [{name}] 不明な戦略名 → スキップ")
+            continue
+
+        session = simulate_session(
+            races_full,
+            initial_bankroll=args.bankroll,
+            strategy=strat,
+        )
+        total = session.wins + session.losses
+        win_rate = session.wins / total if total > 0 else 0
+        results.append({
+            "name": name,
+            "description": strat["description"],
+            "roi": session.roi,
+            "profit": session.profit,
+            "total_bets": total,
+            "win_rate": win_rate,
+            "total_bet": session.total_bet,
+            "wins": session.wins,
+            "losses": session.losses,
+            "final_bankroll": session.final_bankroll,
+        })
+        roi_str = f"{session.roi:+.1%}"
+        print(f"  {name:<12} {roi_str:>8} {session.profit:>+12,.0f}円 "
+              f"{total:>6} {win_rate:>6.1%} {session.total_bet:>10,.0f}円  {strat['description']}")
+
+    results.sort(key=lambda x: x["roi"], reverse=True)
+    best = results[0]["name"] if results else "-"
+    print(f"\n最良戦略: {best}\n")
+
+    if args.html:
+        _save_compare_html(results, mean_auc, test_days, args.bankroll)
+
+
+def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll: float) -> None:
+    rows = ""
+    for i, r in enumerate(results):
+        rank_badge = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
+        roi_color = "#4ade80" if r["roi"] >= 0 else "#f87171"
+        rows += f"""
+        <tr>
+          <td>{rank_badge}</td>
+          <td><strong>{r['name']}</strong><br><small style="color:#64748b">{r['description']}</small></td>
+          <td style="color:{roi_color};font-weight:700">{r['roi']:+.1%}</td>
+          <td style="color:{roi_color}">{r['profit']:+,.0f}円</td>
+          <td>{r['total_bets']}回</td>
+          <td>{r['win_rate']:.1%}</td>
+          <td>{r['total_bet']:,.0f}円</td>
+          <td>{r['final_bankroll']:,.0f}円</td>
+        </tr>"""
+
+    bar_html = ""
+    max_roi = max(abs(r["roi"]) for r in results) or 1
+    for r in results:
+        pct = r["roi"] / max_roi * 100
+        color = "#4ade80" if r["roi"] >= 0 else "#f87171"
+        bar_html += f"""
+        <div style="margin-bottom:.8rem">
+          <div style="display:flex;justify-content:space-between;font-size:.82rem;color:#94a3b8;margin-bottom:.25rem">
+            <span>{r['name']}</span><span style="color:{color}">{r['roi']:+.1%}</span>
+          </div>
+          <div style="background:#0f172a;border-radius:4px;height:10px">
+            <div style="width:{abs(pct):.0f}%;background:{color};height:100%;border-radius:4px"></div>
+          </div>
+        </div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><title>戦略比較</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0}}
+  .header{{background:#1e293b;padding:2rem;border-bottom:1px solid #334155}}
+  .header h1{{font-size:1.6rem;font-weight:700}}
+  .header .sub{{color:#94a3b8;margin-top:.3rem;font-size:.9rem}}
+  .container{{max-width:1100px;margin:0 auto;padding:2rem}}
+  .kpi{{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
+  .kpi-card{{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
+  .kpi-card .label{{font-size:.75rem;color:#64748b;text-transform:uppercase}}
+  .kpi-card .value{{font-size:1.4rem;font-weight:700;color:#f1f5f9;margin-top:.2rem}}
+  .section{{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem;margin-bottom:1.5rem}}
+  .section h2{{font-size:.95rem;font-weight:600;color:#94a3b8;margin-bottom:1rem;text-transform:uppercase}}
+  table{{width:100%;border-collapse:collapse;font-size:.88rem}}
+  th{{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
+  td{{padding:.6rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
+  tr:hover td{{background:#263347}}
+  .warn{{background:#1e3a2f;border:1px solid #166534;border-radius:8px;padding:1rem;margin-top:1.5rem;color:#4ade80;font-size:.85rem}}
+</style>
+</head><body>
+<div class="header">
+  <h1>⚖️ 戦略比較レポート</h1>
+  <div class="sub">生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデルAUC: {auc:.4f} ／ テスト: {test_days}日</div>
+</div>
+<div class="container">
+  <div class="kpi">
+    <div class="kpi-card"><div class="label">比較戦略数</div><div class="value">{len(results)}種</div></div>
+    <div class="kpi-card"><div class="label">最良戦略</div><div class="value">{results[0]['name']}</div></div>
+    <div class="kpi-card"><div class="label">最良ROI</div><div class="value" style="color:#4ade80">{results[0]['roi']:+.1%}</div></div>
+    <div class="kpi-card"><div class="label">初期資金</div><div class="value">¥{bankroll:,.0f}</div></div>
+  </div>
+
+  <div class="section">
+    <h2>ROI 比較</h2>
+    {bar_html}
+  </div>
+
+  <div class="section">
+    <h2>詳細比較（ROI順）</h2>
+    <table>
+      <thead><tr>
+        <th>順位</th><th>戦略</th><th>ROI</th><th>損益</th>
+        <th>賭け回数</th><th>的中率</th><th>総賭け金</th><th>最終資金</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+  <div class="warn">
+    ⚠ オッズは過去勝率ベースの推定値です。実際の市場オッズとは異なります。ROIの絶対値より各戦略の相対比較にご活用ください。
+  </div>
+</div></body></html>"""
+
+    path = RESULTS_DIR / "strategy_compare.html"
+    path.write_text(html, encoding="utf-8")
+    print(f"比較レポート保存: {path}")
+    import webbrowser
+    webbrowser.open(path.as_uri())
 
 
 def cmd_predict(args):
@@ -281,22 +444,10 @@ def cmd_backtest(args):
         _backtest_mock(args, bet_types)
 
 
-def _backtest_real(args, bet_types):
-    import lightgbm as lgb
-    booster, feature_cols, meta = load_model()
-
-    with open(DATA_DIR / "raw_data.json", encoding="utf-8") as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
-    df_feat = build_features(df)
-
-    dates = sorted(df_feat["date"].unique())
-    split_idx = int(len(dates) * 0.8)
-    test_dates = dates[split_idx:]
-    df_test = df_feat[df_feat["date"].isin(test_dates)]
-
+def _build_races(booster, feature_cols, df_feat, bet_types):
+    """バックテスト用レースリストを構築（モデル予測 + モックオッズ）"""
     races = []
-    for (date, venue, rno), race_df in df_test.groupby(["date", "venue_code", "race_no"]):
+    for (date, venue, rno), race_df in df_feat.groupby(["date", "venue_code", "race_no"]):
         race_df = race_df.drop_duplicates(subset="car_no", keep="first")
         winner_row = race_df[race_df["win"] == 1]
         if winner_row.empty:
@@ -316,16 +467,33 @@ def _backtest_real(args, bet_types):
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
         nos = race_df["car_no"].astype(int).tolist()
-        # 選手の過去勝率をオッズ計算の基準にする（均等割りより現実的）
         market_p = race_df["win_rate"].fillna(1 / len(nos)).values.astype(float)
         market_p = np.clip(market_p, 0.01, 1)
         market_p /= market_p.sum()
         odds = make_mock_odds(nos, market_p, bet_types, noise=0.05)
         races.append({"race_id": f"{date}_{venue}_{rno}", "pred_df": pred_df,
                        "odds": odds, "finish_order": finish})
+    return races
 
+
+def _backtest_real(args, bet_types):
+    booster, feature_cols, meta = load_model()
+
+    with open(DATA_DIR / "raw_data.json", encoding="utf-8") as f:
+        records = json.load(f)
+    df = pd.DataFrame(records)
+    df_feat = build_features(df)
+
+    dates = sorted(df_feat["date"].unique())
+    split_idx = int(len(dates) * 0.8)
+    df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
+
+    strategy = STRATEGIES.get(getattr(args, "strategy", None) or "")
+    races = _build_races(booster, feature_cols, df_test, bet_types)
     session = simulate_session(races, initial_bankroll=args.bankroll,
-                               bet_types=bet_types, line_leader_only=args.line_leader)
+                               bet_types=bet_types,
+                               line_leader_only=getattr(args, "line_leader", False),
+                               strategy=strategy)
     print_session_report(session)
     _save_results(session, html=getattr(args, "html", False))
 
@@ -544,7 +712,15 @@ def main():
                       help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
     p_bt.add_argument("--line-leader", dest="line_leader", action="store_true",
                       help="ライン先頭のみ対象")
+    p_bt.add_argument("--strategy", type=str, default=None,
+                      help=f"戦略プリセット: {','.join(STRATEGIES.keys())}")
     p_bt.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+
+    p_cmp = sub.add_parser("compare", help="全戦略を一括バックテストして比較")
+    p_cmp.add_argument("--bankroll", type=float, default=50000)
+    p_cmp.add_argument("--strategies", type=str, default=None,
+                       help=f"比較する戦略カンマ区切り（デフォルト:全戦略）: {','.join(STRATEGIES.keys())}")
+    p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     sub.add_parser("demo", help="デモ実行")
 
@@ -566,6 +742,8 @@ def main():
         cmd_backtest(args)
     elif args.command == "demo":
         cmd_demo(args)
+    elif args.command == "compare":
+        cmd_compare(args)
     elif args.command == "predict":
         cmd_predict(args)
     else:

@@ -15,7 +15,7 @@ from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES
 
 DEDUCTION_RATE = 0.25
 
-# 賭け式ごとのデフォルト設定（競輪は出走人数が多いため少し厳しめ）
+# 賭け式ごとのデフォルト設定: (min_edge, kelly_frac, max_combos, top_n)
 BET_CONFIG = {
     "win":      (0.05, 0.25, 1,  9),
     "place":    (0.05, 0.20, 1,  9),
@@ -23,6 +23,77 @@ BET_CONFIG = {
     "quinella": (0.07, 0.15, 3, 10),
     "trifecta": (0.08, 0.10, 6, 30),
     "trio":     (0.07, 0.12, 4, 15),
+}
+
+# ---- 戦略プリセット ----
+# 各戦略: bet_config / bet_types / line_leader_only / min_odds / max_odds
+STRATEGIES: dict[str, dict] = {
+    "conservative": {
+        "description": "堅実：高エッジ・小Kelly・単勝複勝のみ",
+        "bet_types": ["win", "place"],
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": {
+            "win":   (0.10, 0.15, 1, 5),
+            "place": (0.10, 0.10, 1, 5),
+        },
+    },
+    "balanced": {
+        "description": "バランス：デフォルト設定・全賭け式",
+        "bet_types": ALL_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
+    "aggressive": {
+        "description": "積極：低エッジ閾値・大Kelly・全賭け式",
+        "bet_types": ALL_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": {
+            "win":      (0.03, 0.35, 2,  9),
+            "place":    (0.03, 0.30, 2,  9),
+            "exacta":   (0.04, 0.25, 5, 30),
+            "quinella": (0.04, 0.25, 5, 20),
+            "trifecta": (0.04, 0.20, 8, 50),
+            "trio":     (0.04, 0.20, 5, 25),
+        },
+    },
+    "single_only": {
+        "description": "単系：単勝・複勝のみ（標準設定）",
+        "bet_types": ["win", "place"],
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
+    "combo_only": {
+        "description": "連系：2連複・3連複・2連単・3連単のみ",
+        "bet_types": ["exacta", "quinella", "trifecta", "trio"],
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
+    "favorite": {
+        "description": "本命狙い：オッズ5倍以下のみ",
+        "bet_types": ALL_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 1.0, "max_odds": 5.0,
+        "bet_config": BET_CONFIG,
+    },
+    "longshot": {
+        "description": "穴狙い：オッズ10倍以上のみ",
+        "bet_types": ALL_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 10.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
+    "line_leader": {
+        "description": "ライン先頭：競輪固有の先頭選手に絞る",
+        "bet_types": ["win", "place"],
+        "line_leader_only": True,
+        "min_odds": 1.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
 }
 
 
@@ -92,16 +163,15 @@ def pick_bets(
     bet_type: str = "win",
     no_col: str = "car_no",
     line_leader_only: bool = False,
+    bet_config: dict | None = None,
+    min_odds: float = 1.0,
+    max_odds: float = 9999,
 ) -> list[BettingResult]:
-    """
-    賭け式に応じたベットを選択して返す
-    line_leader_only: Trueのときライン先頭選手のみ単勝・複勝の対象にする
-    """
-    cfg = BET_CONFIG.get(bet_type, BET_CONFIG["win"])
+    cfg_source = bet_config if bet_config else BET_CONFIG
+    cfg = cfg_source.get(bet_type, BET_CONFIG.get(bet_type, (0.05, 0.15, 3, 10)))
     min_edge, kelly_frac, max_combos, top_n = cfg
 
     df = pred_df.copy()
-    # ライン先頭フィルタ（単勝・複勝のみ適用）
     if line_leader_only and bet_type in ("win", "place"):
         if "is_line_leader" in df.columns:
             leaders = df[(df["is_line_leader"] == 1) | (df.get("line_no", 0) == 0)]
@@ -121,6 +191,8 @@ def pick_bets(
             break
         odds = odds_dict.get(sel) or odds_dict.get(sel[0] if len(sel) == 1 else sel)
         if odds is None or odds <= 1.0:
+            continue
+        if not (min_odds <= odds <= max_odds):
             continue
 
         implied = 1.0 / odds
@@ -177,6 +249,7 @@ def simulate_session(
     bet_types: list[str] | None = None,
     line_leader_only: bool = False,
     no_col: str = "car_no",
+    strategy: dict | None = None,
 ) -> SessionResult:
     """
     バックテスト
@@ -186,8 +259,20 @@ def simulate_session(
       finish_order:  [1着車番, 2着車番, 3着車番, ...]
       race_id:       文字列
     """
-    if bet_types is None:
-        bet_types = ALL_BET_TYPES
+    # strategy が指定されていればそちらの設定を優先
+    s_bet_types = bet_types
+    s_line_leader = line_leader_only
+    s_bet_config = None
+    s_min_odds = 1.0
+    s_max_odds = 9999.0
+    if strategy:
+        s_bet_types = strategy.get("bet_types", bet_types or ALL_BET_TYPES)
+        s_line_leader = strategy.get("line_leader_only", line_leader_only)
+        s_bet_config = strategy.get("bet_config")
+        s_min_odds = strategy.get("min_odds", 1.0)
+        s_max_odds = strategy.get("max_odds", 9999.0)
+    if s_bet_types is None:
+        s_bet_types = ALL_BET_TYPES
 
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
@@ -198,13 +283,14 @@ def simulate_session(
         finish_order = race["finish_order"]
         race_id = race.get("race_id", "")
 
-        for bt in bet_types:
+        for bt in s_bet_types:
             odds_dict = odds_all.get(bt, {})
             if not odds_dict:
                 continue
 
             new_bets = pick_bets(
-                pred_df, odds_dict, bankroll, bt, no_col, line_leader_only
+                pred_df, odds_dict, bankroll, bt, no_col, s_line_leader,
+                bet_config=s_bet_config, min_odds=s_min_odds, max_odds=s_max_odds,
             )
 
             for bet in new_bets:
