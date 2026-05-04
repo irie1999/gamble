@@ -77,7 +77,7 @@ def calc_bet_amount(
     odds: float,
     kelly_frac: float,
     max_ratio: float = 0.05,
-    max_amount: int = 3000,
+    max_amount: int = 1000,
     min_bet: int = 100,
 ) -> int:
     frac = kelly_fraction(prob, odds, kelly_frac)
