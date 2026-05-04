@@ -276,6 +276,7 @@ def simulate_session(
 
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
+    fixed_amount = strategy.get("fixed_bet") if strategy else None
 
     for race in races:
         pred_df = race["pred_df"]
@@ -294,6 +295,8 @@ def simulate_session(
             )
 
             for bet in new_bets:
+                if fixed_amount:
+                    bet.bet_amount = int(fixed_amount)
                 bet.race_id = race_id
                 bankroll -= bet.bet_amount
                 bet.win_flag = check_win(bet, finish_order)

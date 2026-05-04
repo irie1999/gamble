@@ -49,7 +49,7 @@ def cmd_compare(args):
         return
 
     booster, feature_cols, meta = load_model()
-    mean_auc = meta.get("metrics", {}).get("mean_auc", 0)
+    mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
 
     with open(DATA_DIR / "raw_data.json", encoding="utf-8") as f:
         records = json.load(f)
@@ -68,11 +68,14 @@ def cmd_compare(args):
         args.strategies.split(",") if getattr(args, "strategies", None)
         else list(STRATEGIES.keys())
     )
+    fixed_bet = getattr(args, "fixed_bet", None)
+    mode_label = f"固定額{fixed_bet:,}円/bet" if fixed_bet else "Kelly基準"
 
     results = []
-    print(f"\nモデルAUC: {mean_auc:.4f}  テスト期間: {test_days}日  レース数: {len(races_full)}\n")
+    print(f"\nモデルAUC: {mean_auc:.4f}  テスト期間: {test_days}日  "
+          f"レース数: {len(races_full)}  [{mode_label}]\n")
     print(f"{'戦略':<14} {'ROI':>8} {'損益':>12} {'回数':>6} {'的中率':>7} {'賭け金':>12} {'説明'}")
-    print("-" * 80)
+    print("-" * 90)
 
     for name in target_strategies:
         strat = STRATEGIES.get(name)
@@ -80,10 +83,14 @@ def cmd_compare(args):
             print(f"  [{name}] 不明な戦略名 → スキップ")
             continue
 
+        run_strat = dict(strat)
+        if fixed_bet:
+            run_strat["fixed_bet"] = fixed_bet
+
         session = simulate_session(
             races_full,
             initial_bankroll=args.bankroll,
-            strategy=strat,
+            strategy=run_strat,
         )
         total = session.wins + session.losses
         win_rate = session.wins / total if total > 0 else 0
@@ -100,18 +107,18 @@ def cmd_compare(args):
             "final_bankroll": session.final_bankroll,
         })
         roi_str = f"{session.roi:+.1%}"
-        print(f"  {name:<12} {roi_str:>8} {session.profit:>+12,.0f}円 "
+        print(f"  {name:<14} {roi_str:>8} {session.profit:>+12,.0f}円 "
               f"{total:>6} {win_rate:>6.1%} {session.total_bet:>10,.0f}円  {strat['description']}")
 
     results.sort(key=lambda x: x["roi"], reverse=True)
     best = results[0]["name"] if results else "-"
-    print(f"\n最良戦略: {best}\n")
+    print(f"\n最良戦略: {best}  ※オッズは推定値のためROIの絶対値は参考程度\n")
 
     if args.html:
-        _save_compare_html(results, mean_auc, test_days, args.bankroll)
+        _save_compare_html(results, mean_auc, test_days, args.bankroll, mode_label)
 
 
-def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll: float) -> None:
+def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll: float, mode_label: str = "") -> None:
     rows = ""
     for i, r in enumerate(results):
         rank_badge = ["🥇", "🥈", "🥉"][i] if i < 3 else f"{i+1}."
@@ -167,7 +174,7 @@ def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll
 </head><body>
 <div class="header">
   <h1>⚖️ 戦略比較レポート</h1>
-  <div class="sub">生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデルAUC: {auc:.4f} ／ テスト: {test_days}日</div>
+  <div class="sub">生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデルAUC: {auc:.4f} ／ テスト: {test_days}日 ／ {mode_label}</div>
 </div>
 <div class="container">
   <div class="kpi">
@@ -212,7 +219,7 @@ def cmd_predict(args):
         return
 
     booster, feature_cols, meta = load_model()
-    mean_auc = meta.get("metrics", {}).get("mean_auc", 0)
+    mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
 
     date_str = args.date or datetime.now().strftime("%Y%m%d")
     bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
@@ -720,6 +727,8 @@ def main():
     p_cmp.add_argument("--bankroll", type=float, default=50000)
     p_cmp.add_argument("--strategies", type=str, default=None,
                        help=f"比較する戦略カンマ区切り（デフォルト:全戦略）: {','.join(STRATEGIES.keys())}")
+    p_cmp.add_argument("--fixed-bet", dest="fixed_bet", type=int, default=None,
+                       help="固定額ベット（例: 200）。Kellyの複利を排除し純粋な戦略比較ができる")
     p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     sub.add_parser("demo", help="デモ実行")
