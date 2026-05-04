@@ -155,10 +155,17 @@ def main():
                     clean = _re.sub(r'<\?xml[^>]+\?>', '', resp.text)
                     tables = pd.read_html(StringIO(clean), flavor="lxml")
                     print(f"  テーブル数: {len(tables)}")
-                    for i, df in enumerate(tables[:10]):
-                        print(f"    Table[{i}]: shape={df.shape}")
-                        print(df.to_string())
-                        print()
+
+                    # 払戻・オッズ関連テーブルを探す
+                    payout_keywords = ["単勝", "複勝", "2連単", "2連複", "3連単", "3連複", "払戻"]
+                    for i, df in enumerate(tables):
+                        text = df.to_string()
+                        if any(kw in text for kw in payout_keywords):
+                            print(f"\n  ★払戻関連 Table[{i}]: shape={df.shape}")
+                            print(df.to_string())
+                        elif i < 5:
+                            print(f"\n  Table[{i}]: shape={df.shape}")
+                            print(df.head(3).to_string())
             except Exception as e:
                 print(f"  エラー: {e}")
         return
