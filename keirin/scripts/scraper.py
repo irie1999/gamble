@@ -463,28 +463,71 @@ def fetch_race_detail(race: dict) -> list[dict] | None:
     return records
 
 
+def _odds_key_to_str(key: tuple) -> str:
+    return "_".join(str(k) for k in key)
+
+
+def _str_to_odds_key(s: str) -> tuple:
+    return tuple(int(x) for x in s.split("_"))
+
+
+def serialize_odds(odds_by_type: dict) -> dict:
+    return {bt: {_odds_key_to_str(k): v for k, v in d.items()} for bt, d in odds_by_type.items()}
+
+
+def deserialize_odds(data: dict) -> dict:
+    return {bt: {_str_to_odds_key(k): v for k, v in d.items()} for bt, d in data.items()}
+
+
+def load_odds_data(filename: str = "odds_data.json") -> dict:
+    """保存済みオッズデータを読み込む。戻り値: {race_id: {bet_type: {sel_tuple: odds}}}"""
+    path = DATA_DIR / filename
+    if not path.exists():
+        return {}
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    return {rid: deserialize_odds(d) for rid, d in raw.items()}
+
+
+def save_odds_data(odds: dict, filename: str = "odds_data.json") -> None:
+    path = DATA_DIR / filename
+    # 既存データとマージ
+    existing = {}
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            existing = json.load(f)
+    existing.update({rid: serialize_odds(d) for rid, d in odds.items()})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, ensure_ascii=False)
+
+
 def _collect_day(
     date_str: str,
     sleep_sec: float,
     stop_event: threading.Event,
-) -> list[dict]:
-    """1日分のデータを収集"""
+) -> tuple[list[dict], dict]:
+    """1日分のデータを収集。戻り値: (records, {race_id: odds})"""
     if stop_event.is_set():
-        return []
+        return [], {}
 
     races = fetch_daily_races(date_str)
     if not races:
-        return []
+        return [], {}
 
     records = []
+    odds_day = {}
     for race in races:
         if stop_event.is_set():
             break
         race_records = fetch_race_detail(race)
         if race_records:
             records.extend(race_records)
+        # オッズ取得（単勝・複勝・2連単・2連複）
+        odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
+        if odds:
+            odds_day[race["race_id"]] = odds
         time.sleep(sleep_sec)
-    return records
+    return records, odds_day
 
 
 def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], str | None]:
@@ -555,25 +598,29 @@ def collect_data(
             futures[executor.submit(_collect_day_with_jitter,
                                      date_str, sleep_sec, _stop_event, jitter)] = date_str
 
+        all_odds: dict = {}
         for future in as_completed(futures):
             date_str = futures[future]
             if _stop_event.is_set():
                 break
             try:
-                day_records = future.result()
+                day_records, day_odds = future.result()
                 with lock:
                     records.extend(day_records)
+                    all_odds.update(day_odds)
                     n = len(day_records)
                     days_done += 1
-                    print(f"  {date_str}: {n}件  [{days_done}/{total_days}日完了, 累計{len(records)}件]")
+                    print(f"  {date_str}: {n}件 オッズ{len(day_odds)}レース  [{days_done}/{total_days}日完了, 累計{len(records)}件]")
 
                     if checkpoint_days > 0 and days_done % checkpoint_days == 0:
                         print(f"  [チェックポイント] 保存中...")
                         save_records(records, filename)
+                        save_odds_data(all_odds)
             except Exception as e:
                 print(f"  [エラー] {date_str}: {e}")
 
     save_records(records, filename)
+    save_odds_data(all_odds)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     return records
 

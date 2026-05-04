@@ -20,14 +20,14 @@ sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
 from scraper import (
     collect_data, save_records, load_existing_records, VENUE_CODES,
-    fetch_daily_schedule, fetch_entry_detail, fetch_race_odds,
+    fetch_daily_schedule, fetch_entry_detail, fetch_race_odds, load_odds_data,
 )
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
     train_evaluate, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config,
 )
-from betting import simulate_session, print_session_report, DEDUCTION_RATE, make_mock_odds, pick_bets, STRATEGIES
+from betting import simulate_session, print_session_report, make_mock_odds, pick_bets, STRATEGIES
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
@@ -274,21 +274,10 @@ def cmd_predict(args):
 
         nos = df["car_no"].astype(int).tolist()
 
-        # 実オッズを取得（取れなければモックオッズにフォールバック）
-        real_odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
-        if real_odds:
-            odds_dict = real_odds
-            # trifecta/trio はモックで補完
-            market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
-            market_p = np.clip(market_p, 0.01, 1)
-            market_p /= market_p.sum()
-            mock = make_mock_odds(nos, market_p, [bt for bt in bet_types if bt not in real_odds], noise=0.0)
-            odds_dict.update(mock)
-        else:
-            market_p = df["win_rate"].fillna(1 / len(nos)).values.astype(float)
-            market_p = np.clip(market_p, 0.01, 1)
-            market_p /= market_p.sum()
-            odds_dict = make_mock_odds(nos, market_p, bet_types, noise=0.0)
+        # 実オッズのみ使用。取れなければこのレースはスキップ
+        odds_dict = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
+        if not odds_dict:
+            continue
 
         pred_sorted = pred_df.sort_values("win_prob", ascending=False)
         pred_str = " > ".join(
@@ -493,17 +482,23 @@ def cmd_backtest(args):
     raw_path = DATA_DIR / "raw_data.json"
     model_path = MODEL_DIR / "lgb_model.txt"
     bet_types = args.bet_types.split(",") if args.bet_types else ALL_BET_TYPES
-    if raw_path.exists() and model_path.exists():
-        print("実モデルでバックテスト実行...")
-        _backtest_real(args, bet_types)
-    else:
-        print("モデル or データが未作成のためモックデータでバックテスト実行...")
-        _backtest_mock(args, bet_types)
+    if not raw_path.exists():
+        print("データがありません。先に `python main.py collect` を実行してください")
+        return
+    if not model_path.exists():
+        print("モデルがありません。先に `python main.py train` を実行してください")
+        return
+    print("実モデルでバックテスト実行...")
+    _backtest_real(args, bet_types)
 
 
-def _build_races(booster, feature_cols, df_feat, bet_types):
-    """バックテスト用レースリストを構築（モデル予測 + モックオッズ）"""
+def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
+    """バックテスト用レースリストを構築（モデル予測 + 実オッズ）"""
+    if odds_data is None:
+        odds_data = load_odds_data()
+
     races = []
+    skipped = 0
     for (date, venue, rno), race_df in df_feat.groupby(["date", "venue_code", "race_no"]):
         race_df = race_df.drop_duplicates(subset="car_no", keep="first")
         winner_row = race_df[race_df["win"] == 1]
@@ -523,13 +518,25 @@ def _build_races(booster, feature_cols, df_feat, bet_types):
             "is_line_leader": race_df.get("is_line_leader", pd.Series([0]*len(race_df))).values,
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
-        nos = race_df["car_no"].astype(int).tolist()
-        market_p = race_df["win_rate"].fillna(1 / len(nos)).values.astype(float)
-        market_p = np.clip(market_p, 0.01, 1)
-        market_p /= market_p.sum()
-        odds = make_mock_odds(nos, market_p, bet_types, noise=0.05)
+
+        # 実オッズのみ使用。なければそのレースはスキップ
+        race_id_key = race_df["race_no"].iloc[0]  # scraper の race_id 形式で検索
+        # odds_data のキーは scraper の race_id（16桁）、ここでは date_venue_rno 形式で近似検索
+        odds = {}
+        for rid, od in odds_data.items():
+            if rid[2:10] == date and rid[:2] == venue and int(rid[14:16]) == rno:
+                odds = od
+                break
+
+        if not odds:
+            skipped += 1
+            continue
+
         races.append({"race_id": f"{date}_{venue}_{rno}", "pred_df": pred_df,
                        "odds": odds, "finish_order": finish})
+
+    if skipped:
+        print(f"  ※オッズデータなし: {skipped}レーススキップ（`collect` で再収集するとオッズも取得されます）")
     return races
 
 
@@ -553,46 +560,6 @@ def _backtest_real(args, bet_types):
                                strategy=strategy)
     print_session_report(session)
     _save_results(session, html=getattr(args, "html", False))
-
-
-def _backtest_mock(args, bet_types):
-    np.random.seed(42)
-    races = []
-    for i in range(300):
-        n = np.random.choice([7, 8, 9])
-        nos = list(range(1, n + 1))
-        true_p = np.random.dirichlet(np.ones(n) * 2)
-        finish = list(np.random.choice(nos, size=min(n, 3), replace=False, p=true_p))
-        while len(finish) < 3:
-            finish.append(nos[len(finish)])
-
-        market_p = true_p + np.random.normal(0, 0.03, n)
-        market_p = np.clip(market_p, 0.005, 1)
-        market_p /= market_p.sum()
-
-        pred_p = true_p + np.random.normal(0, 0.015, n)
-        pred_p = np.clip(pred_p, 0.005, 1)
-        pred_p /= pred_p.sum()
-
-        line_configs = _generate_line_config(n)
-        pred_df = pd.DataFrame({
-            "car_no": [c for _, c in line_configs],
-            "player_name": [f"選手{c}" for _, c in line_configs],
-            "win_prob": pred_p[:len(line_configs)],
-            "is_line_leader": [
-                1 if c == min(cc for ll, cc in line_configs if ll == ln) and ln > 0 else 0
-                for ln, c in line_configs
-            ],
-            "line_no": [ln for ln, _ in line_configs],
-        })
-        odds = make_mock_odds(nos, market_p, bet_types, noise=0.0)
-        races.append({"race_id": f"mock_{i+1:03d}", "pred_df": pred_df,
-                       "odds": odds, "finish_order": finish})
-
-    session = simulate_session(races, initial_bankroll=args.bankroll,
-                               bet_types=bet_types, line_leader_only=args.line_leader)
-    print_session_report(session)
-    _save_results(session, "mock_backtest.json", html=getattr(args, "html", False))
 
 
 def cmd_demo(args):
