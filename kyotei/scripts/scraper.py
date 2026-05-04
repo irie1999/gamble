@@ -4,9 +4,10 @@ boatrace.jp の公式サイトからレース情報・選手成績・モータ�
 """
 
 import os
+import re
 import time
 import json
-import re
+import random
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -342,7 +343,6 @@ def collect_data(
         date_str = current.strftime("%Y%m%d")
         print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
 
-        import random
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
                 executor.submit(
