@@ -226,8 +226,13 @@ def _collect_venue_day(
     date_str: str,
     sleep_sec: float,
     stop_event: threading.Event,
+    jitter: float = 0.0,
 ) -> list[dict]:
     """1場1日分のデータを収集（スレッド内で実行）"""
+    if jitter > 0:
+        time.sleep(jitter)
+    if stop_event.is_set():
+        return []
     race_list = fetch_race_list(venue_code, date_str)
     if not race_list:
         return []
@@ -329,10 +334,14 @@ def collect_data(
         date_str = current.strftime("%Y%m%d")
         print(f"\n=== {date_str}  [{days_done+1}/{total_days}日目]  累計{len(records)}件 ===")
 
+        import random
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(_collect_venue_day, vc, date_str, sleep_sec, _stop_event): vc
-                for vc in venue_codes
+                executor.submit(
+                    _collect_venue_day, vc, date_str, sleep_sec, _stop_event,
+                    jitter=i * sleep_sec * 0.5 + random.uniform(0, sleep_sec * 0.5),
+                ): vc
+                for i, vc in enumerate(venue_codes)
             }
             for future in as_completed(futures):
                 vc = futures[future]
