@@ -457,47 +457,53 @@ def cmd_collect(args):
     today = datetime.now()
     end_date = today.strftime("%Y%m%d")
     venue_codes = args.venues.split(",") if args.venues else None
-    do_merge = getattr(args, "merge", False)
 
-    existing_records = []
+    existing_records, _ = load_existing_records("raw_data.json")
+    start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
+
     if args.full:
-        start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
-        if do_merge:
-            # --full --merge: 指定期間を再収集してマージ
-            existing_records, _ = load_existing_records("raw_data.json")
-            print(f"既存データ: {len(existing_records)}件 → マージモード")
+        # --full: 指定期間を最初から全部取り直す（既存データは破棄）
         print(f"全期間収集（--full）: {start_date} → {end_date}")
-    else:
-        existing_records, latest_date = load_existing_records("raw_data.json")
-        if latest_date:
-            resume_date = (datetime.strptime(latest_date, "%Y%m%d") + timedelta(days=1))
-            start_date = resume_date.strftime("%Y%m%d")
-            print(f"既存データ: {len(existing_records)}件 (最終: {latest_date})")
-            print(f"増分収集: {start_date} → {end_date}")
-            if start_date > end_date:
-                print("最新データがあります。収集不要です。")
-                return
-        else:
-            start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
-            print(f"新規収集: {start_date} → {end_date}")
+        print(f"対象場: {venue_codes or '全場'}")
+        collect_data(
+            start_date, end_date,
+            venue_codes=venue_codes,
+            sleep_sec=args.sleep,
+            existing_records=[],
+            checkpoint_days=7,
+            filename="raw_data.json",
+            workers=args.workers,
+        )
+        return
 
+    # デフォルト: 指定期間のうち「まだ取得していない日付」だけ収集してマージ
+    if existing_records:
+        existing_dates = sorted({r.get("date") for r in existing_records if r.get("date")})
+        print(f"既存データ: {len(existing_records)}件  期間: {existing_dates[0]}〜{existing_dates[-1]}")
+    else:
+        print("既存データなし → 新規収集")
+
+    print(f"収集対象期間: {start_date} → {end_date}（{args.days}日分）")
     print(f"対象場: {venue_codes or '全場'}")
+    print()
+
     new_records = collect_data(
         start_date, end_date,
         venue_codes=venue_codes,
         sleep_sec=args.sleep,
-        existing_records=[] if (args.full and not do_merge) else existing_records,
+        existing_records=existing_records,
         checkpoint_days=7,
         filename="raw_data.json",
         workers=args.workers,
+        skip_existing_dates=True,  # 取得済みの日付はスキップ
     )
 
-    if do_merge and args.full and existing_records:
-        # 既存データとマージして保存
+    # 既存データと新規データをマージして保存
+    if existing_records:
         merged = merge_records(existing_records, new_records)
-        before = len(new_records)
         save_records(merged, "raw_data.json")
-        print(f"マージ完了: 既存{len(existing_records)}件 + 新規{before}件 → {len(merged)}件（重複除去済み）")
+        new_count = len(merged) - len(existing_records)
+        print(f"マージ完了: 既存{len(existing_records)}件 + 新規{new_count}件 → {len(merged)}件")
 
 
 def cmd_pipeline(args):
@@ -903,9 +909,7 @@ def main():
     p_col.add_argument("--venues", type=str, default=None,
                        help="場コードカンマ区切り（デフォルト: 全場）")
     p_col.add_argument("--full", action="store_true",
-                       help="既存データを無視して全期間再収集")
-    p_col.add_argument("--merge", action="store_true",
-                       help="既存データを保持しつつ新規データをマージ（--full と併用可）")
+                       help="既存データを破棄して全期間再収集（デフォルトは未取得日のみ差分収集）")
     p_col.add_argument("--sleep", type=float, default=1.5,
                        help="リクエスト間隔（秒、デフォルト: 1.5）")
     p_col.add_argument("--workers", type=int, default=4,

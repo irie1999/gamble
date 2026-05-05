@@ -660,11 +660,14 @@ def collect_data(
     checkpoint_days: int = 7,
     filename: str = "raw_data.json",
     workers: int = 4,
+    skip_existing_dates: bool = False,
 ) -> list[dict]:
-    """期間内の全レースデータを収集（kdreams.jp、日別並列）"""
+    """期間内の全レースデータを収集（kdreams.jp、日別並列）
+
+    skip_existing_dates=True のとき、existing_records に含まれる日付は収集をスキップする。
+    """
     start = datetime.strptime(start_date, "%Y%m%d")
     end = datetime.strptime(end_date, "%Y%m%d")
-    total_days = (end - start).days + 1
 
     records = list(existing_records) if existing_records else []
     lock = threading.Lock()
@@ -678,16 +681,28 @@ def collect_data(
         os._exit(0)
     signal.signal(signal.SIGINT, _handler)
 
-    # 1日あたり概算: 5場×7レース×1リクエスト + 1リクエスト(一覧)
-    est_sec = total_days * (5 * 7 + 1) * sleep_sec / max(1, workers)
-    print(f"収集日数: {total_days}日  並列数: {workers}日  概算所要時間: {est_sec/3600:.1f}時間")
-
-    days_done = 0
     current = start
     date_list = []
     while current <= end:
         date_list.append(current.strftime("%Y%m%d"))
         current += timedelta(days=1)
+
+    # 既存データに含まれる日付はスキップ
+    if skip_existing_dates and existing_records:
+        existing_dates = {r.get("date") for r in existing_records if r.get("date")}
+        skipped = [d for d in date_list if d in existing_dates]
+        date_list = [d for d in date_list if d not in existing_dates]
+        if skipped:
+            print(f"  取得済み日付: {len(skipped)}日スキップ（{skipped[0]}〜{skipped[-1]}）")
+
+    total_days = len(date_list)
+    if total_days == 0:
+        print("  収集対象なし（全日付が取得済み）")
+        return records
+
+    # 1日あたり概算: 5場×7レース×1リクエスト + 1リクエスト(一覧)
+    est_sec = total_days * (5 * 7 + 1) * sleep_sec / max(1, workers)
+    print(f"収集日数: {total_days}日  並列数: {workers}日  概算所要時間: {est_sec/3600:.1f}時間")
 
     # 日付を並列で処理
     with ThreadPoolExecutor(max_workers=workers) as executor:
