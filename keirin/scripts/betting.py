@@ -15,69 +15,72 @@ from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES, KEIRIN_BET_TYP
 
 DEDUCTION_RATE = 0.25
 
-# 賭け式ごとのデフォルト設定: (min_edge, kelly_frac, max_combos, top_n)
+# 賭け式ごとのデフォルト設定: (min_prob, -, max_combos, top_n)
+# min_prob: その組み合わせの予測確率の最低閾値
 # keirin.jpで実際に販売される賭け式: trifecta / trio / wide
 BET_CONFIG = {
-    "trifecta": (0.08, 0.03, 3, 20),
-    "trio":     (0.07, 0.04, 3, 15),
-    "wide":     (0.06, 0.05, 3, 10),
+    "trifecta": (0.04, 0, 3, 20),
+    "trio":     (0.08, 0, 3, 15),
+    "wide":     (0.15, 0, 3, 10),
 }
 
 # ---- 戦略プリセット ----
+# bet_config の第1要素 = min_prob（組み合わせ予測確率の最低閾値）
+# 第3要素 = max_combos（1レースあたりの最大ベット数）
+# 第4要素 = top_n（候補として評価する上位N組み合わせ）
 STRATEGIES: dict[str, dict] = {
     "wide_only": {
         "description": "ワイドのみ：的中率重視・低リスク",
         "bet_types": ["wide"],
         "line_leader_only": False,
-        "min_odds": 1.5, "max_odds": 9999,
-        "bet_config": {"wide": (0.04, 0.05, 4, 10)},
+        "bet_config": {"wide": (0.15, 0, 3, 10)},
+        "fixed_amount": 100,
     },
     "trio_wide": {
         "description": "3連複＋ワイド：バランス重視",
         "bet_types": ["trio", "wide"],
         "line_leader_only": False,
-        "min_odds": 2.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
+        "fixed_amount": 100,
     },
     "balanced": {
         "description": "全賭け式：3連単・3連複・ワイド（標準）",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 2.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
+        "fixed_amount": 100,
     },
     "value_hunt": {
-        "description": "高エッジ厳選：エッジ10%以上・少数精鋭",
+        "description": "高確率厳選：予測確率上位のみ",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 2.5, "max_odds": 9999,
         "bet_config": {
-            "trifecta": (0.12, 0.03, 3, 20),
-            "trio":     (0.10, 0.04, 3, 15),
-            "wide":     (0.08, 0.05, 3, 10),
+            "trifecta": (0.06, 0, 2, 20),
+            "trio":     (0.12, 0, 2, 15),
+            "wide":     (0.20, 0, 2, 10),
         },
+        "fixed_amount": 100,
     },
     "line_leader": {
         "description": "ライン先頭：競輪固有の先頭選手に絞る",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": True,
-        "min_odds": 2.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
+        "fixed_amount": 100,
     },
     "fixed_bet": {
-        "description": "固定100円：Kelly不使用・均等ベット（比較用）",
+        "description": "全賭け式・均等ベット（比較用）",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 1.5, "max_odds": 9999,
         "bet_config": BET_CONFIG,
-        "fixed_bet": 100,
+        "fixed_amount": 100,
     },
     "trifecta_mid": {
-        "description": "3連単中穴：オッズ5〜200倍",
+        "description": "3連単のみ：予測確率上位3点",
         "bet_types": ["trifecta"],
         "line_leader_only": False,
-        "min_odds": 5.0, "max_odds": 200.0,
-        "bet_config": {"trifecta": (0.04, 0.03, 3, 20)},
+        "bet_config": {"trifecta": (0.04, 0, 3, 20)},
+        "fixed_amount": 100,
     },
 }
 
@@ -144,18 +147,16 @@ def calc_bet_amount(
 
 def pick_bets(
     pred_df: pd.DataFrame,
-    odds_dict: dict,
-    bankroll: float,
-    bet_type: str = "win",
+    bet_type: str = "trifecta",
     no_col: str = "car_no",
     line_leader_only: bool = False,
     bet_config: dict | None = None,
-    min_odds: float = 1.0,
-    max_odds: float = 9999,
+    fixed_amount: int = 100,
 ) -> list[BettingResult]:
+    """モデル予測確率の上位組み合わせを選択（市場オッズ不要）"""
     cfg_source = bet_config if bet_config else BET_CONFIG
-    cfg = cfg_source.get(bet_type, BET_CONFIG.get(bet_type, (0.05, 0.15, 3, 10)))
-    min_edge, kelly_frac, max_combos, top_n = cfg
+    cfg = cfg_source.get(bet_type, BET_CONFIG.get(bet_type, (0.05, 0.03, 3, 10)))
+    min_prob, _, max_combos, top_n = cfg
 
     df = pred_df.copy()
     if line_leader_only:
@@ -175,21 +176,7 @@ def pick_bets(
     for sel, pred_prob in candidates:
         if len(bets) >= max_combos:
             break
-        odds = odds_dict.get(sel) or odds_dict.get(sel[0] if len(sel) == 1 else sel)
-        if odds is None or odds <= 1.0:
-            continue
-        if not (min_odds <= odds <= max_odds):
-            continue
-
-        implied = 1.0 / odds
-        edge = pred_prob - implied
-        ev = pred_prob * odds
-
-        if edge < min_edge or ev <= 1.0:
-            continue
-
-        amount = calc_bet_amount(bankroll, pred_prob, odds, kelly_frac)
-        if amount < 100:
+        if pred_prob < min_prob:
             continue
 
         bets.append(BettingResult(
@@ -197,11 +184,11 @@ def pick_bets(
             bet_type=bet_type,
             selections=sel,
             predicted_prob=pred_prob,
-            implied_prob=implied,
-            edge=edge,
-            odds=odds,
-            bet_amount=amount,
-            expected_value=ev,
+            implied_prob=0.0,
+            edge=0.0,
+            odds=0.0,
+            bet_amount=fixed_amount,
+            expected_value=0.0,
         ))
 
     return bets
@@ -240,64 +227,52 @@ def simulate_session(
     no_col: str = "car_no",
     strategy: dict | None = None,
 ) -> SessionResult:
-    """
-    バックテスト
+    """バックテスト（市場オッズ不要・実際の払戻額のみ使用）
+
     races 各要素:
       pred_df:       win_prob 付きDF
-      odds:          {bet_type: {sel_tuple: odds}}
+      payouts:       {bet_type: {sel_tuple: 払戻倍率}}  ← 実データ
       finish_order:  [1着車番, 2着車番, 3着車番, ...]
       race_id:       文字列
     """
-    # strategy が指定されていればそちらの設定を優先
-    s_bet_types = bet_types
-    s_line_leader = line_leader_only
-    s_bet_config = None
-    s_min_odds = 1.0
-    s_max_odds = 9999.0
-    if strategy:
-        s_bet_types = strategy.get("bet_types", bet_types or ALL_BET_TYPES)
-        s_line_leader = strategy.get("line_leader_only", line_leader_only)
-        s_bet_config = strategy.get("bet_config")
-        s_min_odds = strategy.get("min_odds", 1.0)
-        s_max_odds = strategy.get("max_odds", 9999.0)
-    if s_bet_types is None:
-        s_bet_types = ALL_BET_TYPES
+    s_bet_types = strategy.get("bet_types", bet_types or ALL_BET_TYPES) if strategy else (bet_types or ALL_BET_TYPES)
+    s_line_leader = strategy.get("line_leader_only", line_leader_only) if strategy else line_leader_only
+    s_bet_config = strategy.get("bet_config") if strategy else None
+    s_fixed_amount = strategy.get("fixed_amount", 100) if strategy else 100
 
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
-    fixed_amount = strategy.get("fixed_bet") if strategy else None
 
     for race in races:
         pred_df = race["pred_df"]
-        odds_all = race["odds"]           # 推定事前オッズ（ベット選択用）
-        payouts_all = race.get("payouts", {})  # 実際の払戻額（当選時の計算用）
+        payouts_all = race.get("payouts", {})
         finish_order = race["finish_order"]
         race_id = race.get("race_id", "")
 
         for bt in s_bet_types:
-            odds_dict = odds_all.get(bt, {})
-            if not odds_dict:
-                continue
-
             new_bets = pick_bets(
-                pred_df, odds_dict, bankroll, bt, no_col, s_line_leader,
-                bet_config=s_bet_config, min_odds=s_min_odds, max_odds=s_max_odds,
+                pred_df, bt, no_col, s_line_leader,
+                bet_config=s_bet_config,
+                fixed_amount=s_fixed_amount,
             )
 
             for bet in new_bets:
-                if fixed_amount:
-                    bet.bet_amount = int(fixed_amount)
                 bet.race_id = race_id
                 bankroll -= bet.bet_amount
                 bet.win_flag = check_win(bet, finish_order)
 
                 if bet.win_flag:
-                    # 実際の払戻額があればそちらを優先、なければ推定オッズで代替
+                    # 実際の払戻額を使用（当選組み合わせのみ存在）
                     actual = payouts_all.get(bt, {}).get(bet.selections)
-                    return_odds = actual if (actual and actual > 1.0) else bet.odds
-                    bet.return_odds = return_odds
-                    bankroll += bet.bet_amount * return_odds
-                    session.wins += 1
+                    if actual and actual > 1.0:
+                        bet.return_odds = actual
+                        bankroll += bet.bet_amount * actual
+                        session.wins += 1
+                    else:
+                        # 払戻データなし → 的中としてカウントしない
+                        bankroll += bet.bet_amount  # 返金扱い
+                        bet.win_flag = False
+                        session.losses += 1
                 else:
                     session.losses += 1
 

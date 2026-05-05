@@ -31,7 +31,7 @@ from model import (
     train_evaluate, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config,
 )
-from betting import simulate_session, print_session_report, make_mock_odds, pick_bets, STRATEGIES
+from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import report as html_report
@@ -283,9 +283,7 @@ def cmd_predict(args):
             "line_no": df["line_no"].fillna(0).astype(int).values,
         })
 
-        nos = df["car_no"].astype(int).tolist()
-
-        # keirin.jp ライブオッズを優先取得
+        # keirin.jp ライブオッズを参考取得（選択には使わない、表示用）
         odds_dict = {}
         kcd = VENUE_CODE_TO_KCD.get(str(race.get("venue_code", "")))
         if kcd:
@@ -300,12 +298,8 @@ def cmd_predict(args):
             except Exception:
                 pass
 
-        # フォールバック: kdreams.jp スクレイピング
         if not odds_dict:
             odds_dict = fetch_race_odds(race, bet_types=["trifecta", "trio", "wide"])
-
-        if not odds_dict:
-            continue
 
         pred_sorted = pred_df.sort_values("win_prob", ascending=False)
         pred_str = " > ".join(
@@ -314,24 +308,25 @@ def cmd_predict(args):
         )
 
         for bt in bet_types:
-            for b in pick_bets(pred_df, odds_dict.get(bt, {}), bankroll, bt):
-                if b.expected_value < min_ev:
-                    continue
+            bets = pick_bets(pred_df, bt, fixed_amount=100)
+            for b in bets:
+                # 参考用: ライブオッズがあれば表示に使う
+                live_odds = odds_dict.get(bt, {}).get(b.selections, 0.0)
                 signal_rows.append({
                     "venue": race["venue_name"],
                     "race_no": race["race_no"],
                     "bet_type": BET_TYPE_NAMES.get(b.bet_type, b.bet_type),
                     "selections": str(list(b.selections)),
-                    "odds": b.odds,
+                    "odds": live_odds,
                     "bet_amount": b.bet_amount,
-                    "edge": b.edge,
-                    "ev": b.expected_value,
+                    "edge": 0.0,
+                    "ev": live_odds * b.predicted_prob if live_odds > 0 else b.predicted_prob,
                     "pred_prob": b.predicted_prob,
                     "pred_str": pred_str,
                 })
 
     if not signal_rows:
-        print(f"シグナルがありません（EV≥{min_ev} の条件を満たすベットなし）")
+        print("シグナルがありません")
         return
 
     # EV 降順でソートし上位 top_n を「おすすめ」とする
@@ -349,8 +344,8 @@ def cmd_predict(args):
 
     total_top = sum(r["bet_amount"] for r in top_picks)
     print(f"\n合計推奨額（TOP{top_n}）: {total_top:,}円")
-    print(f"全シグナル: {len(signal_rows)}件（EV≥{min_ev}）")
-    print("\n⚠ オッズは推定値です。実際のオッズを確認してから賭け額を調整してください。\n")
+    print(f"全シグナル: {len(signal_rows)}件")
+    print("\n⚠ オッズはライブ参考値です（取得できない場合は0）。実際のオッズを確認してから購入してください。\n")
 
     if args.html:
         _save_signal_html(signal_rows, top_picks, date_str, mean_auc, bankroll, top_n)
@@ -640,8 +635,8 @@ def _str_keys_to_tuples(d: dict) -> dict:
 def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
     """バックテスト用レースリストを構築
 
-    ベット選択: make_mock_odds による推定事前オッズ（払戻データは当選組み合わせのみで使えない）
-    払戻計算:  odds_data の実際の払戻額があれば使用、なければ推定オッズで代替
+    ベット選択: モデル予測確率の上位組み合わせ（市場オッズ不要）
+    払戻計算:  odds_data の実際の払戻額（当選時のみ存在）
     着順判定:  rank列（fix_ranks.py適用済み）
     """
     if odds_data is None:
@@ -668,7 +663,6 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
         probs = booster.predict(X)
         probs = probs / probs.sum()
 
-        car_nos = race_df["car_no"].astype(int).tolist()
         pred_df = pd.DataFrame({
             "car_no": race_df["car_no"].values,
             "player_name": race_df["player_name"].values,
@@ -677,19 +671,9 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # ベット選択用: 市場オッズをwin_rateベースで生成（モデル予測とは独立）
-        # race_idから決定論的シードを生成して再現性を確保
-        raw_wr = race_df["win_rate"].values.astype(float)
-        raw_wr = np.clip(raw_wr, 0.01, 1.0)
-        market_probs = raw_wr / raw_wr.sum()
         race_id = race_df["race_id"].iloc[0] if "race_id" in race_df.columns else None
-        seed = int(abs(hash(str(race_id) + str(date) + str(rno))) % (2**31))
-        rng_state = np.random.get_state()
-        np.random.seed(seed)
-        est_odds = make_mock_odds(car_nos, market_probs, KEIRIN_BET_TYPES, noise=0.08)
-        np.random.set_state(rng_state)
 
-        # 払戻計算用: 実際の払戻額（当選時のみ存在）
+        # 実際の払戻額（当選時のみ存在）
         actual_payouts: dict = {}
         od = None
         if race_id and race_id in odds_by_race_id:
@@ -707,8 +691,7 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
         races.append({
             "race_id": race_id or f"{date}_{venue}_{rno}",
             "pred_df": pred_df,
-            "odds": est_odds,           # 推定事前オッズ（ベット選択用）
-            "payouts": actual_payouts,  # 実際の払戻額（当選時の払戻計算用）
+            "payouts": actual_payouts,
             "finish_order": finish,
         })
 
@@ -819,17 +802,10 @@ def cmd_demo(args):
 
         pred_df_race = predict_race(result["model"], race_df, result["feature_cols"])
 
-        n = len(race_df)
-        market_p = np.full(n, 1.0 / n) + np.random.normal(0, 0.03, n)
-        market_p = np.clip(market_p, 0.01, 1)
-        market_p /= market_p.sum()
-        car_nos = race_df["car_no"].astype(int).tolist()
-        odds = make_mock_odds(car_nos, market_p, ALL_BET_TYPES, noise=0.0)
-
         races.append({
             "race_id": f"{date}_{rno}",
             "pred_df": pred_df_race,
-            "odds": odds,
+            "payouts": {},
             "finish_order": finish,
         })
 
