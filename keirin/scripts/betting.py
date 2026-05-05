@@ -68,11 +68,11 @@ STRATEGIES: dict[str, dict] = {
         "bet_config": BET_CONFIG,
         "fixed_amount": 100,
     },
-    "fixed_bet": {
-        "description": "全賭け式・均等ベット（比較用）",
-        "bet_types": KEIRIN_BET_TYPES,
+    "trio_only": {
+        "description": "3連複のみ：中リスク・中配当",
+        "bet_types": ["trio"],
         "line_leader_only": False,
-        "bet_config": BET_CONFIG,
+        "bet_config": {"trio": (0.08, 0, 3, 15)},
         "fixed_amount": 100,
     },
     "trifecta_mid": {
