@@ -18,9 +18,9 @@ DEDUCTION_RATE = 0.25
 # 賭け式ごとのデフォルト設定: (min_edge, kelly_frac, max_combos, top_n)
 # keirin.jpで実際に販売される賭け式: trifecta / trio / wide
 BET_CONFIG = {
-    "trifecta": (0.08, 0.10, 3, 20),
-    "trio":     (0.07, 0.12, 3, 15),
-    "wide":     (0.06, 0.15, 3, 10),
+    "trifecta": (0.08, 0.03, 3, 20),
+    "trio":     (0.07, 0.04, 3, 15),
+    "wide":     (0.06, 0.05, 3, 10),
 }
 
 # ---- 戦略プリセット ----
@@ -30,7 +30,7 @@ STRATEGIES: dict[str, dict] = {
         "bet_types": ["wide"],
         "line_leader_only": False,
         "min_odds": 1.5, "max_odds": 9999,
-        "bet_config": {"wide": (0.04, 0.15, 4, 10)},
+        "bet_config": {"wide": (0.04, 0.05, 4, 10)},
     },
     "trio_wide": {
         "description": "3連複＋ワイド：バランス重視",
@@ -52,9 +52,9 @@ STRATEGIES: dict[str, dict] = {
         "line_leader_only": False,
         "min_odds": 2.5, "max_odds": 9999,
         "bet_config": {
-            "trifecta": (0.12, 0.10, 3, 20),
-            "trio":     (0.10, 0.12, 3, 15),
-            "wide":     (0.08, 0.15, 3, 10),
+            "trifecta": (0.12, 0.03, 3, 20),
+            "trio":     (0.10, 0.04, 3, 15),
+            "wide":     (0.08, 0.05, 3, 10),
         },
     },
     "line_leader": {
@@ -77,7 +77,7 @@ STRATEGIES: dict[str, dict] = {
         "bet_types": ["trifecta"],
         "line_leader_only": False,
         "min_odds": 5.0, "max_odds": 200.0,
-        "bet_config": {"trifecta": (0.04, 0.08, 3, 20)},
+        "bet_config": {"trifecta": (0.04, 0.03, 3, 20)},
     },
 }
 
@@ -131,8 +131,8 @@ def calc_bet_amount(
     prob: float,
     odds: float,
     kelly_frac: float,
-    max_ratio: float = 0.05,
-    max_amount: int = 1000,
+    max_ratio: float = 0.02,
+    max_amount: int = 300,
     min_bet: int = 100,
 ) -> int:
     frac = kelly_fraction(prob, odds, kelly_frac)
