@@ -66,6 +66,10 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
     print(f"データ期間: {unique_dates[0]} → {unique_dates[-1]} ({n_dates}日間)")
     print(f"総レコード数: {len(X)}  (勝利数: {y.sum()})")
 
+    n_splits = min(n_splits, n_dates - 1)
+    if n_splits < 2:
+        print(f"警告: データが少なすぎます（{n_dates}日）。最低7日分必要です。")
+        return None
     tscv = TimeSeriesSplit(n_splits=n_splits)
     date_indices = np.searchsorted(unique_dates, dates)
 
