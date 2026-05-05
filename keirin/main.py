@@ -1048,6 +1048,8 @@ render();
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"\nHTMLを保存しました: {out_path}")
+    import webbrowser
+    webbrowser.open(out_path.as_uri())
 
 
 def _save_results(session, filename: str = "backtest_result.json", html: bool = False) -> None:
