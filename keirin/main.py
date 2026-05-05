@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
 
 from scraper import (
-    collect_data, save_records, load_existing_records, VENUE_CODES,
+    collect_data, save_records, load_existing_records, merge_records, VENUE_CODES,
     fetch_daily_schedule, fetch_entry_detail, fetch_race_odds, load_odds_data,
 )
 from keirin_jp import (
@@ -457,9 +457,17 @@ def cmd_collect(args):
     today = datetime.now()
     end_date = today.strftime("%Y%m%d")
     venue_codes = args.venues.split(",") if args.venues else None
+    do_merge = getattr(args, "merge", False)
 
     existing_records = []
-    if not args.full:
+    if args.full:
+        start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
+        if do_merge:
+            # --full --merge: 指定期間を再収集してマージ
+            existing_records, _ = load_existing_records("raw_data.json")
+            print(f"既存データ: {len(existing_records)}件 → マージモード")
+        print(f"全期間収集（--full）: {start_date} → {end_date}")
+    else:
         existing_records, latest_date = load_existing_records("raw_data.json")
         if latest_date:
             resume_date = (datetime.strptime(latest_date, "%Y%m%d") + timedelta(days=1))
@@ -472,20 +480,24 @@ def cmd_collect(args):
         else:
             start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
             print(f"新規収集: {start_date} → {end_date}")
-    else:
-        start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
-        print(f"全期間収集（--full）: {start_date} → {end_date}")
 
     print(f"対象場: {venue_codes or '全場'}")
-    collect_data(
+    new_records = collect_data(
         start_date, end_date,
         venue_codes=venue_codes,
         sleep_sec=args.sleep,
-        existing_records=existing_records,
+        existing_records=[] if (args.full and not do_merge) else existing_records,
         checkpoint_days=7,
         filename="raw_data.json",
         workers=args.workers,
     )
+
+    if do_merge and args.full and existing_records:
+        # 既存データとマージして保存
+        merged = merge_records(existing_records, new_records)
+        before = len(new_records)
+        save_records(merged, "raw_data.json")
+        print(f"マージ完了: 既存{len(existing_records)}件 + 新規{before}件 → {len(merged)}件（重複除去済み）")
 
 
 def cmd_pipeline(args):
@@ -618,21 +630,42 @@ def _fetch_keirin_jp_odds(venue_code: str, date: str, race_no: int) -> dict:
     return {}
 
 
+def _str_keys_to_tuples(d: dict) -> dict:
+    """JSON文字列キー('4_1_6')をタプル(4,1,6)に変換"""
+    result = {}
+    for k, v in d.items():
+        if isinstance(k, str):
+            sep = "_" if "_" in k else ","
+            result[tuple(int(x) for x in k.split(sep))] = v
+        else:
+            result[k] = v
+    return result
+
+
 def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
     """バックテスト用レースリストを構築（モデル予測 + 払戻オッズ）"""
-    # keirin.jp 払戻データを優先。取れない場合は scraper 収集の odds_data にフォールバック
     if odds_data is None:
         odds_data = load_odds_data()
+
+    # race_id→odds高速検索用インデックス
+    odds_by_race_id = odds_data if odds_data else {}
 
     races = []
     skipped = 0
     for (date, venue, rno), race_df in df_feat.groupby(["date", "venue_code", "race_no"]):
         race_df = race_df.drop_duplicates(subset="car_no", keep="first")
+
         winner_row = race_df[race_df["win"] == 1]
         if winner_row.empty:
             continue
-        winner = int(winner_row["car_no"].values[0])
-        finish = [winner] + [c for c in race_df["car_no"].tolist() if c != winner]
+
+        # rankカラムから正しい着順を構築（fix_ranks.py適用済みを前提）
+        if "rank" in race_df.columns and race_df["rank"].notna().any():
+            sorted_df = race_df.sort_values("rank", na_position="last")
+            finish = [int(c) for c in sorted_df["car_no"].tolist()]
+        else:
+            winner = int(winner_row["car_no"].values[0])
+            finish = [winner] + [c for c in race_df["car_no"].tolist() if c != winner]
 
         X = race_df[[c for c in feature_cols if c in race_df.columns]].values
         probs = booster.predict(X)
@@ -646,26 +679,42 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # ローカルodds_data優先（collect_payouts.pyで収集済み）
+        # オッズ取得: race_idで直接検索（最優先）
         odds = {}
-        if odds_data:
-            for rid, od in odds_data.items():
-                if rid[2:10] == date and rid[:2] == str(venue) and int(rid[14:16]) == rno:
-                    # keirin.jp払戻データ（trifecta/trio/wide）のみ使用
-                    odds = {bt: d for bt, d in od.items()
-                            if bt in ("trifecta", "trio", "wide", "exacta", "quinella")}
+        race_id = race_df["race_id"].iloc[0] if "race_id" in race_df.columns else None
+
+        od = None
+        if race_id and race_id in odds_by_race_id:
+            od = odds_by_race_id[race_id]
+        elif odds_by_race_id:
+            # フォールバック: 日付・レース番号で検索
+            for rid, entry in odds_by_race_id.items():
+                if rid[2:10] == str(date) and int(rid[12:16]) == rno:
+                    od = entry
                     break
 
-        # フォールバック: keirin.jpから直接取得（ローカルになければ）
+        if od:
+            for bt, d in od.items():
+                if bt in ("trifecta", "trio", "wide", "exacta", "quinella"):
+                    # JSON文字列キー"4_1_6"→タプル(4,1,6)に変換
+                    odds[bt] = _str_keys_to_tuples(d)
+
         if not odds:
-            odds = _fetch_keirin_jp_odds(venue, date, rno)
+            direct = _fetch_keirin_jp_odds(venue, date, rno)
+            # fetch結果はすでにタプルキーのため変換不要
+            if direct:
+                odds = direct
 
         if not odds:
             skipped += 1
             continue
 
-        races.append({"race_id": f"{date}_{venue}_{rno}", "pred_df": pred_df,
-                       "odds": odds, "finish_order": finish})
+        races.append({
+            "race_id": race_id or f"{date}_{venue}_{rno}",
+            "pred_df": pred_df,
+            "odds": odds,
+            "finish_order": finish,
+        })
 
     if skipped:
         print(f"  ※オッズデータなし: {skipped}レーススキップ")
@@ -855,6 +904,8 @@ def main():
                        help="場コードカンマ区切り（デフォルト: 全場）")
     p_col.add_argument("--full", action="store_true",
                        help="既存データを無視して全期間再収集")
+    p_col.add_argument("--merge", action="store_true",
+                       help="既存データを保持しつつ新規データをマージ（--full と併用可）")
     p_col.add_argument("--sleep", type=float, default=1.5,
                        help="リクエスト間隔（秒、デフォルト: 1.5）")
     p_col.add_argument("--workers", type=int, default=4,

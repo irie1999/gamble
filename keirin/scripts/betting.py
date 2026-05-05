@@ -47,14 +47,14 @@ STRATEGIES: dict[str, dict] = {
         "bet_config": BET_CONFIG,
     },
     "value_hunt": {
-        "description": "高エッジ厳選：エッジ15%以上・少数精鋭",
+        "description": "高エッジ厳選：エッジ10%以上・少数精鋭",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 3.0, "max_odds": 9999,
+        "min_odds": 2.5, "max_odds": 9999,
         "bet_config": {
-            "trifecta": (0.15, 0.10, 2, 20),
-            "trio":     (0.12, 0.12, 2, 15),
-            "wide":     (0.10, 0.15, 2, 10),
+            "trifecta": (0.12, 0.10, 3, 20),
+            "trio":     (0.10, 0.12, 3, 15),
+            "wide":     (0.08, 0.15, 3, 10),
         },
     },
     "line_leader": {
@@ -68,16 +68,16 @@ STRATEGIES: dict[str, dict] = {
         "description": "固定100円：Kelly不使用・均等ベット（比較用）",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 2.0, "max_odds": 9999,
+        "min_odds": 1.5, "max_odds": 9999,
         "bet_config": BET_CONFIG,
         "fixed_bet": 100,
     },
     "trifecta_mid": {
-        "description": "3連単中穴：オッズ10〜100倍",
+        "description": "3連単中穴：オッズ5〜200倍",
         "bet_types": ["trifecta"],
         "line_leader_only": False,
-        "min_odds": 10.0, "max_odds": 100.0,
-        "bet_config": {"trifecta": (0.06, 0.10, 3, 20)},
+        "min_odds": 5.0, "max_odds": 200.0,
+        "bet_config": {"trifecta": (0.04, 0.08, 3, 20)},
     },
 }
 

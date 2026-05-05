@@ -630,6 +630,19 @@ def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], 
     return records, latest_date
 
 
+def merge_records(existing: list[dict], new: list[dict]) -> list[dict]:
+    """race_id+car_noでマージ。新しいデータが既存を上書き。race_idなし時は(date,venue_code,race_no,car_no)で識別。"""
+    def record_key(r: dict) -> tuple:
+        if r.get("race_id"):
+            return (r["race_id"], r.get("car_no", 0))
+        return (r.get("date", ""), r.get("venue_code", ""), r.get("race_no", 0), r.get("car_no", 0))
+
+    merged: dict = {record_key(r): r for r in existing}
+    for r in new:
+        merged[record_key(r)] = r
+    return list(merged.values())
+
+
 def save_records(records: list[dict], filename: str = "raw_data.json") -> Path:
     path = DATA_DIR / filename
     with open(path, "w", encoding="utf-8") as f:
