@@ -82,6 +82,22 @@ STRATEGIES: dict[str, dict] = {
         "bet_config": {"trifecta": (0.04, 0, 3, 20)},
         "fixed_amount": 100,
     },
+    "trifecta_sharp": {
+        "description": "3連単1点勝負：モデル確信レースのみ・最高確率1点",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.10, 0, 1, 20)},
+        "min_top_prob": 0.35,   # 1位予測確率35%以上のレースのみ
+        "fixed_amount": 100,
+    },
+    "trifecta_sharp2": {
+        "description": "3連単2点勝負：モデル確信レースのみ",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.07, 0, 2, 20)},
+        "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
+        "fixed_amount": 100,
+    },
 }
 
 
@@ -239,6 +255,8 @@ def simulate_session(
     s_line_leader = strategy.get("line_leader_only", line_leader_only) if strategy else line_leader_only
     s_bet_config = strategy.get("bet_config") if strategy else None
     s_fixed_amount = strategy.get("fixed_amount", 100) if strategy else 100
+    # min_top_prob: モデルの1位予測確率がこの値未満のレースはスキップ
+    s_min_top_prob = strategy.get("min_top_prob", 0.0) if strategy else 0.0
 
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
@@ -248,6 +266,12 @@ def simulate_session(
         payouts_all = race.get("payouts", {})
         finish_order = race["finish_order"]
         race_id = race.get("race_id", "")
+
+        # レース単位の信頼度フィルタ
+        if s_min_top_prob > 0.0:
+            top_prob = pred_df["win_prob"].max() if not pred_df.empty else 0.0
+            if top_prob < s_min_top_prob:
+                continue
 
         for bt in s_bet_types:
             new_bets = pick_bets(
