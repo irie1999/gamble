@@ -61,9 +61,12 @@ def cmd_compare(args):
     df_feat = build_features(df)
 
     dates = sorted(df_feat["date"].unique())
-    split_idx = int(len(dates) * 0.8)
+    test_ratio = getattr(args, "test_ratio", 0.3)
+    split_idx = int(len(dates) * (1 - test_ratio))
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
     test_days = len(dates) - split_idx
+    print(f"テスト分割: {1-test_ratio:.0%}学習 / {test_ratio:.0%}テスト  "
+          f"({split_idx}日学習 / {test_days}日テスト)")
 
     # 全賭け式でオッズを生成しておく（各戦略がサブセットを選ぶ）
     races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES)
@@ -876,12 +879,16 @@ def main():
     p_cmp.add_argument("--fixed-bet", dest="fixed_bet", type=int, default=None,
                        help="固定額ベット（例: 200）。Kellyの複利を排除し純粋な戦略比較ができる")
     p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+    p_cmp.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
+                       help="テストデータの割合（デフォルト: 0.3=30%%）")
 
     p_pipe = sub.add_parser("pipeline", help="払戻取得→着順修正→学習→比較を一括実行（済みはスキップ）")
     p_pipe.add_argument("--bankroll", type=float, default=50000)
     p_pipe.add_argument("--html", action="store_true", help="比較HTMLを生成")
     p_pipe.add_argument("--force-payouts", action="store_true", help="払戻データを強制再取得")
     p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
+    p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
+                        help="テストデータの割合（デフォルト: 0.3=30%%）")
 
     sub.add_parser("demo", help="デモ実行")
 
