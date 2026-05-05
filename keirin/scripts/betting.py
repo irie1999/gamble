@@ -158,9 +158,9 @@ def pick_bets(
     min_edge, kelly_frac, max_combos, top_n = cfg
 
     df = pred_df.copy()
-    if line_leader_only and bet_type in ("win", "place"):
+    if line_leader_only:
         if "is_line_leader" in df.columns:
-            leaders = df[(df["is_line_leader"] == 1) | (df.get("line_no", 0) == 0)]
+            leaders = df[(df["is_line_leader"] == 1) | (df["line_no"] == 0)]
             if not leaders.empty:
                 df = leaders
 
