@@ -223,21 +223,60 @@ def _find_rider_table(tables) -> list[dict]:
 
 
 def parse_result_table(table) -> list[dict]:
-    """着順テーブルを解析。rank=1-9, car_no=1-9 の行を対象とする"""
+    """着順テーブルを解析。
+
+    ヘッダー行から着順・車番の列位置を特定し、データ行を読む。
+    ヘッダーが見つからない場合は先頭2列をフォールバックとして使用。
+    選手テーブル（列数≥15）は除外する。
+    """
     rows = table.find_all("tr")
-    finish = []
+    if not rows:
+        return []
+
+    # 列数が多いテーブルは選手テーブルなので除外
+    sample_cols = [c.get_text(strip=True) for c in rows[0].find_all(["td", "th"])]
+    if len(sample_cols) >= 15:
+        return []
+
+    # ヘッダー行から着順・車番列を特定
+    rank_col: int | None = None
+    car_col: int | None = None
     for tr in rows:
         cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-        if len(cols) < 3:
-            continue
-        # Try both (cols[0],cols[1]) and (cols[1],cols[2]) as rank/car_no positions
-        for ri, ci in [(0, 1), (1, 2)]:
+        for ci, text in enumerate(cols):
+            normalized = text.replace("\n", "").replace("　", "").strip()
+            if normalized in ("着", "着順") and rank_col is None:
+                rank_col = ci
+            if normalized in ("車", "車番") and car_col is None:
+                car_col = ci
+        if rank_col is not None and car_col is not None:
+            break
+
+    finish = []
+    if rank_col is not None and car_col is not None:
+        # ヘッダーで特定した列を使用
+        for tr in rows:
+            cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+            if len(cols) <= max(rank_col, car_col):
+                continue
             try:
-                rank = int(cols[ri])
-                car_no = int(cols[ci])
+                rank = int(cols[rank_col])
+                car_no = int(cols[car_col])
                 if 1 <= rank <= 9 and 1 <= car_no <= 9:
                     finish.append({"rank": rank, "car_no": car_no})
-                    break
+            except (ValueError, IndexError):
+                continue
+    else:
+        # フォールバック: 先頭2列を着順・車番として解釈
+        for tr in rows:
+            cols = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
+            if len(cols) < 2:
+                continue
+            try:
+                rank = int(cols[0])
+                car_no = int(cols[1])
+                if 1 <= rank <= 9 and 1 <= car_no <= 9:
+                    finish.append({"rank": rank, "car_no": car_no})
             except (ValueError, IndexError):
                 continue
     return finish
