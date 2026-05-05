@@ -79,6 +79,10 @@ def cmd_compare(args):
     mode_label = f"固定額{fixed_bet:,}円/bet" if fixed_bet else "Kelly基準"
 
     results = []
+    if test_days < 14:
+        print(f"⚠ テスト期間が短すぎます（{test_days}日）。ROIは統計的に無意味です。最低14日、推奨30日以上のデータが必要です。")
+    elif test_days < 30:
+        print(f"⚠ テスト期間が少ない（{test_days}日）。ROIの信頼性は低め。30日以上推奨。")
     print(f"\nモデルAUC: {mean_auc:.4f}  テスト期間: {test_days}日  "
           f"レース数: {len(races_full)}  [{mode_label}]\n")
     print(f"{'戦略':<14} {'ROI':>8} {'損益':>12} {'回数':>6} {'的中率':>7} {'賭け金':>12} {'説明'}")

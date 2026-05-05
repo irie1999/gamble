@@ -387,6 +387,14 @@ def make_mock_odds(
             for combo in combinations(nos, 3):
                 a, b, c = combo
                 d[combo] = to_odds(trio_prob(mp, idx[a], idx[b], idx[c]))
+        elif bt == "wide":
+            # P(a,b 両方が3着以内) = Σ_{k≠a,k≠b} trio_prob({a,b,k})
+            for a, b in combinations(nos, 2):
+                p = sum(
+                    trio_prob(mp, idx[a], idx[b], idx[k])
+                    for k in nos if k != a and k != b
+                )
+                d[(a, b)] = to_odds(p)
         result[bt] = d
     return result
 
