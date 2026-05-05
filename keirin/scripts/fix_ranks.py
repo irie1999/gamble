@@ -61,12 +61,13 @@ def extract_top3_from_trifecta(odds_entry: dict) -> tuple[int, int, int] | None:
 def fix_ranks(raw_data: list[dict], odds_data: dict) -> tuple[list[dict], dict]:
     """
     raw_data の rank を odds_data の3連単から修正する。
+    race_id フィールドが存在する場合はそれを直接使用する。
     Returns: (修正後のレコードリスト, 統計dict)
     """
     # レースごとにグループ化
     races: dict[str, list[dict]] = defaultdict(list)
     for r in raw_data:
-        rid = build_race_id(r["venue_code"], r["date"], r["race_no"])
+        rid = r.get("race_id") or build_race_id(r["venue_code"], r["date"], r["race_no"])
         races[rid].append(r)
 
     stats = {"total_races": len(races), "fixed": 0, "no_odds": 0, "no_trifecta": 0}

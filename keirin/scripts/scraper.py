@@ -123,7 +123,7 @@ def _parse_race_links(soup, require_page_type: str | None = None) -> list[dict]:
 
         kcd = race_id[:2]
         date = race_id[2:10]
-        race_no = int(race_id[10:12])
+        race_no = int(race_id[12:16])  # 実際のレース番号（0001〜0012）
 
         races.append({
             "venue_slug": slug,
@@ -532,6 +532,7 @@ def fetch_race_detail(race: dict) -> list[dict] | None:
             "line_no": linfo["line_no"],
             "line_size": linfo["line_size"],
             "is_line_leader": linfo["is_line_leader"],
+            "race_id": race["race_id"],
             "venue_code": race["venue_code"],
             "venue_name": venue_name,
             "bank_length": bank_length,
