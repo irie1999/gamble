@@ -90,10 +90,11 @@ class BettingResult:
     predicted_prob: float
     implied_prob: float
     edge: float
-    odds: float
+    odds: float          # 推定事前オッズ（ベット選択用）
     bet_amount: int
     expected_value: float
     win_flag: bool = False
+    return_odds: float = 0.0  # 実際の払戻倍率（当選時に設定）
 
 
 @dataclass
@@ -268,7 +269,8 @@ def simulate_session(
 
     for race in races:
         pred_df = race["pred_df"]
-        odds_all = race["odds"]
+        odds_all = race["odds"]           # 推定事前オッズ（ベット選択用）
+        payouts_all = race.get("payouts", {})  # 実際の払戻額（当選時の計算用）
         finish_order = race["finish_order"]
         race_id = race.get("race_id", "")
 
@@ -290,7 +292,11 @@ def simulate_session(
                 bet.win_flag = check_win(bet, finish_order)
 
                 if bet.win_flag:
-                    bankroll += bet.bet_amount * bet.odds
+                    # 実際の払戻額があればそちらを優先、なければ推定オッズで代替
+                    actual = payouts_all.get(bt, {}).get(bet.selections)
+                    return_odds = actual if (actual and actual > 1.0) else bet.odds
+                    bet.return_odds = return_odds
+                    bankroll += bet.bet_amount * return_odds
                     session.wins += 1
                 else:
                     session.losses += 1
@@ -324,7 +330,8 @@ def print_session_report(session: SessionResult) -> None:
         by_type[bt]["spent"] += b.bet_amount
         if b.win_flag:
             by_type[bt]["wins"] += 1
-            by_type[bt]["payout"] += b.bet_amount * b.odds
+            payout_odds = b.return_odds if b.return_odds > 0 else b.odds
+            by_type[bt]["payout"] += b.bet_amount * payout_odds
 
     if by_type:
         print(f"\n  {'賭け式':<8} {'回数':>5} {'的中':>5} {'的中率':>7} {'賭け金':>10} {'回収':>10} {'ROI':>8}")

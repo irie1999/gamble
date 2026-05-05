@@ -634,15 +634,17 @@ def _str_keys_to_tuples(d: dict) -> dict:
 
 
 def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
-    """バックテスト用レースリストを構築（モデル予測 + 払戻オッズ）"""
+    """バックテスト用レースリストを構築
+
+    ベット選択: make_mock_odds による推定事前オッズ（払戻データは当選組み合わせのみで使えない）
+    払戻計算:  odds_data の実際の払戻額があれば使用、なければ推定オッズで代替
+    着順判定:  rank列（fix_ranks.py適用済み）
+    """
     if odds_data is None:
         odds_data = load_odds_data()
-
-    # race_id→odds高速検索用インデックス
     odds_by_race_id = odds_data if odds_data else {}
 
     races = []
-    skipped = 0
     for (date, venue, rno), race_df in df_feat.groupby(["date", "venue_code", "race_no"]):
         race_df = race_df.drop_duplicates(subset="car_no", keep="first")
 
@@ -650,7 +652,7 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
         if winner_row.empty:
             continue
 
-        # rankカラムから正しい着順を構築（fix_ranks.py適用済みを前提）
+        # rank列から正しい着順を構築（fix_ranks.py適用済みを前提）
         if "rank" in race_df.columns and race_df["rank"].notna().any():
             sorted_df = race_df.sort_values("rank", na_position="last")
             finish = [int(c) for c in sorted_df["car_no"].tolist()]
@@ -662,6 +664,7 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
         probs = booster.predict(X)
         probs = probs / probs.sum()
 
+        car_nos = race_df["car_no"].astype(int).tolist()
         pred_df = pd.DataFrame({
             "car_no": race_df["car_no"].values,
             "player_name": race_df["player_name"].values,
@@ -670,45 +673,34 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # オッズ取得: race_idで直接検索（最優先）
-        odds = {}
-        race_id = race_df["race_id"].iloc[0] if "race_id" in race_df.columns else None
+        # ベット選択用: 予測確率から推定事前オッズを生成（市場ノイズ込み）
+        # 払戻データは当選組み合わせのオッズしか持たないため、選択判断には使えない
+        est_odds = make_mock_odds(car_nos, probs, KEIRIN_BET_TYPES, noise=0.05)
 
+        # 払戻計算用: 実際の払戻額（当選時のみ存在）
+        actual_payouts: dict = {}
+        race_id = race_df["race_id"].iloc[0] if "race_id" in race_df.columns else None
         od = None
         if race_id and race_id in odds_by_race_id:
             od = odds_by_race_id[race_id]
         elif odds_by_race_id:
-            # フォールバック: 日付・レース番号で検索
             for rid, entry in odds_by_race_id.items():
                 if rid[2:10] == str(date) and int(rid[12:16]) == rno:
                     od = entry
                     break
-
         if od:
             for bt, d in od.items():
-                if bt in ("trifecta", "trio", "wide", "exacta", "quinella"):
-                    # JSON文字列キー"4_1_6"→タプル(4,1,6)に変換
-                    odds[bt] = _str_keys_to_tuples(d)
-
-        if not odds:
-            direct = _fetch_keirin_jp_odds(venue, date, rno)
-            # fetch結果はすでにタプルキーのため変換不要
-            if direct:
-                odds = direct
-
-        if not odds:
-            skipped += 1
-            continue
+                if bt in KEIRIN_BET_TYPES:
+                    actual_payouts[bt] = _str_keys_to_tuples(d)
 
         races.append({
             "race_id": race_id or f"{date}_{venue}_{rno}",
             "pred_df": pred_df,
-            "odds": odds,
+            "odds": est_odds,           # 推定事前オッズ（ベット選択用）
+            "payouts": actual_payouts,  # 実際の払戻額（当選時の払戻計算用）
             "finish_order": finish,
         })
 
-    if skipped:
-        print(f"  ※オッズデータなし: {skipped}レーススキップ")
     return races
 
 
