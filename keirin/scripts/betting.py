@@ -29,8 +29,8 @@ STRATEGIES: dict[str, dict] = {
         "description": "ワイドのみ：的中率重視・低リスク",
         "bet_types": ["wide"],
         "line_leader_only": False,
-        "min_odds": 2.0, "max_odds": 9999,
-        "bet_config": {"wide": (0.06, 0.15, 3, 10)},
+        "min_odds": 1.5, "max_odds": 9999,
+        "bet_config": {"wide": (0.04, 0.15, 4, 10)},
     },
     "trio_wide": {
         "description": "3連複＋ワイド：バランス重視",
