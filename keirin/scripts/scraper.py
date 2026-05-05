@@ -123,7 +123,7 @@ def _parse_race_links(soup, require_page_type: str | None = None) -> list[dict]:
 
         kcd = race_id[:2]
         date = race_id[2:10]
-        race_no = int(race_id[14:16])
+        race_no = int(race_id[10:12])
 
         races.append({
             "venue_slug": slug,
