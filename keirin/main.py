@@ -673,9 +673,13 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # ベット選択用: 予測確率から推定事前オッズを生成（市場ノイズ込み）
-        # 払戻データは当選組み合わせのオッズしか持たないため、選択判断には使えない
-        est_odds = make_mock_odds(car_nos, probs, KEIRIN_BET_TYPES, noise=0.05)
+        # ベット選択用: 市場オッズをwin_rateベースで生成（モデル予測とは独立）
+        # 現実の市場は公開勝率程度の情報で形成される。モデルはライン・クラス等の
+        # 追加情報でそれを上回るため、ここでは意図的にwin_rateのみで市場を模擬する。
+        raw_wr = race_df["win_rate"].values.astype(float)
+        raw_wr = np.clip(raw_wr, 0.01, 1.0)
+        market_probs = raw_wr / raw_wr.sum()
+        est_odds = make_mock_odds(car_nos, market_probs, KEIRIN_BET_TYPES, noise=0.08)
 
         # 払戻計算用: 実際の払戻額（当選時のみ存在）
         actual_payouts: dict = {}
