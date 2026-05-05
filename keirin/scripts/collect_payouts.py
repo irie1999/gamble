@@ -85,7 +85,7 @@ def fetch_and_store(races: list[dict], existing: dict, overwrite: bool) -> dict:
         venue_name = race["venue_name"]
         prefix = f"[{i}/{total}] {venue_name} {date} R{race_no:02d}"
 
-        if not overwrite and race_id in results:
+        if not overwrite and race_id in results and "trifecta" in results[race_id]:
             skip += 1
             continue
 
