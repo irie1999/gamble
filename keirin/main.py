@@ -485,6 +485,94 @@ def cmd_collect(args):
     )
 
 
+def cmd_pipeline(args):
+    """払戻取得→着順修正→学習→戦略比較を一括実行。済みのステップはスキップ。"""
+    import types
+    from keirin.scripts.collect_payouts import build_race_list, fetch_and_store, load_raw, load_odds, save_odds
+    from keirin.scripts.fix_ranks import fix_ranks as _fix_ranks, load_json, save_json
+
+    raw_path  = DATA_DIR / "raw_data.json"
+    odds_path = DATA_DIR / "odds_data.json"
+    model_path = MODEL_DIR / "lgb_model.txt"
+
+    def _step(label):
+        print(f"\n{'─'*55}")
+        print(f"  {label}")
+        print(f"{'─'*55}")
+
+    # ── Step 1: collect_payouts ──────────────────────────────
+    _step("Step 1: 払戻データ取得")
+    raw_data = load_raw()
+    existing_odds = load_odds()
+
+    need_payouts = args.force_payouts
+    if not need_payouts:
+        missing = sum(
+            1 for r in raw_data
+            if r.get("race_id") and (
+                r["race_id"] not in existing_odds or
+                "trifecta" not in existing_odds.get(r["race_id"], {})
+            )
+        )
+        need_payouts = missing > 0
+        if not need_payouts:
+            print(f"  ✓ 全レースの払戻データ取得済み → スキップ")
+        else:
+            print(f"  → trifecta未取得: {missing}レース → 取得開始")
+
+    if need_payouts:
+        races = build_race_list(raw_data, None)
+        updated = fetch_and_store(races, existing_odds, overwrite=args.force_payouts)
+        save_odds(updated)
+        print(f"  保存完了: {len(updated)}件")
+
+    # ── Step 2: fix_ranks ───────────────────────────────────
+    _step("Step 2: 着順修正")
+    raw_data = load_json(raw_path)
+    ranked = [r for r in raw_data if r.get("rank") is not None]
+    if ranked:
+        eq_rate = sum(1 for r in ranked if r["car_no"] == r["rank"]) / len(ranked)
+    else:
+        eq_rate = 1.0
+
+    if eq_rate <= 0.25:
+        print(f"  ✓ car_no=rank率: {eq_rate:.1%} → 修正済み スキップ")
+    else:
+        print(f"  → car_no=rank率: {eq_rate:.1%} → 修正開始")
+        odds_raw = load_json(odds_path) if odds_path.exists() else {}
+        fixed_data, stats = _fix_ranks(raw_data, odds_raw)
+        ranked2 = [r for r in fixed_data if r.get("rank") is not None]
+        eq2 = sum(1 for r in ranked2 if r["car_no"] == r["rank"]) / max(1, len(ranked2))
+        save_json(raw_path, fixed_data)
+        print(f"  修正完了: {stats['fixed']}レース  car_no=rank率: {eq2:.1%}")
+
+    # ── Step 3: train ────────────────────────────────────────
+    _step("Step 3: モデル学習")
+    need_train = args.force_train or not model_path.exists()
+    if not need_train:
+        raw_mtime   = raw_path.stat().st_mtime
+        model_mtime = model_path.stat().st_mtime
+        need_train  = raw_mtime > model_mtime
+        if not need_train:
+            print(f"  ✓ モデル学習済み（raw_dataより新しい）→ スキップ")
+
+    if need_train:
+        with open(raw_path, encoding="utf-8") as f:
+            records = json.load(f)
+        df = pd.DataFrame(records)
+        print(f"  学習データ: {len(df)}件")
+        result = train_evaluate(df, n_splits=5)
+        if result is None:
+            print("  ✗ データ不足で学習できません（最低7日分必要）")
+            return
+        print_feature_importance(result)
+        save_model(result)
+
+    # ── Step 4: compare ──────────────────────────────────────
+    _step("Step 4: 戦略比較")
+    cmd_compare(args)
+
+
 def cmd_train(args):
     raw_path = DATA_DIR / "raw_data.json"
     if not raw_path.exists():
@@ -789,6 +877,12 @@ def main():
                        help="固定額ベット（例: 200）。Kellyの複利を排除し純粋な戦略比較ができる")
     p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
+    p_pipe = sub.add_parser("pipeline", help="払戻取得→着順修正→学習→比較を一括実行（済みはスキップ）")
+    p_pipe.add_argument("--bankroll", type=float, default=50000)
+    p_pipe.add_argument("--html", action="store_true", help="比較HTMLを生成")
+    p_pipe.add_argument("--force-payouts", action="store_true", help="払戻データを強制再取得")
+    p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
+
     sub.add_parser("demo", help="デモ実行")
 
     p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日）")
@@ -817,6 +911,8 @@ def main():
         cmd_demo(args)
     elif args.command == "compare":
         cmd_compare(args)
+    elif args.command == "pipeline":
+        cmd_pipeline(args)
     elif args.command == "predict":
         cmd_predict(args)
     else:
