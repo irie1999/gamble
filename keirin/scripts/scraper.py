@@ -598,10 +598,12 @@ def _collect_day(
     records = []
     odds_day = {}
     detail_races = 0
+    print(f"  {date_str}: {len(races)}レース取得開始")
     for race in races:
         if stop_event.is_set():
             break
         race_records = fetch_race_detail(race)
+        n = len(race_records) if race_records else 0
         if race_records:
             records.extend(race_records)
             detail_races += 1
@@ -609,6 +611,8 @@ def _collect_day(
         odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
         if odds:
             odds_day[race["race_id"]] = odds
+        status = f"{n}名" if race_records else "スキップ"
+        print(f"  {date_str} {race['venue_name']} R{race['race_no']:02d}: {status}")
         time.sleep(sleep_sec)
     return records, odds_day, detail_races
 
