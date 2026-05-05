@@ -461,22 +461,7 @@ def cmd_collect(args):
     existing_records, _ = load_existing_records("raw_data.json")
     start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
 
-    if args.full:
-        # --full: 指定期間を最初から全部取り直す（既存データは破棄）
-        print(f"全期間収集（--full）: {start_date} → {end_date}")
-        print(f"対象場: {venue_codes or '全場'}")
-        collect_data(
-            start_date, end_date,
-            venue_codes=venue_codes,
-            sleep_sec=args.sleep,
-            existing_records=[],
-            checkpoint_days=7,
-            filename="raw_data.json",
-            workers=args.workers,
-        )
-        return
-
-    # デフォルト: 指定期間のうち「まだ取得していない日付」だけ収集してマージ
+    # 指定期間のうち「まだ取得していない日付」だけ収集してマージ
     if existing_records:
         existing_dates = sorted({r.get("date") for r in existing_records if r.get("date")})
         print(f"既存データ: {len(existing_records)}件  期間: {existing_dates[0]}〜{existing_dates[-1]}")
@@ -908,8 +893,6 @@ def main():
                        help="収集日数（新規 or --full 時。デフォルト: 365日）")
     p_col.add_argument("--venues", type=str, default=None,
                        help="場コードカンマ区切り（デフォルト: 全場）")
-    p_col.add_argument("--full", action="store_true",
-                       help="既存データを破棄して全期間再収集（デフォルトは未取得日のみ差分収集）")
     p_col.add_argument("--sleep", type=float, default=1.5,
                        help="リクエスト間隔（秒、デフォルト: 1.5）")
     p_col.add_argument("--workers", type=int, default=4,
