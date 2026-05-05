@@ -555,15 +555,19 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             "line_no": race_df.get("line_no", pd.Series([0]*len(race_df))).values,
         })
 
-        # keirin.jp 払戻データを優先取得
-        odds = _fetch_keirin_jp_odds(venue, date, rno)
-
-        # フォールバック: scraper収集の odds_data
-        if not odds and odds_data:
+        # ローカルodds_data優先（collect_payouts.pyで収集済み）
+        odds = {}
+        if odds_data:
             for rid, od in odds_data.items():
-                if rid[2:10] == date and rid[:2] == venue and int(rid[14:16]) == rno:
-                    odds = od
+                if rid[2:10] == date and rid[:2] == str(venue) and int(rid[14:16]) == rno:
+                    # keirin.jp払戻データ（trifecta/trio/wide）のみ使用
+                    odds = {bt: d for bt, d in od.items()
+                            if bt in ("trifecta", "trio", "wide", "exacta", "quinella")}
                     break
+
+        # フォールバック: keirin.jpから直接取得（ローカルになければ）
+        if not odds:
+            odds = _fetch_keirin_jp_odds(venue, date, rno)
 
         if not odds:
             skipped += 1

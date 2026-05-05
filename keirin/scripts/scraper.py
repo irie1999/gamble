@@ -509,7 +509,8 @@ def _odds_key_to_str(key: tuple) -> str:
 
 
 def _str_to_odds_key(s: str) -> tuple:
-    return tuple(int(x) for x in s.split("_"))
+    sep = "_" if "_" in s else ","
+    return tuple(int(x) for x in s.split(sep))
 
 
 def serialize_odds(odds_by_type: dict) -> dict:

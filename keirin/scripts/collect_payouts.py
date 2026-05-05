@@ -27,11 +27,11 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 
 
 def tuple_to_key(t: tuple) -> str:
-    return ",".join(str(x) for x in t)
+    return "_".join(str(x) for x in t)
 
 
 def key_to_tuple(s: str) -> tuple:
-    return tuple(int(x) for x in s.split(","))
+    return tuple(int(x) for x in s.split("_"))
 
 
 def load_raw() -> list[dict]:
