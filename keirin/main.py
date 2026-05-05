@@ -828,6 +828,228 @@ def cmd_demo(args):
     print("=" * 60)
 
 
+def cmd_detail(args):
+    """指定戦略の全ベット明細をHTMLで出力"""
+    model_path = MODEL_DIR / "lgb_model.txt"
+    if not model_path.exists():
+        print("モデルがありません。先に `python main.py train` を実行してください")
+        return
+
+    strategy_name = args.strategy
+    strat = STRATEGIES.get(strategy_name)
+    if strat is None:
+        print(f"不明な戦略: {strategy_name}  選択肢: {', '.join(STRATEGIES.keys())}")
+        return
+
+    booster, feature_cols, meta = load_model()
+    mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
+
+    with open(DATA_DIR / "raw_data.json", encoding="utf-8") as f:
+        records = json.load(f)
+    df = pd.DataFrame(records)
+    df_feat = build_features(df)
+
+    dates = sorted(df_feat["date"].unique())
+    test_ratio = getattr(args, "test_ratio", 0.3)
+    split_idx = int(len(dates) * (1 - test_ratio))
+    df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
+    test_days = len(dates) - split_idx
+
+    races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES)
+    session = simulate_session(races, initial_bankroll=args.bankroll, strategy=strat)
+
+    print(f"戦略: {strategy_name}  期間: {test_days}日  "
+          f"ROI: {session.roi:+.1%}  ベット数: {len(session.bets)}")
+
+    _save_detail_html(session, strategy_name, strat["description"], mean_auc, test_days, args.bankroll)
+
+
+def _save_detail_html(session, strategy_name: str, description: str, auc: float, test_days: int, bankroll: float) -> None:
+    """全ベット明細 + 累積損益グラフをHTMLで保存"""
+    # 累積損益データ（ベット順）
+    cumulative = []
+    running = 0.0
+    for b in session.bets:
+        if b.win_flag:
+            running += b.bet_amount * b.return_odds - b.bet_amount
+        else:
+            running -= b.bet_amount
+        cumulative.append(running)
+
+    cumulative_json = json.dumps(cumulative)
+
+    # ベット明細テーブル行
+    rows_html = ""
+    for i, b in enumerate(session.bets):
+        sel_str = "-".join(str(s) for s in b.selections)
+        bt_name = BET_TYPE_NAMES.get(b.bet_type, b.bet_type)
+        win_cls = "win" if b.win_flag else "lose"
+        win_str = f"◎ {b.return_odds:.1f}倍" if b.win_flag else "✗"
+        payout = b.bet_amount * b.return_odds if b.win_flag else 0
+        net = payout - b.bet_amount
+        net_str = f"{net:+,.0f}"
+        net_cls = "pos" if net > 0 else "neg"
+        rows_html += (
+            f'<tr class="{win_cls}">'
+            f'<td>{i+1}</td>'
+            f'<td class="mono">{b.race_id}</td>'
+            f'<td>{bt_name}</td>'
+            f'<td class="sel">{sel_str}</td>'
+            f'<td>{b.predicted_prob:.1%}</td>'
+            f'<td>{b.bet_amount:,}円</td>'
+            f'<td>{win_str}</td>'
+            f'<td>{payout:,.0f}円</td>'
+            f'<td class="{net_cls}">{net_str}円</td>'
+            f'<td class="{net_cls}">{cumulative[i]:+,.0f}円</td>'
+            f'</tr>\n'
+        )
+
+    total_bets = len(session.bets)
+    win_rate = session.wins / total_bets if total_bets > 0 else 0
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>詳細バックテスト: {strategy_name}</title>
+<style>
+  body {{ font-family: 'Meiryo', sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:20px; }}
+  h1 {{ color:#f8fafc; font-size:1.4rem; margin-bottom:4px; }}
+  .meta {{ color:#94a3b8; font-size:.85rem; margin-bottom:20px; }}
+  .cards {{ display:flex; gap:14px; flex-wrap:wrap; margin-bottom:24px; }}
+  .card {{ background:#1e293b; border-radius:10px; padding:14px 20px; min-width:130px; }}
+  .card .label {{ font-size:.75rem; color:#94a3b8; margin-bottom:4px; }}
+  .card .value {{ font-size:1.5rem; font-weight:700; }}
+  .pos {{ color:#4ade80; }} .neg {{ color:#f87171; }}
+  canvas {{ background:#1e293b; border-radius:10px; margin-bottom:24px; width:100%; max-height:260px; }}
+  table {{ width:100%; border-collapse:collapse; font-size:.82rem; }}
+  th {{ background:#1e293b; color:#94a3b8; padding:8px 10px; text-align:left; position:sticky; top:0; }}
+  td {{ padding:6px 10px; border-bottom:1px solid #1e293b; }}
+  tr.win {{ background:#14532d22; }}
+  tr.lose {{ background:#1e293b44; }}
+  tr:hover {{ background:#334155; }}
+  .mono {{ font-family:monospace; font-size:.78rem; color:#94a3b8; }}
+  .sel {{ font-weight:700; letter-spacing:1px; }}
+  .search {{ margin-bottom:12px; }}
+  .search input {{ background:#1e293b; border:1px solid #334155; color:#e2e8f0; padding:6px 12px; border-radius:6px; width:260px; }}
+  #pagination {{ margin-top:10px; color:#94a3b8; font-size:.82rem; }}
+  .page-btn {{ background:#1e293b; border:1px solid #334155; color:#e2e8f0; padding:4px 10px; border-radius:4px; cursor:pointer; margin:0 2px; }}
+  .page-btn.active {{ background:#3b82f6; border-color:#3b82f6; }}
+</style>
+</head>
+<body>
+<h1>詳細バックテスト: {strategy_name}</h1>
+<div class="meta">{description}　／　生成: {now_str}　／　モデルAUC: {auc:.4f}　／　テスト: {test_days}日</div>
+
+<div class="cards">
+  <div class="card"><div class="label">ROI</div><div class="value {'pos' if session.roi >= 0 else 'neg'}">{session.roi:+.1%}</div></div>
+  <div class="card"><div class="label">損益</div><div class="value {'pos' if session.profit >= 0 else 'neg'}">{session.profit:+,.0f}円</div></div>
+  <div class="card"><div class="label">最終資金</div><div class="value">{session.final_bankroll:,.0f}円</div></div>
+  <div class="card"><div class="label">ベット数</div><div class="value">{total_bets:,}回</div></div>
+  <div class="card"><div class="label">的中数</div><div class="value pos">{session.wins}回</div></div>
+  <div class="card"><div class="label">的中率</div><div class="value">{win_rate:.1%}</div></div>
+  <div class="card"><div class="label">総賭け金</div><div class="value">{session.total_bet:,.0f}円</div></div>
+  <div class="card"><div class="label">初期資金</div><div class="value">{bankroll:,.0f}円</div></div>
+</div>
+
+<canvas id="chart"></canvas>
+
+<div class="search">
+  <input id="filter" type="text" placeholder="レースIDや選択車番で絞り込み..." oninput="applyFilter()">
+  <span id="count" style="margin-left:10px;color:#94a3b8;font-size:.82rem;"></span>
+</div>
+
+<table>
+<thead>
+  <tr>
+    <th>#</th><th>レースID</th><th>賭け式</th><th>選択</th>
+    <th>予測確率</th><th>賭け金</th><th>結果</th><th>払戻</th><th>収支</th><th>累積</th>
+  </tr>
+</thead>
+<tbody id="tbody">
+{rows_html}
+</tbody>
+</table>
+<div id="pagination"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<script>
+const allRows = Array.from(document.querySelectorAll('#tbody tr'));
+const cumData = {cumulative_json};
+let filtered = allRows;
+const PAGE = 200;
+let page = 0;
+
+function applyFilter() {{
+  const q = document.getElementById('filter').value.toLowerCase();
+  filtered = q ? allRows.filter(r => r.innerText.toLowerCase().includes(q)) : allRows;
+  page = 0;
+  render();
+}}
+
+function render() {{
+  const start = page * PAGE, end = start + PAGE;
+  allRows.forEach(r => r.style.display = 'none');
+  filtered.slice(start, end).forEach(r => r.style.display = '');
+  document.getElementById('count').textContent = filtered.length + '件';
+  const pages = Math.ceil(filtered.length / PAGE);
+  let p = '<span style="margin-right:6px">ページ:</span>';
+  for (let i = 0; i < pages; i++) {{
+    p += `<button class="page-btn ${{i===page?'active':''}}" onclick="goPage(${{i}})">${{i+1}}</button>`;
+  }}
+  document.getElementById('pagination').innerHTML = p;
+}}
+
+function goPage(n) {{ page = n; render(); }}
+
+// Chart
+const ctx = document.getElementById('chart').getContext('2d');
+new Chart(ctx, {{
+  type: 'line',
+  data: {{
+    labels: cumData.map((_, i) => i + 1),
+    datasets: [{{
+      label: '累積損益（円）',
+      data: cumData,
+      borderColor: '#3b82f6',
+      backgroundColor: 'rgba(59,130,246,0.08)',
+      borderWidth: 1.5,
+      pointRadius: 0,
+      fill: true,
+      tension: 0.1,
+    }}, {{
+      label: '±0ライン',
+      data: cumData.map(() => 0),
+      borderColor: '#475569',
+      borderWidth: 1,
+      pointRadius: 0,
+      borderDash: [4, 4],
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: {{ legend: {{ labels: {{ color: '#94a3b8' }} }} }},
+    scales: {{
+      x: {{ display: false }},
+      y: {{ ticks: {{ color: '#94a3b8' }}, grid: {{ color: '#1e293b' }} }}
+    }}
+  }}
+}});
+
+render();
+</script>
+</body>
+</html>"""
+
+    out_path = RESULTS_DIR / f"detail_{strategy_name}.html"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"\nHTMLを保存しました: {out_path}")
+
+
 def _save_results(session, filename: str = "backtest_result.json", html: bool = False) -> None:
     result = {
         "initial_bankroll": session.initial_bankroll,
@@ -909,6 +1131,13 @@ def main():
 
     sub.add_parser("demo", help="デモ実行")
 
+    p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
+    p_det.add_argument("--strategy", type=str, default="trifecta_mid",
+                       help=f"戦略名（デフォルト: trifecta_mid）: {', '.join(STRATEGIES.keys())}")
+    p_det.add_argument("--bankroll", type=float, default=50000)
+    p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
+                       help="テストデータの割合（デフォルト: 0.3）")
+
     p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日）")
     p_pred.add_argument("--date", type=str, default=None,
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
@@ -933,6 +1162,8 @@ def main():
         cmd_backtest(args)
     elif args.command == "demo":
         cmd_demo(args)
+    elif args.command == "detail":
+        cmd_detail(args)
     elif args.command == "compare":
         cmd_compare(args)
     elif args.command == "pipeline":
