@@ -16,72 +16,68 @@ from prob import top_combinations, BET_TYPE_NAMES, ALL_BET_TYPES, KEIRIN_BET_TYP
 DEDUCTION_RATE = 0.25
 
 # 賭け式ごとのデフォルト設定: (min_edge, kelly_frac, max_combos, top_n)
+# keirin.jpで実際に販売される賭け式: trifecta / trio / wide
 BET_CONFIG = {
-    "win":      (0.05, 0.25, 1,  9),
-    "place":    (0.05, 0.20, 1,  9),
-    "exacta":   (0.07, 0.15, 3, 20),
-    "quinella": (0.07, 0.15, 3, 10),
-    "trifecta": (0.08, 0.10, 5, 30),
+    "trifecta": (0.08, 0.10, 3, 20),
     "trio":     (0.07, 0.12, 3, 15),
-    "wide":     (0.05, 0.15, 3, 10),
+    "wide":     (0.06, 0.15, 3, 10),
 }
 
 # ---- 戦略プリセット ----
-# 各戦略: bet_config / bet_types / line_leader_only / min_odds / max_odds
-# keirin.jpで実際に販売される賭け式: trifecta / trio / wide
 STRATEGIES: dict[str, dict] = {
-    "balanced": {
-        "description": "バランス：3連単・3連複・ワイド（標準）",
-        "bet_types": KEIRIN_BET_TYPES,
+    "wide_only": {
+        "description": "ワイドのみ：的中率重視・低リスク",
+        "bet_types": ["wide"],
         "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
-        "bet_config": BET_CONFIG,
-    },
-    "trifecta_only": {
-        "description": "3連単のみ：高配当狙い",
-        "bet_types": ["trifecta"],
-        "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
-        "bet_config": {"trifecta": (0.08, 0.10, 5, 30)},
+        "min_odds": 2.0, "max_odds": 9999,
+        "bet_config": {"wide": (0.06, 0.15, 3, 10)},
     },
     "trio_wide": {
-        "description": "3連複＋ワイド：堅実連複",
+        "description": "3連複＋ワイド：バランス重視",
         "bet_types": ["trio", "wide"],
         "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
+        "min_odds": 2.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
     },
-    "aggressive": {
-        "description": "積極：低エッジ閾値・大Kelly・全賭け式",
+    "balanced": {
+        "description": "全賭け式：3連単・3連複・ワイド（標準）",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 9999,
+        "min_odds": 2.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+    },
+    "value_hunt": {
+        "description": "高エッジ厳選：エッジ15%以上・少数精鋭",
+        "bet_types": KEIRIN_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 3.0, "max_odds": 9999,
         "bet_config": {
-            "trifecta": (0.04, 0.20, 8, 50),
-            "trio":     (0.04, 0.20, 5, 25),
-            "wide":     (0.03, 0.25, 5, 15),
+            "trifecta": (0.15, 0.10, 2, 20),
+            "trio":     (0.12, 0.12, 2, 15),
+            "wide":     (0.10, 0.15, 2, 10),
         },
-    },
-    "favorite": {
-        "description": "本命狙い：オッズ10倍以下のみ",
-        "bet_types": KEIRIN_BET_TYPES,
-        "line_leader_only": False,
-        "min_odds": 1.0, "max_odds": 10.0,
-        "bet_config": BET_CONFIG,
-    },
-    "longshot": {
-        "description": "穴狙い：オッズ20倍以上のみ",
-        "bet_types": KEIRIN_BET_TYPES,
-        "line_leader_only": False,
-        "min_odds": 20.0, "max_odds": 9999,
-        "bet_config": BET_CONFIG,
     },
     "line_leader": {
         "description": "ライン先頭：競輪固有の先頭選手に絞る",
         "bet_types": KEIRIN_BET_TYPES,
         "line_leader_only": True,
-        "min_odds": 1.0, "max_odds": 9999,
+        "min_odds": 2.0, "max_odds": 9999,
         "bet_config": BET_CONFIG,
+    },
+    "fixed_bet": {
+        "description": "固定100円：Kelly不使用・均等ベット（比較用）",
+        "bet_types": KEIRIN_BET_TYPES,
+        "line_leader_only": False,
+        "min_odds": 2.0, "max_odds": 9999,
+        "bet_config": BET_CONFIG,
+        "fixed_bet": 100,
+    },
+    "trifecta_mid": {
+        "description": "3連単中穴：オッズ10〜100倍",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "min_odds": 10.0, "max_odds": 100.0,
+        "bet_config": {"trifecta": (0.06, 0.10, 3, 20)},
     },
 }
 
@@ -229,6 +225,9 @@ def check_win(bet: BettingResult, finish_order: list[int]) -> bool:
         return sel[0] == top1 and sel[1] == top2 and sel[2] == top3
     elif bt == "trio":
         return set(sel) == {top1, top2, top3}
+    elif bt == "wide":
+        top3_set = {top1, top2, top3}
+        return sel[0] in top3_set and sel[1] in top3_set
     return False
 
 
