@@ -25,6 +25,67 @@ def load_raw(filename: str = "raw_data.json") -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def add_historical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """選手ごとの時系列特徴量を追加（データリーク防止：過去レースのみ使用）"""
+    df = df.copy()
+    df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
+    df["win"] = pd.to_numeric(df["win"], errors="coerce").fillna(0).astype(int)
+    df["date"] = df["date"].astype(str)
+
+    # 日付順にソート（同日内はrace_noで安定化）
+    df = df.sort_values(["date", "venue_code", "race_no", "car_no"]).reset_index(drop=True)
+
+    # --- 選手単位の時系列特徴量 ---
+    # shift(1)で当該レース自身のデータを除外し、過去データのみ参照
+    grp = df.groupby("player_name", sort=False)
+
+    # 直近3走・5走の勝率
+    df["recent_win_3"] = grp["win"].transform(
+        lambda x: x.shift(1).rolling(3, min_periods=1).mean()
+    )
+    df["recent_win_5"] = grp["win"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    )
+
+    # 直近5走の3着内率
+    top3_flag = (df["rank"] <= 3).astype(float)
+    df["_top3_flag"] = top3_flag
+    df["recent_top3_5"] = grp["_top3_flag"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    )
+    df.drop(columns=["_top3_flag"], inplace=True)
+
+    # 直近5走の平均着順（小さいほど良い）
+    df["recent_avg_rank"] = grp["rank"].transform(
+        lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+    )
+
+    # 調子トレンド（直近勝率 - 通算勝率）：プラスなら上り調子
+    df["form_trend"] = df["recent_win_5"] - df["win_rate"].fillna(0)
+
+    # --- 会場別勝率（その会場での過去実績）---
+    grp_venue = df.groupby(["player_name", "venue_code"], sort=False)
+    df["venue_win_rate"] = grp_venue["win"].transform(
+        lambda x: x.shift(1).expanding(min_periods=1).mean()
+    )
+    # データ不足時は通算勝率で補完
+    df["venue_win_rate"] = df["venue_win_rate"].fillna(df["win_rate"].fillna(0))
+
+    # --- 前走からの休養日数 ---
+    df["_date_dt"] = pd.to_datetime(df["date"], format="%Y%m%d")
+    df["_last_date"] = grp["_date_dt"].transform(lambda x: x.shift(1))
+    df["days_since_last"] = (df["_date_dt"] - df["_last_date"]).dt.days.fillna(14).clip(1, 60)
+    df.drop(columns=["_date_dt", "_last_date"], inplace=True)
+
+    # 欠損補完
+    for col in ["recent_win_3", "recent_win_5", "recent_top3_5"]:
+        df[col] = df[col].fillna(df["win_rate"].fillna(0))
+    df["recent_avg_rank"] = df["recent_avg_rank"].fillna(4.0)
+    df["form_trend"] = df["form_trend"].fillna(0.0)
+
+    return df
+
+
 def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
@@ -98,6 +159,16 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["win"] = pd.to_numeric(df["win"], errors="coerce").fillna(0).astype(int)
     df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
 
+    # --- 時系列特徴量（直近成績・会場別・調子）---
+    df = add_historical_features(df)
+
+    # --- 時系列特徴量のレース内相対値 ---
+    for col in ["recent_win_5", "venue_win_rate", "recent_avg_rank"]:
+        if col in df.columns:
+            race_mean = df.groupby(race_key)[col].transform("mean")
+            race_std = df.groupby(race_key)[col].transform("std").replace(0, np.nan)
+            df[f"{col}_rel"] = (df[col] - race_mean) / race_std.fillna(1)
+
     return df
 
 
@@ -126,6 +197,17 @@ FEATURE_COLS = [
     "top3_rate_rel",
     "is_solo",
     "s1_leader",
+    # --- 新規：時系列特徴量 ---
+    "recent_win_3",
+    "recent_win_5",
+    "recent_top3_5",
+    "recent_avg_rank",
+    "form_trend",
+    "venue_win_rate",
+    "days_since_last",
+    "recent_win_5_rel",
+    "venue_win_rate_rel",
+    "recent_avg_rank_rel",
 ]
 
 TARGET_COL = "win"
@@ -137,39 +219,3 @@ def prepare_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     X = df_feat[available].copy()
     y = df_feat[TARGET_COL].copy()
     return X, y
-
-
-if __name__ == "__main__":
-    # モックデータで動作確認
-    sample = []
-    lines = [(1, [1, 2, 3]), (2, [4, 5]), (0, [6, 7])]  # ライン構成
-    car_no = 1
-    for line_no, members in lines:
-        for i, _ in enumerate(members):
-            is_leader = 1 if i == 0 and line_no > 0 else 0
-            sample.append({
-                "car_no": car_no,
-                "line_no": line_no,
-                "line_size": len(members) if line_no > 0 else 1,
-                "is_line_leader": is_leader,
-                "player_name": f"選手{car_no}",
-                "class": ["S1", "A1", "A2", "S1", "A1", "A2", "B1"][car_no - 1],
-                "win_rate": [0.32, 0.25, 0.18, 0.28, 0.20, 0.15, 0.10][car_no - 1],
-                "second_rate": [0.25, 0.22, 0.20, 0.22, 0.18, 0.14, 0.09][car_no - 1],
-                "third_rate": [0.20, 0.18, 0.17, 0.19, 0.16, 0.12, 0.08][car_no - 1],
-                "bank_length": 333,
-                "venue_code": "15",
-                "venue_name": "前橋",
-                "date": "20260101",
-                "race_no": 1,
-                "rank": car_no,
-                "win": 1 if car_no == 1 else 0,
-            })
-            car_no += 1
-
-    df = pd.DataFrame(sample)
-    X, y = prepare_dataset(df)
-    print("特徴量一覧:")
-    print(X.to_string())
-    print(f"\nターゲット: {y.tolist()}")
-    print(f"\n特徴量数: {X.shape[1]}")
