@@ -250,6 +250,109 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     }
 
 
+def train_lambdarank(df: pd.DataFrame, n_splits: int = 5) -> dict:
+    """LambdaRankで着順予測モデルを学習（Learning-to-Rank）
+
+    1位→3, 2位→2, 3位→1, 4位以下→0 の関連度スコアで学習。
+    CV評価はAUC（バイナリラベル）で行い比較可能にする。
+    """
+    params = _load_params()
+    sklearn_only = {"n_estimators", "random_state", "verbose", "n_jobs"}
+    lgb_params = {k: v for k, v in params.items() if k not in sklearn_only}
+    lgb_params["seed"] = params.get("random_state", 42)
+    lgb_params["num_threads"] = -1
+    lgb_params["verbosity"] = -1
+    lgb_params["objective"] = "lambdarank"
+    lgb_params["metric"] = "ndcg"
+    lgb_params["ndcg_eval_at"] = [1, 3]
+    lgb_params["label_gain"] = [0, 1, 2, 3]
+    num_boost_round = params.get("n_estimators", 500)
+
+    df_feat = build_features(df)
+    available = [c for c in FEATURE_COLS if c in df_feat.columns]
+
+    race_key = ["date", "venue_code", "race_no"]
+    race_id_num = df_feat.groupby(race_key).ngroup().values
+    sort_idx = np.lexsort((race_id_num, df_feat["date"].astype(str).values))
+
+    X = df_feat[available].values[sort_idx]
+    y_ltr = df_feat["lambdarank_label"].values[sort_idx].astype(int)
+    y_hard = df_feat[TARGET_COL].values[sort_idx]
+    dates = df_feat["date"].astype(str).values[sort_idx]
+    race_ids = race_id_num[sort_idx]
+
+    unique_dates = np.unique(dates)
+    n_dates = len(unique_dates)
+    print(f"データ期間: {unique_dates[0]} → {unique_dates[-1]} ({n_dates}日間)")
+    print(f"総レコード数: {len(X)}  (勝利数: {int(y_hard.sum())})")
+
+    n_splits = min(n_splits, n_dates - 1)
+    if n_splits < 2:
+        print(f"警告: データが少なすぎます（{n_dates}日）")
+        return None
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    date_indices = np.searchsorted(unique_dates, dates)
+
+    metrics = {"auc": [], "ndcg1": [], "ndcg3": []}
+    oof_scores = np.zeros(len(X))
+
+    for fold, (train_di, val_di) in enumerate(tscv.split(unique_dates)):
+        train_mask = np.isin(date_indices, train_di)
+        val_mask = np.isin(date_indices, val_di)
+
+        X_train = X[train_mask]
+        y_train = y_ltr[train_mask]
+        race_ids_train = race_ids[train_mask]
+        group_train = pd.Series(race_ids_train).value_counts().sort_index().values
+
+        X_val = X[val_mask]
+        y_val_ltr = y_ltr[val_mask]
+        y_val_hard = y_hard[val_mask]
+        race_ids_val = race_ids[val_mask]
+        group_val = pd.Series(race_ids_val).value_counts().sort_index().values
+
+        if X_train.shape[0] < 100 or X_val.shape[0] < 10:
+            continue
+
+        dtrain = lgb.Dataset(X_train, label=y_train, group=group_train)
+        dval = lgb.Dataset(X_val, label=y_val_ltr, group=group_val, reference=dtrain)
+        callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
+        booster = lgb.train(lgb_params, dtrain, num_boost_round=num_boost_round,
+                            valid_sets=[dval], callbacks=callbacks)
+
+        scores = booster.predict(X_val)
+        oof_scores[val_mask] = scores
+        auc = roc_auc_score(y_val_hard, scores)
+        metrics["auc"].append(auc)
+        print(f"  Fold {fold+1}: AUC={auc:.4f}")
+
+    if not metrics["auc"]:
+        raise ValueError("学習データが不足しています")
+
+    mean_auc = np.mean(metrics["auc"])
+    print(f"\n平均AUC: {mean_auc:.4f}  (binary基準: 0.500)")
+
+    # 全データで最終モデルを学習
+    group_full = pd.Series(race_ids).value_counts().sort_index().values
+    dtrain_full = lgb.Dataset(X, label=y_ltr, group=group_full)
+    final_model = lgb.train(lgb_params, dtrain_full, num_boost_round=num_boost_round,
+                            callbacks=[lgb.log_evaluation(0)])
+
+    feature_importance = dict(zip(available, final_model.feature_importance(importance_type="gain")))
+
+    return {
+        "model": final_model,
+        "calibrator": None,
+        "is_lambdarank": True,
+        "feature_cols": available,
+        "metrics": {"cv_auc": mean_auc, "folds": metrics},
+        "feature_importance": dict(
+            sorted(feature_importance.items(), key=lambda x: x[1], reverse=True)
+        ),
+    }
+
+
 def predict_race(
     model: lgb.LGBMClassifier,
     race_df: pd.DataFrame,
@@ -288,6 +391,7 @@ def save_model(result: dict) -> Path:
         "feature_cols": result["feature_cols"],
         "metrics": result["metrics"],
         "feature_importance": {k: int(v) for k, v in result["feature_importance"].items()},
+        "is_lambdarank": result.get("is_lambdarank", False),
     }
     meta_path = MODEL_DIR / "model_meta.json"
     with open(meta_path, "w", encoding="utf-8") as f:

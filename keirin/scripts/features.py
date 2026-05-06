@@ -203,12 +203,15 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["venue_leader"] = df["is_line_leader"] * df.get("venue_win_rate", 0)
 
     # --- ソフトラベル（学習用：着順の逆数を正規化）---
-    # 1位=最高スコア、2位・3位にも部分的にシグナルを与える
     soft = 1.0 / df["rank"].clip(lower=1)
     soft_sum = df.groupby(race_key)["rank"].transform(
         lambda x: (1.0 / x.clip(lower=1)).sum()
     )
     df["soft_label"] = (soft / soft_sum.replace(0, 1)).fillna(0)
+
+    # --- LambdaRank用関連度ラベル（整数）---
+    # 1位→3, 2位→2, 3位→1, 4位以下→0
+    df["lambdarank_label"] = (4 - df["rank"]).clip(lower=0).astype(int)
 
     return df
 

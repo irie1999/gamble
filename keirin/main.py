@@ -28,7 +28,7 @@ from keirin_jp import (
 )
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
-    train_evaluate, predict_race, save_model, load_model,
+    train_evaluate, train_lambdarank, predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config, tune_hyperparams,
 )
 from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
@@ -69,7 +69,7 @@ def cmd_compare(args):
           f"({split_idx}日学習 / {test_days}日テスト)")
 
     calibrator = meta.get("calibrator")
-    races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator)
+    races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator, meta=meta)
 
     target_strategies = (
         args.strategies.split(",") if getattr(args, "strategies", None)
@@ -594,7 +594,11 @@ def cmd_pipeline(args):
             records = json.load(f)
         df = pd.DataFrame(records)
         print(f"  学習データ: {len(df)}件")
-        result = train_evaluate(df, n_splits=5)
+        if getattr(args, "lambdarank", False):
+            print("  LambdaRank (Learning-to-Rank) モードで学習")
+            result = train_lambdarank(df, n_splits=5)
+        else:
+            result = train_evaluate(df, n_splits=5)
         if result is None:
             print("  ✗ データ不足で学習できません（最低7日分必要）")
             return
@@ -676,7 +680,7 @@ def _str_keys_to_tuples(d: dict) -> dict:
     return result
 
 
-def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None, calibrator=None):
+def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None, calibrator=None, meta: dict | None = None):
     """バックテスト用レースリストを構築
 
     ベット選択: モデル予測確率の上位組み合わせ（市場オッズ不要）
@@ -686,6 +690,8 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
     if odds_data is None:
         odds_data = load_odds_data()
     odds_by_race_id = odds_data if odds_data else {}
+    if meta is None:
+        meta = {}
 
     races = []
     for (date, venue, rno), race_df in df_feat.groupby(["date", "venue_code", "race_no"]):
@@ -707,6 +713,9 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
         probs = booster.predict(X)
         if calibrator is not None:
             probs = calibrator.predict(probs)
+        # LambdaRankは生スコア（負値あり）→ softmaxで確率に変換
+        if meta.get("is_lambdarank", False):
+            probs = np.exp(probs - probs.max())
         probs = np.clip(probs, 1e-6, 1.0)
         probs = probs / probs.sum()
 
@@ -759,7 +768,7 @@ def _backtest_real(args, bet_types):
 
     strategy = STRATEGIES.get(getattr(args, "strategy", None) or "")
     calibrator = meta.get("calibrator")
-    races = _build_races(booster, feature_cols, df_test, bet_types, calibrator=calibrator)
+    races = _build_races(booster, feature_cols, df_test, bet_types, calibrator=calibrator, meta=meta)
     session = simulate_session(races, initial_bankroll=args.bankroll,
                                bet_types=bet_types,
                                line_leader_only=getattr(args, "line_leader", False),
@@ -904,7 +913,7 @@ def cmd_detail(args):
     test_days = len(dates) - split_idx
 
     calibrator = meta.get("calibrator")
-    races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator)
+    races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator, meta=meta)
     session = simulate_session(races, initial_bankroll=args.bankroll, strategy=strat)
 
     print(f"戦略: {strategy_name}  期間: {test_days}日  "
@@ -1185,6 +1194,7 @@ def main():
     p_pipe.add_argument("--skip-payouts", dest="skip_payouts", action="store_true",
                         help="Step1払戻取得をスキップ（学習・比較のみ実行したい場合）")
     p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
+    p_pipe.add_argument("--lambdarank", action="store_true", help="LambdaRank (Learning-to-Rank) モードで学習")
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
 
