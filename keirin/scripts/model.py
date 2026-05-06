@@ -94,12 +94,12 @@ def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) ->
     tscv = TimeSeriesSplit(n_splits=n_splits)
 
     def objective(trial):
-        params = {
+        lgb_p = {
             "objective": "binary",
             "metric": "binary_logloss",
-            "verbose": -1,
-            "n_jobs": -1,
-            "random_state": 42,
+            "verbosity": -1,
+            "num_threads": -1,
+            "seed": 42,
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 20, 150),
             "max_depth": trial.suggest_int("max_depth", 3, 10),
@@ -108,8 +108,8 @@ def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) ->
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-            "n_estimators": 1000,
         }
+        num_round = 1000
         aucs = []
         for train_di, val_di in tscv.split(unique_dates):
             train_mask = np.isin(date_indices, train_di)
@@ -118,10 +118,11 @@ def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) ->
             X_val, y_val = X[val_mask], y[val_mask]
             if X_tr.shape[0] < 100 or X_val.shape[0] < 10:
                 continue
-            m = lgb.LGBMClassifier(**params)
-            m.fit(X_tr, y_tr, eval_set=[(X_val, y_val)],
-                  callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)])
-            aucs.append(roc_auc_score(y_val, m.predict_proba(X_val)[:, 1]))
+            dtrain = lgb.Dataset(X_tr, label=y_tr)
+            dval = lgb.Dataset(X_val, label=y_val, reference=dtrain)
+            b = lgb.train(lgb_p, dtrain, num_boost_round=num_round, valid_sets=[dval],
+                          callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)])
+            aucs.append(roc_auc_score(y_val, b.predict(X_val)))
         return np.mean(aucs) if aucs else 0.0
 
     print(f"Optuna最適化開始: {n_trials}試行 / {n_splits}fold CV")
@@ -174,6 +175,14 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     tscv = TimeSeriesSplit(n_splits=n_splits)
     date_indices = np.searchsorted(unique_dates, dates)
 
+    # lgb.train()用パラメータに変換（sklearn固有キーを除外）
+    sklearn_only = {"n_estimators", "random_state", "verbose", "n_jobs"}
+    lgb_params = {k: v for k, v in params.items() if k not in sklearn_only}
+    lgb_params.setdefault("seed", params.get("random_state", 42))
+    lgb_params.setdefault("num_threads", -1)
+    lgb_params["verbosity"] = -1
+    num_boost_round = params.get("n_estimators", 500)
+
     metrics = {"auc": [], "logloss": []}
     oof_probs = np.zeros(len(X))   # キャリブレーション用out-of-fold予測
 
@@ -187,14 +196,14 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
         if X_train.shape[0] < 100 or X_val.shape[0] < 10:
             continue
 
-        model = lgb.LGBMClassifier(**params)
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val_hard)],
-            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)],
-        )
+        dtrain = lgb.Dataset(X_train, label=y_train)
+        dval = lgb.Dataset(X_val, label=y_val_hard, reference=dtrain)
+        callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
+        booster = lgb.train(lgb_params, dtrain, num_boost_round=num_boost_round,
+                            valid_sets=[dval], callbacks=callbacks)
 
-        prob = model.predict_proba(X_val)[:, 1]
+        prob = booster.predict(X_val)
+        prob = np.clip(prob, 1e-7, 1 - 1e-7)
         oof_probs[val_mask] = prob
         auc = roc_auc_score(y_val_hard, prob)
         ll = log_loss(y_val_hard, prob)
@@ -212,12 +221,12 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     print(f"\n平均AUC: {mean_auc:.4f}  平均LogLoss: {mean_ll:.4f}")
     print(f"ランダム基準 AUC=0.500、LogLoss={random_logloss:.4f} (1/8人想定)")
 
-    # 全データで最終モデルを学習
-    final_model = lgb.LGBMClassifier(**params)
-    final_model.fit(X, y_soft, callbacks=[lgb.log_evaluation(0)])
+    # 全データで最終モデルを学習（ネイティブAPIでソフトラベル対応）
+    dtrain_full = lgb.Dataset(X, label=y_soft)
+    final_model = lgb.train(lgb_params, dtrain_full, num_boost_round=num_boost_round,
+                            callbacks=[lgb.log_evaluation(0)])
 
     # 確率キャリブレーション（isotonic regression）
-    # out-of-fold予測と実ラベルでキャリブレーターを学習
     calibrator = None
     oof_mask = oof_probs > 0
     if oof_mask.sum() > 100:
@@ -228,7 +237,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
         cal_auc = roc_auc_score(y_hard[oof_mask], cal_probs)
         print(f"キャリブレーション後AUC: {cal_auc:.4f}")
 
-    feature_importance = dict(zip(available, final_model.feature_importances_))
+    feature_importance = dict(zip(available, final_model.feature_importance(importance_type="gain")))
 
     return {
         "model": final_model,
@@ -251,7 +260,7 @@ def predict_race(
     available = [c for c in feature_cols if c in df_feat.columns]
     X = df_feat[available].values
 
-    probs = model.predict_proba(X)[:, 1]
+    probs = model.predict(X)
     probs = probs / probs.sum()
 
     result = race_df[["car_no", "player_name", "line_no", "is_line_leader"]].copy().reset_index(drop=True)
@@ -267,7 +276,7 @@ def save_model(result: dict) -> Path:
     fd, tmp_name = tempfile.mkstemp(suffix=".txt")
     os.close(fd)
     try:
-        result["model"].booster_.save_model(tmp_name)
+        result["model"].save_model(tmp_name)
         if model_path.exists():
             model_path.unlink()
         shutil.copy2(tmp_name, str(model_path))
