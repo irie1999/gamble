@@ -454,8 +454,12 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
     }
 
 
-def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 30) -> dict:
-    """Graph Neural Network（ライン戦術グラフ）で着順予測モデルを学習"""
+def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 10) -> dict:
+    """Graph Neural Network（ライン戦術グラフ）で着順予測モデルを学習
+
+    同一人数のレースをバッチ処理することで高速化。
+    CV: epochs回、最終モデル: epochs*2回。
+    """
     try:
         import torch
         import torch.nn as nn
@@ -463,6 +467,8 @@ def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 30) -> dict:
     except ImportError:
         print("PyTorchが未インストールです: pip install torch")
         return None
+
+    BATCH_SIZE = 256
 
     class LineGNN(nn.Module):
         def __init__(self, in_dim, hidden_dim=128):
@@ -479,15 +485,19 @@ def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 30) -> dict:
             )
             self.score = nn.Linear(hidden_dim, 1)
 
-        def forward(self, x, line_ids):
-            h = self.embed(x)
-            # ライン内選手の平均特徴量を各選手に付加（メッセージパッシング）
+        def forward_batched(self, x, line_ids):
+            # x: (B, N, D)  line_ids: (B, N)
+            B, N, D = x.shape
+            h = self.embed(x.reshape(-1, D)).reshape(B, N, -1)   # (B, N, hidden)
+            # ライン平均メッセージパッシング（ベクトル化）
             h_ctx = torch.zeros_like(h)
             for lid in line_ids.unique():
-                mask = (line_ids == lid)
-                h_ctx[mask] = h[mask].mean(0)
-            h_out = self.line_fc(torch.cat([h, h_ctx], dim=1))
-            return self.score(h_out).squeeze(-1)
+                m = (line_ids == lid).unsqueeze(-1)               # (B, N, 1)
+                cnt = m.sum(dim=1, keepdim=True).clamp(min=1)
+                mean = (h * m).sum(dim=1, keepdim=True) / cnt
+                h_ctx = h_ctx + m * mean
+            h_out = self.line_fc(torch.cat([h, h_ctx], dim=-1))  # (B, N, hidden)
+            return self.score(h_out).squeeze(-1)                  # (B, N)
 
     df_feat = build_features(df)
     available = [c for c in FEATURE_COLS if c in df_feat.columns]
@@ -518,40 +528,56 @@ def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 30) -> dict:
     in_dim = X_all.shape[1]
     metrics = {"auc": []}
 
+    def build_batches(X_arr, y_arr, line_arr, race_arr):
+        """同一人数のレースをまとめてバッチ化"""
+        from collections import defaultdict
+        size_map = defaultdict(list)
+        for rid in np.unique(race_arr):
+            mask = race_arr == rid
+            size_map[mask.sum()].append(rid)
+
+        batches = []
+        for size, race_list in size_map.items():
+            rlist = np.array(race_list)
+            np.random.shuffle(rlist)
+            for i in range(0, len(rlist), BATCH_SIZE):
+                chunk = rlist[i:i + BATCH_SIZE]
+                X_b = np.stack([X_arr[race_arr == r] for r in chunk])     # (B, N, D)
+                y_b = np.stack([y_arr[race_arr == r] for r in chunk])     # (B, N)
+                l_b = np.stack([line_arr[race_arr == r] for r in chunk])  # (B, N)
+                batches.append((X_b, y_b, l_b))
+        return batches
+
     def train_one(X_arr, y_arr, line_arr, race_arr, n_epochs):
         model = LineGNN(in_dim)
         opt = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=1e-4)
-        races = np.unique(race_arr)
         model.train()
         for ep in range(n_epochs):
-            np.random.shuffle(races)
-            total_loss = 0.0
-            for rid in races:
-                mask = race_arr == rid
-                xr = torch.tensor(X_arr[mask], dtype=torch.float32)
-                yr = torch.tensor(y_arr[mask], dtype=torch.long)
-                lr = torch.tensor(line_arr[mask], dtype=torch.long)
-                if yr.sum() == 0:
-                    continue
-                scores = model(xr, lr)
-                # softmax cross-entropy: winner should score highest
-                loss = F.cross_entropy(scores.unsqueeze(0), yr.argmax().unsqueeze(0))
+            batches = build_batches(X_arr, y_arr, line_arr, race_arr)
+            for X_b, y_b, l_b in batches:
+                xr = torch.tensor(X_b, dtype=torch.float32)
+                yr = torch.tensor(y_b, dtype=torch.float32)
+                lr = torch.tensor(l_b, dtype=torch.long)
+                winner_idx = torch.tensor(y_b.argmax(axis=1), dtype=torch.long)
+                scores = model.forward_batched(xr, lr)          # (B, N)
+                loss = F.cross_entropy(scores, winner_idx)
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
-                total_loss += loss.item()
         return model
 
     def predict_all(model, X_arr, line_arr, race_arr):
         model.eval()
-        scores = np.zeros(len(X_arr))
+        scores_out = np.zeros(len(X_arr))
+        batches = build_batches(X_arr, np.zeros(len(X_arr)), line_arr, race_arr)
+        # batches doesn't preserve order — predict race by race
         with torch.no_grad():
             for rid in np.unique(race_arr):
                 mask = race_arr == rid
-                xr = torch.tensor(X_arr[mask], dtype=torch.float32)
-                lr = torch.tensor(line_arr[mask], dtype=torch.long)
-                scores[mask] = model(xr, lr).numpy()
-        return scores
+                xr = torch.tensor(X_arr[mask][np.newaxis], dtype=torch.float32)
+                lr = torch.tensor(line_arr[mask][np.newaxis], dtype=torch.long)
+                scores_out[mask] = model.forward_batched(xr, lr).squeeze(0).numpy()
+        return scores_out
 
     for fold, (train_di, val_di) in enumerate(tscv.split(unique_dates)):
         train_mask = np.isin(date_indices, train_di)
@@ -573,11 +599,9 @@ def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 30) -> dict:
     mean_auc = np.mean(metrics["auc"])
     print(f"\n平均AUC: {mean_auc:.4f}")
 
-    # 全データで最終モデルを学習（エポック数増やして精度向上）
     print("  全データで最終モデルを学習中...")
     final_model = train_one(X_all, y_hard_all, line_all, race_ids_all, epochs * 2)
 
-    # 特徴量重要度は勾配ベースの近似（各特徴の絶対勾配平均）
     fi = {col: float(np.abs(X_all[:, i]).mean()) for i, col in enumerate(available)}
 
     return {
