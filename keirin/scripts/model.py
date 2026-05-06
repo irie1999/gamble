@@ -67,12 +67,13 @@ def load_data(filename: str = "raw_data.json") -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
-def _prepare_train_data(df: pd.DataFrame):
+def _prepare_train_data(df: pd.DataFrame, soft_labels: bool = False):
     """特徴量行列・ターゲット・日付を返す共通処理"""
     df_feat = build_features(df)
     available = [c for c in FEATURE_COLS if c in df_feat.columns]
     X = df_feat[available].values
-    y = df_feat[TARGET_COL].values
+    target_col = "soft_label" if soft_labels and "soft_label" in df_feat.columns else TARGET_COL
+    y = df_feat[target_col].values
     dates = df_feat["date"].astype(str).values
     sort_idx = np.argsort(dates, kind="stable")
     return X[sort_idx], y[sort_idx], dates[sort_idx], available
@@ -139,23 +140,32 @@ def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) ->
     return best
 
 
-def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
-    """時系列CVで評価し、全データで最終モデルを学習"""
+def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True) -> dict:
+    """時系列CVで評価し、全データで最終モデルを学習
+
+    soft_labels=True: 1/rank正規化値を目標に学習（2位・3位にも訓練シグナル）
+    """
     params = _load_params()
 
+    # ソフトラベルか通常ラベルかでターゲットを選択
     df_feat = build_features(df)
     available = [c for c in FEATURE_COLS if c in df_feat.columns]
     X = df_feat[available].values
-    y = df_feat[TARGET_COL].values
+    target_col = "soft_label" if soft_labels and "soft_label" in df_feat.columns else TARGET_COL
+    y_soft = df_feat[target_col].values           # 学習用（ソフトまたはバイナリ）
+    y_hard = df_feat[TARGET_COL].values           # AUC評価用（常にバイナリ）
     dates = df_feat["date"].astype(str).values
 
     sort_idx = np.argsort(dates, kind="stable")
-    X, y, dates = X[sort_idx], y[sort_idx], dates[sort_idx]
+    X, y_soft, y_hard, dates = X[sort_idx], y_soft[sort_idx], y_hard[sort_idx], dates[sort_idx]
+
+    if soft_labels and target_col == "soft_label":
+        print(f"  ソフトラベル学習（1/rank正規化）: {target_col}")
 
     unique_dates = np.unique(dates)
     n_dates = len(unique_dates)
     print(f"データ期間: {unique_dates[0]} → {unique_dates[-1]} ({n_dates}日間)")
-    print(f"総レコード数: {len(X)}  (勝利数: {y.sum()})")
+    print(f"総レコード数: {len(X)}  (勝利数: {y_hard.sum()})")
 
     n_splits = min(n_splits, n_dates - 1)
     if n_splits < 2:
@@ -165,13 +175,14 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
     date_indices = np.searchsorted(unique_dates, dates)
 
     metrics = {"auc": [], "logloss": []}
-    models = []
+    oof_probs = np.zeros(len(X))   # キャリブレーション用out-of-fold予測
 
     for fold, (train_di, val_di) in enumerate(tscv.split(unique_dates)):
         train_mask = np.isin(date_indices, train_di)
         val_mask = np.isin(date_indices, val_di)
-        X_train, y_train = X[train_mask], y[train_mask]
-        X_val, y_val = X[val_mask], y[val_mask]
+        X_train, y_train = X[train_mask], y_soft[train_mask]
+        X_val = X[val_mask]
+        y_val_hard = y_hard[val_mask]
 
         if X_train.shape[0] < 100 or X_val.shape[0] < 10:
             continue
@@ -179,36 +190,49 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
         model = lgb.LGBMClassifier(**params)
         model.fit(
             X_train, y_train,
-            eval_set=[(X_val, y_val)],
+            eval_set=[(X_val, y_val_hard)],
             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)],
         )
 
         prob = model.predict_proba(X_val)[:, 1]
-        auc = roc_auc_score(y_val, prob)
-        ll = log_loss(y_val, prob)
+        oof_probs[val_mask] = prob
+        auc = roc_auc_score(y_val_hard, prob)
+        ll = log_loss(y_val_hard, prob)
         metrics["auc"].append(auc)
         metrics["logloss"].append(ll)
-        models.append(model)
         print(f"  Fold {fold+1}: AUC={auc:.4f}  LogLoss={ll:.4f}")
 
-    if not models:
+    if not metrics["auc"]:
         raise ValueError("学習データが不足しています")
 
     mean_auc = np.mean(metrics["auc"])
     mean_ll = np.mean(metrics["logloss"])
 
     random_logloss = -np.log(1 / 8)
-
     print(f"\n平均AUC: {mean_auc:.4f}  平均LogLoss: {mean_ll:.4f}")
     print(f"ランダム基準 AUC=0.500、LogLoss={random_logloss:.4f} (1/8人想定)")
 
+    # 全データで最終モデルを学習
     final_model = lgb.LGBMClassifier(**params)
-    final_model.fit(X, y, callbacks=[lgb.log_evaluation(0)])
+    final_model.fit(X, y_soft, callbacks=[lgb.log_evaluation(0)])
+
+    # 確率キャリブレーション（isotonic regression）
+    # out-of-fold予測と実ラベルでキャリブレーターを学習
+    calibrator = None
+    oof_mask = oof_probs > 0
+    if oof_mask.sum() > 100:
+        from sklearn.isotonic import IsotonicRegression
+        calibrator = IsotonicRegression(out_of_bounds="clip")
+        calibrator.fit(oof_probs[oof_mask], y_hard[oof_mask])
+        cal_probs = calibrator.predict(oof_probs[oof_mask])
+        cal_auc = roc_auc_score(y_hard[oof_mask], cal_probs)
+        print(f"キャリブレーション後AUC: {cal_auc:.4f}")
 
     feature_importance = dict(zip(available, final_model.feature_importances_))
 
     return {
         "model": final_model,
+        "calibrator": calibrator,
         "feature_cols": available,
         "metrics": {"cv_auc": mean_auc, "cv_logloss": mean_ll, "folds": metrics},
         "feature_importance": dict(
@@ -260,6 +284,17 @@ def save_model(result: dict) -> Path:
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
+    # キャリブレーターを保存
+    cal = result.get("calibrator")
+    cal_path = MODEL_DIR / "calibrator.pkl"
+    if cal is not None:
+        import pickle
+        with open(cal_path, "wb") as f:
+            pickle.dump(cal, f)
+        print(f"キャリブレーター保存: {cal_path}")
+    elif cal_path.exists():
+        cal_path.unlink()
+
     print(f"\nモデル保存: {model_path}")
     print(f"メタ情報: {meta_path}")
     return model_path
@@ -279,6 +314,14 @@ def load_model() -> tuple:
             os.unlink(tmp_name)
     with open(meta_path, encoding="utf-8") as f:
         meta = json.load(f)
+
+    # キャリブレーターがあれば読み込む
+    cal_path = MODEL_DIR / "calibrator.pkl"
+    if cal_path.exists():
+        import pickle
+        with open(cal_path, "rb") as f:
+            meta["calibrator"] = pickle.load(f)
+
     return booster, meta["feature_cols"], meta
 
 

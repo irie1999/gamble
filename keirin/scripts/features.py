@@ -194,6 +194,22 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
             race_std = df.groupby(race_key)[col].transform("std").replace(0, np.nan)
             df[f"{col}_rel"] = (df[col] - race_mean) / race_std.fillna(1)
 
+    # --- 特徴量交互作用 ---
+    # ラインリーダー × 直近調子（強いリーダーが好調なら最強）
+    df["leader_recent_form"] = df["is_line_leader"] * df.get("recent_win_5", 0)
+    # 競走得点相対優位 × レース難易度（強い選手が明確に有利なレース）
+    df["kyosoten_edge"] = df["kyosoten_rel"] * df["race_competitiveness"].clip(lower=0)
+    # 会場巧者 × ライン先頭（地力+本拠地効果）
+    df["venue_leader"] = df["is_line_leader"] * df.get("venue_win_rate", 0)
+
+    # --- ソフトラベル（学習用：着順の逆数を正規化）---
+    # 1位=最高スコア、2位・3位にも部分的にシグナルを与える
+    soft = 1.0 / df["rank"].clip(lower=1)
+    soft_sum = df.groupby(race_key)["rank"].transform(
+        lambda x: (1.0 / x.clip(lower=1)).sum()
+    )
+    df["soft_label"] = (soft / soft_sum.replace(0, 1)).fillna(0)
+
     return df
 
 
@@ -238,6 +254,10 @@ FEATURE_COLS = [
     "kyosoten_trend",
     "race_competitiveness",
     "kyosoten_vs_top",
+    # --- 新規：特徴量交互作用 ---
+    "leader_recent_form",
+    "kyosoten_edge",
+    "venue_leader",
 ]
 
 TARGET_COL = "win"

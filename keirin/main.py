@@ -68,8 +68,8 @@ def cmd_compare(args):
     print(f"テスト分割: {1-test_ratio:.0%}学習 / {test_ratio:.0%}テスト  "
           f"({split_idx}日学習 / {test_days}日テスト)")
 
-    # 全賭け式でオッズを生成しておく（各戦略がサブセットを選ぶ）
-    races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES)
+    calibrator = meta.get("calibrator")
+    races_full = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator)
 
     target_strategies = (
         args.strategies.split(",") if getattr(args, "strategies", None)
@@ -676,7 +676,7 @@ def _str_keys_to_tuples(d: dict) -> dict:
     return result
 
 
-def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None):
+def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | None = None, calibrator=None):
     """バックテスト用レースリストを構築
 
     ベット選択: モデル予測確率の上位組み合わせ（市場オッズ不要）
@@ -705,6 +705,9 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
 
         X = race_df[[c for c in feature_cols if c in race_df.columns]].values
         probs = booster.predict(X)
+        if calibrator is not None:
+            probs = calibrator.predict(probs)
+        probs = np.clip(probs, 1e-6, 1.0)
         probs = probs / probs.sum()
 
         pred_df = pd.DataFrame({
@@ -755,7 +758,8 @@ def _backtest_real(args, bet_types):
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
 
     strategy = STRATEGIES.get(getattr(args, "strategy", None) or "")
-    races = _build_races(booster, feature_cols, df_test, bet_types)
+    calibrator = meta.get("calibrator")
+    races = _build_races(booster, feature_cols, df_test, bet_types, calibrator=calibrator)
     session = simulate_session(races, initial_bankroll=args.bankroll,
                                bet_types=bet_types,
                                line_leader_only=getattr(args, "line_leader", False),
@@ -899,7 +903,8 @@ def cmd_detail(args):
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
     test_days = len(dates) - split_idx
 
-    races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES)
+    calibrator = meta.get("calibrator")
+    races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator)
     session = simulate_session(races, initial_bankroll=args.bankroll, strategy=strat)
 
     print(f"戦略: {strategy_name}  期間: {test_days}日  "
