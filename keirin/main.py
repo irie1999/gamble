@@ -223,29 +223,68 @@ def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll
     webbrowser.open(path.as_uri())
 
 
-def cmd_predict(args):
-    """今日の出走表からベッティングシグナルを生成"""
-    model_path = MODEL_DIR / "lgb_model.txt"
-    if not model_path.exists():
-        print("モデルが未学習です。先に `python main.py train` を実行してください")
-        return
+def _predict_probs(booster, feature_cols, meta, race_df: pd.DataFrame) -> np.ndarray:
+    """レースDataFrameからモデルタイプに応じた予測確率を返す（正規化済み）"""
+    model_type = meta.get("model_type", "lgb")
+    X = race_df[[c for c in feature_cols if c in race_df.columns]].fillna(0).values
 
+    if model_type == "gnn":
+        import torch
+        xr = torch.tensor(X, dtype=torch.float32)
+        lr = torch.tensor(race_df["line_no"].fillna(0).values.astype(np.int64), dtype=torch.long)
+        with torch.no_grad():
+            probs = booster(xr, lr).numpy()
+        probs = np.exp(probs - probs.max())
+    elif model_type == "catboost":
+        cat_cols_cb = ["car_no", "line_no", "is_line_leader", "class_enc"]
+        df_cb = race_df[[c for c in feature_cols if c in race_df.columns]].copy()
+        for c in cat_cols_cb:
+            if c in df_cb.columns:
+                df_cb[c] = df_cb[c].fillna(0).astype(int)
+        probs = booster.predict(df_cb)
+        probs = np.exp(probs - probs.max())
+    else:
+        probs = booster.predict(X)
+        calibrator = meta.get("calibrator")
+        if calibrator is not None:
+            probs = calibrator.predict(probs)
+        if meta.get("is_lambdarank", False):
+            probs = np.exp(probs - probs.max())
+
+    probs = np.clip(probs, 1e-6, 1.0)
+    return probs / probs.sum()
+
+
+def cmd_predict(args):
+    """明日の出走表からベッティングシグナルを生成（デフォルト戦略: trifecta_sharp）"""
     booster, feature_cols, meta = load_model()
     mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
+    model_type = meta.get("model_type", "lgb")
 
     if args.date:
         date_str = args.date
     elif getattr(args, "today", False):
         date_str = datetime.now().strftime("%Y%m%d")
     else:
-        # デフォルトは明日（出走表は前日公開のため）
         date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
-    bet_types = args.bet_types.split(",") if args.bet_types else KEIRIN_BET_TYPES
+
+    strategy_name = getattr(args, "strategy", "trifecta_sharp") or "trifecta_sharp"
+    strat = STRATEGIES.get(strategy_name)
+    if strat is None:
+        print(f"戦略 '{strategy_name}' が見つかりません。利用可能: {', '.join(STRATEGIES)}")
+        return
+
+    bet_types = strat["bet_types"]
+    min_top_prob = strat.get("min_top_prob", 0.0)
+    bet_config = strat.get("bet_config", {})
+    fixed_amount = strat.get("fixed_amount", 100)
     bankroll = args.bankroll
 
     print(f"\n{'='*60}")
     print(f"  競輪ベッティングシグナル  {date_str}")
-    print(f"  モデルAUC: {mean_auc:.4f}  資金: {bankroll:,.0f}円")
+    print(f"  モデル: {model_type.upper()}  AUC: {mean_auc:.4f}  戦略: {strategy_name}")
+    print(f"  フィルター: 1位予測確率 ≥ {min_top_prob:.0%}  賭け式: {', '.join(bet_types)}")
+    print(f"  資金: {bankroll:,.0f}円")
     print(f"{'='*60}\n")
 
     races = fetch_daily_schedule(date_str)
@@ -254,37 +293,37 @@ def cmd_predict(args):
         print("※ネットワーク接続またはkdreams.jpへのアクセスを確認してください")
         return
 
-    print(f"{len(races)}レース検出\n")
+    print(f"{len(races)}レース検出  (フィルター通過条件: 1位予測確率 ≥ {min_top_prob:.0%})\n")
 
-    top_n = getattr(args, "top_n", 20)
-    min_ev = getattr(args, "min_ev", 1.5)
     signal_rows = []
+    skipped = 0
 
     for race in sorted(races, key=lambda r: (r["venue_code"], r["race_no"])):
         records = fetch_entry_detail(race)
         if not records:
             continue
 
-        df = pd.DataFrame(records).drop_duplicates(subset="car_no", keep="first")
-        df_feat = build_features(df)
-
-        feat_cols_available = [c for c in feature_cols if c in df_feat.columns]
-        X = df_feat[feat_cols_available].fillna(0).values
-        if len(X) == 0:
+        race_df = pd.DataFrame(records).drop_duplicates(subset="car_no", keep="first")
+        df_feat = build_features(race_df)
+        if df_feat.empty:
             continue
 
-        probs = booster.predict(X)
-        probs /= probs.sum()
+        probs = _predict_probs(booster, feature_cols, meta, df_feat)
 
         pred_df = pd.DataFrame({
-            "car_no": df["car_no"].values,
-            "player_name": df["player_name"].values,
+            "car_no": df_feat["car_no"].values,
+            "player_name": df_feat["player_name"].values if "player_name" in df_feat.columns else [""] * len(df_feat),
             "win_prob": probs,
-            "is_line_leader": df["is_line_leader"].fillna(0).astype(int).values,
-            "line_no": df["line_no"].fillna(0).astype(int).values,
+            "is_line_leader": df_feat["is_line_leader"].fillna(0).astype(int).values if "is_line_leader" in df_feat.columns else np.zeros(len(df_feat), int),
+            "line_no": df_feat["line_no"].fillna(0).astype(int).values if "line_no" in df_feat.columns else np.zeros(len(df_feat), int),
         })
 
-        # keirin.jp ライブオッズを参考取得（選択には使わない、表示用）
+        top_prob = float(pred_df["win_prob"].max())
+        if top_prob < min_top_prob:
+            skipped += 1
+            continue
+
+        # ライブオッズ取得（表示用参考値）
         odds_dict = {}
         kcd = VENUE_CODE_TO_KCD.get(str(race.get("venue_code", "")))
         if kcd:
@@ -293,14 +332,13 @@ def cmd_predict(args):
                 if jdata:
                     encp = get_race_encp(jdata, race["race_no"])
                     if encp:
-                        odds_dict = fetch_live_odds(encp, ["exacta", "quinella", "trifecta", "trio"])
+                        odds_dict = fetch_live_odds(encp, ["trifecta", "trio", "wide", "exacta", "quinella"])
                     if not odds_dict:
                         odds_dict = get_payout_odds(jdata)
             except Exception:
                 pass
-
         if not odds_dict:
-            odds_dict = fetch_race_odds(race, bet_types=["trifecta", "trio", "wide"])
+            odds_dict = fetch_race_odds(race, bet_types=bet_types)
 
         pred_sorted = pred_df.sort_values("win_prob", ascending=False)
         pred_str = " > ".join(
@@ -309,9 +347,14 @@ def cmd_predict(args):
         )
 
         for bt in bet_types:
-            bets = pick_bets(pred_df, bt, fixed_amount=100)
+            cfg = bet_config.get(bt)
+            if cfg:
+                min_prob, max_odds, n_combos, _ = cfg
+                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount, min_prob=min_prob, max_combos=n_combos)
+            else:
+                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount)
+
             for b in bets:
-                # 参考用: ライブオッズがあれば表示に使う
                 live_odds = odds_dict.get(bt, {}).get(b.selections, 0.0)
                 signal_rows.append({
                     "venue": race["venue_name"],
@@ -320,70 +363,74 @@ def cmd_predict(args):
                     "selections": str(list(b.selections)),
                     "odds": live_odds,
                     "bet_amount": b.bet_amount,
-                    "edge": 0.0,
                     "ev": live_odds * b.predicted_prob if live_odds > 0 else b.predicted_prob,
                     "pred_prob": b.predicted_prob,
+                    "top_prob": top_prob,
                     "pred_str": pred_str,
                 })
 
+    print(f"フィルター通過: {len(races) - skipped}レース  スキップ: {skipped}レース\n")
+
     if not signal_rows:
-        print("シグナルがありません")
+        print(f"シグナルなし（1位予測確率 ≥ {min_top_prob:.0%} のレースがありません）")
         return
 
-    # EV 降順でソートし上位 top_n を「おすすめ」とする
-    signal_rows.sort(key=lambda x: x["ev"], reverse=True)
-    top_picks = signal_rows[:top_n]
+    signal_rows.sort(key=lambda x: x["top_prob"], reverse=True)
 
-    print(f"\n━━━ TOP {top_n} おすすめベット（EV順） ━━━")
-    print(f"{'#':<3} {'レース':<10} {'賭け式':<6} {'選択':<12} "
-          f"{'予測P':>6} {'オッズ':>8} {'エッジ':>7} {'EV':>5} {'推奨額':>8}")
-    print("-" * 72)
-    for i, r in enumerate(top_picks, 1):
-        print(f"{i:<3} {r['venue']} R{r['race_no']:<4} {r['bet_type']:<6} "
-              f"{r['selections']:<12} {r['pred_prob']:>5.1%} {r['odds']:>6.1f}倍 "
-              f"{r['edge']:>+6.3f} {r['ev']:>5.2f} {r['bet_amount']:>7,}円")
+    print(f"━━━ {strategy_name} シグナル（{len(signal_rows)}件） ━━━")
+    print(f"{'#':<3} {'レース':<12} {'賭け式':<6} {'買い目':<14} "
+          f"{'1位予測P':>8} {'組合P':>6} {'参考オッズ':>9} {'推奨額':>8}")
+    print("-" * 75)
+    for i, r in enumerate(signal_rows, 1):
+        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "    -"
+        print(f"{i:<3} {r['venue']} R{r['race_no']:<5} {r['bet_type']:<6} "
+              f"{r['selections']:<14} {r['top_prob']:>7.1%} {r['pred_prob']:>5.1%} "
+              f"{odds_str:>9} {r['bet_amount']:>7,}円")
 
-    total_top = sum(r["bet_amount"] for r in top_picks)
-    print(f"\n合計推奨額（TOP{top_n}）: {total_top:,}円")
-    print(f"全シグナル: {len(signal_rows)}件")
-    print("\n⚠ オッズはライブ参考値です（取得できない場合は0）。実際のオッズを確認してから購入してください。\n")
+    total = sum(r["bet_amount"] for r in signal_rows)
+    print(f"\n合計推奨額: {total:,}円  ({len(signal_rows)}件)")
+    print(f"\n予測順位:")
+    seen = set()
+    for r in signal_rows:
+        key = (r["venue"], r["race_no"])
+        if key not in seen:
+            seen.add(key)
+            print(f"  {r['venue']} R{r['race_no']}: {r['pred_str']}")
+    print("\n⚠ 参考オッズは取得できない場合0表示。実際のオッズを確認してから購入してください。\n")
 
     if args.html:
-        _save_signal_html(signal_rows, top_picks, date_str, mean_auc, bankroll, top_n)
+        _save_signal_html(signal_rows, date_str, mean_auc, bankroll, strategy_name, model_type)
 
 
 def _save_signal_html(
     signal_rows: list[dict],
-    top_picks: list[dict],
     date_str: str,
     auc: float,
     bankroll: float,
-    top_n: int = 20,
+    strategy_name: str = "trifecta_sharp",
+    model_type: str = "lambdarank",
 ) -> None:
-    def make_row(r: dict, highlight: bool = False) -> str:
-        bg = ' style="background:#1a2e1a"' if highlight else ""
+    def make_row(r: dict) -> str:
+        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
         return f"""
-        <tr{bg}>
+        <tr>
           <td>{r['venue']} R{r['race_no']}</td>
           <td>{r['bet_type']}</td>
-          <td>{r['selections']}</td>
+          <td><strong>{r['selections']}</strong></td>
+          <td style="color:#fbbf24"><strong>{r['top_prob']:.1%}</strong></td>
           <td>{r['pred_prob']:.1%}</td>
-          <td>{r['odds']:.1f}倍</td>
-          <td><span style="color:{'#4ade80' if r['edge']>=0 else '#f87171'}">{r['edge']:+.3f}</span></td>
-          <td><strong style="color:#fbbf24">{r['ev']:.2f}</strong></td>
+          <td>{odds_str}</td>
           <td><strong>{r['bet_amount']:,}円</strong></td>
+          <td style="font-size:.78rem;color:#94a3b8">{r['pred_str']}</td>
         </tr>"""
 
-    top_rows_html = "".join(make_row(r, highlight=True) for r in top_picks)
-    all_rows_html = "".join(make_row(r) for r in signal_rows)
-
-    total_top = sum(r["bet_amount"] for r in top_picks)
-    total_all = sum(r["bet_amount"] for r in signal_rows)
+    rows_html = "".join(make_row(r) for r in signal_rows)
+    total = sum(r["bet_amount"] for r in signal_rows)
 
     table_header = """
       <thead><tr>
-        <th>レース</th><th>賭け式</th><th>選択</th>
-        <th>予測P</th><th>オッズ(推定)</th><th>エッジ</th><th>EV</th><th>推奨額</th>
+        <th>レース</th><th>賭け式</th><th>買い目</th>
+        <th>1位予測P</th><th>組合P</th><th>参考オッズ</th><th>推奨額</th><th>予測順</th>
       </tr></thead>"""
 
     html = f"""<!DOCTYPE html>
@@ -395,15 +442,13 @@ def _save_signal_html(
   .header {{background:#1e293b;padding:2rem;border-bottom:1px solid #334155}}
   .header h1 {{font-size:1.6rem;font-weight:700}}
   .header .sub {{color:#94a3b8;margin-top:.3rem;font-size:.9rem}}
-  .container {{max-width:1200px;margin:0 auto;padding:2rem}}
+  .container {{max-width:1400px;margin:0 auto;padding:2rem}}
   .kpi {{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
   .kpi-card {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
   .kpi-card .label {{font-size:.75rem;color:#64748b;text-transform:uppercase}}
   .kpi-card .value {{font-size:1.4rem;font-weight:700;color:#f1f5f9;margin-top:.2rem}}
   .section {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem;margin-bottom:1.5rem}}
   .section h2 {{font-size:.95rem;font-weight:600;color:#94a3b8;margin-bottom:1rem;text-transform:uppercase}}
-  .top-badge {{display:inline-block;background:#d97706;color:#fff;font-size:.7rem;font-weight:700;
-               border-radius:4px;padding:.1rem .4rem;margin-right:.4rem;vertical-align:middle}}
   table {{width:100%;border-collapse:collapse;font-size:.88rem}}
   th {{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
   td {{padding:.55rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
@@ -413,35 +458,28 @@ def _save_signal_html(
 </head>
 <body>
 <div class="header">
-  <h1>📡 競輪ベッティングシグナル</h1>
-  <div class="sub">対象日: {date_str} ／ 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデルAUC: {auc:.4f}</div>
+  <h1>競輪ベッティングシグナル</h1>
+  <div class="sub">対象日: {date_str} ／ 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデル: {model_type.upper()} AUC: {auc:.4f} ／ 戦略: {strategy_name}</div>
 </div>
 <div class="container">
   <div class="kpi">
-    <div class="kpi-card"><div class="label">全シグナル</div><div class="value">{len(signal_rows)}件</div></div>
-    <div class="kpi-card"><div class="label">おすすめ TOP{top_n}</div><div class="value" style="color:#fbbf24">{len(top_picks)}件</div></div>
-    <div class="kpi-card"><div class="label">TOP推奨額合計</div><div class="value" style="color:#fbbf24">¥{total_top:,}</div></div>
+    <div class="kpi-card"><div class="label">シグナル数</div><div class="value" style="color:#fbbf24">{len(signal_rows)}件</div></div>
+    <div class="kpi-card"><div class="label">合計推奨額</div><div class="value" style="color:#fbbf24">¥{total:,}</div></div>
+    <div class="kpi-card"><div class="label">モデル</div><div class="value">{model_type.upper()}</div></div>
+    <div class="kpi-card"><div class="label">戦略</div><div class="value">{strategy_name}</div></div>
     <div class="kpi-card"><div class="label">資金</div><div class="value">¥{bankroll:,.0f}</div></div>
   </div>
 
   <div class="section">
-    <h2><span class="top-badge">TOP {top_n}</span> おすすめベット（EV順）</h2>
+    <h2>ベット一覧（1位予測確率が高い順）</h2>
     <table>
       {table_header}
-      <tbody>{top_rows_html}</tbody>
-    </table>
-  </div>
-
-  <div class="section">
-    <h2>全シグナル一覧（{len(signal_rows)}件）</h2>
-    <table>
-      {table_header}
-      <tbody>{all_rows_html}</tbody>
+      <tbody>{rows_html}</tbody>
     </table>
   </div>
 
   <div class="warn">
-    ⚠ オッズは過去勝率ベースの推定値です。実際のオッズを確認してから賭け額を調整してください。
+    ⚠ 参考オッズは取得できない場合「-」表示。実際のオッズを確認してから購入してください。
   </div>
 </div>
 </body></html>"""
@@ -1427,19 +1465,15 @@ def main():
     p_merge = sub.add_parser("merge-data", help="別のraw_data JSONをraw_data.jsonにマージ")
     p_merge.add_argument("--file", required=True, help="マージするJSONファイルのパス")
 
-    p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日）")
+    p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日・trifecta_sharp戦略）")
     p_pred.add_argument("--date", type=str, default=None,
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
     p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
     p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
+    p_pred.add_argument("--strategy", type=str, default="trifecta_sharp",
+                        help=f"戦略名（デフォルト: trifecta_sharp）選択肢: {','.join(STRATEGIES)}")
     p_pred.add_argument("--bankroll", type=float, default=50000,
-                        help="資金（Kelly計算用、デフォルト: 50000）")
-    p_pred.add_argument("--bet-types", dest="bet_types", type=str, default=None,
-                        help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
-    p_pred.add_argument("--top", dest="top_n", type=int, default=20,
-                        help="おすすめ表示件数（EV上位、デフォルト: 20）")
-    p_pred.add_argument("--min-ev", dest="min_ev", type=float, default=1.5,
-                        help="最低EV閾値（デフォルト: 1.5）")
+                        help="資金（デフォルト: 50000）")
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     args = parser.parse_args()
