@@ -674,6 +674,7 @@ def collect_data(
     _stop_event.clear()
 
     def _handler(sig, frame):
+        signal.signal(signal.SIGINT, signal.SIG_DFL)  # 2回目のCtrl+Cは即終了
         print("\n\n[中断] 保存して終了します...")
         _stop_event.set()
         with lock:
