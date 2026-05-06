@@ -507,29 +507,33 @@ def cmd_pipeline(args):
 
     # ── Step 1: collect_payouts ──────────────────────────────
     _step("Step 1: 払戻データ取得")
-    raw_data = load_raw()
-    existing_odds = load_odds()
 
-    need_payouts = args.force_payouts
-    if not need_payouts:
-        missing = sum(
-            1 for r in raw_data
-            if r.get("race_id") and (
-                r["race_id"] not in existing_odds or
-                "trifecta" not in existing_odds.get(r["race_id"], {})
-            )
-        )
-        need_payouts = missing > 0
+    if getattr(args, "skip_payouts", False):
+        print("  ✓ --skip-payouts 指定 → スキップ")
+    else:
+        raw_data = load_raw()
+        existing_odds = load_odds()
+
+        need_payouts = args.force_payouts
         if not need_payouts:
-            print(f"  ✓ 全レースの払戻データ取得済み → スキップ")
-        else:
-            print(f"  → trifecta未取得: {missing}レース → 取得開始")
+            missing = sum(
+                1 for r in raw_data
+                if r.get("race_id") and (
+                    r["race_id"] not in existing_odds or
+                    "trifecta" not in existing_odds.get(r["race_id"], {})
+                )
+            )
+            need_payouts = missing > 0
+            if not need_payouts:
+                print(f"  ✓ 全レースの払戻データ取得済み → スキップ")
+            else:
+                print(f"  → trifecta未取得: {missing}レース → 取得開始")
 
-    if need_payouts:
-        races = build_race_list(raw_data, None)
-        updated = fetch_and_store(races, existing_odds, overwrite=args.force_payouts)
-        save_odds(updated)
-        print(f"  保存完了: {len(updated)}件")
+        if need_payouts:
+            races = build_race_list(raw_data, None)
+            updated = fetch_and_store(races, existing_odds, overwrite=args.force_payouts)
+            save_odds(updated)
+            print(f"  保存完了: {len(updated)}件")
 
     # ── Step 2: fix_ranks ───────────────────────────────────
     _step("Step 2: 着順修正")
@@ -1127,6 +1131,8 @@ def main():
     p_pipe.add_argument("--bankroll", type=float, default=50000)
     p_pipe.add_argument("--html", action="store_true", help="比較HTMLを生成")
     p_pipe.add_argument("--force-payouts", action="store_true", help="払戻データを強制再取得")
+    p_pipe.add_argument("--skip-payouts", dest="skip_payouts", action="store_true",
+                        help="Step1払戻取得をスキップ（学習・比較のみ実行したい場合）")
     p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
