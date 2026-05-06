@@ -622,8 +622,26 @@ def load_existing_records(filename: str = "raw_data.json") -> tuple[list[dict], 
     path = DATA_DIR / filename
     if not path.exists():
         return [], None
-    with open(path, encoding="utf-8") as f:
-        records = json.load(f)
+
+    # JSONが壊れていたらバックアップから復旧
+    try:
+        with open(path, encoding="utf-8") as f:
+            records = json.load(f)
+    except json.JSONDecodeError as e:
+        backup = path.with_stem(path.stem + "_backup")
+        print(f"⚠ {filename} が破損しています ({e})")
+        if backup.exists():
+            print(f"  → バックアップ {backup.name} から復旧します...")
+            with open(backup, encoding="utf-8") as f:
+                records = json.load(f)
+            # 復旧したデータを正規ファイルに書き戻す
+            import shutil
+            shutil.copy2(str(backup), str(path))
+            print(f"  → 復旧完了: {len(records)}件")
+        else:
+            print(f"  → バックアップなし。空データで続行します。")
+            return [], None
+
     if not records:
         return [], None
     latest_date = max(r["date"] for r in records)
@@ -644,9 +662,16 @@ def merge_records(existing: list[dict], new: list[dict]) -> list[dict]:
 
 
 def save_records(records: list[dict], filename: str = "raw_data.json") -> Path:
+    import shutil
     path = DATA_DIR / filename
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path.with_suffix(".tmp")
+    # 一時ファイルに書いてからリネーム（中断しても既存ファイルが壊れない）
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
+    # 保存成功したら既存をバックアップしてから置き換え
+    if path.exists():
+        shutil.copy2(str(path), str(path.with_stem(path.stem + "_backup")))
+    shutil.move(str(tmp), str(path))
     print(f"\n保存完了: {path} ({len(records)}件)")
     return path
 
