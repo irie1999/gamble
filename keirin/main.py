@@ -28,7 +28,8 @@ from keirin_jp import (
 )
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
-    train_evaluate, train_lambdarank, predict_race, save_model, load_model,
+    train_evaluate, train_lambdarank, train_catboost, train_gnn,
+    predict_race, save_model, load_model,
     print_feature_importance, _generate_line_config, tune_hyperparams,
 )
 from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
@@ -594,9 +595,18 @@ def cmd_pipeline(args):
             records = json.load(f)
         df = pd.DataFrame(records)
         print(f"  学習データ: {len(df)}件")
+        model_type = getattr(args, "model_type", "binary")
         if getattr(args, "lambdarank", False):
+            model_type = "lambdarank"
+        if model_type == "lambdarank":
             print("  LambdaRank (Learning-to-Rank) モードで学習")
             result = train_lambdarank(df, n_splits=5)
+        elif model_type == "catboost":
+            print("  CatBoost (カテゴリ特徴量対応) モードで学習")
+            result = train_catboost(df, n_splits=5)
+        elif model_type == "gnn":
+            print("  GNN (ライン戦術グラフ) モードで学習")
+            result = train_gnn(df, n_splits=5)
         else:
             result = train_evaluate(df, n_splits=5)
         if result is None:
@@ -709,13 +719,25 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
             winner = int(winner_row["car_no"].values[0])
             finish = [winner] + [c for c in race_df["car_no"].tolist() if c != winner]
 
-        X = race_df[[c for c in feature_cols if c in race_df.columns]].values
-        probs = booster.predict(X)
-        if calibrator is not None:
-            probs = calibrator.predict(probs)
-        # LambdaRankは生スコア（負値あり）→ softmaxで確率に変換
-        if meta.get("is_lambdarank", False):
+        X = race_df[[c for c in feature_cols if c in race_df.columns]].fillna(0).values
+        model_type = meta.get("model_type", "lgb")
+
+        if model_type == "gnn":
+            import torch
+            xr = torch.tensor(X, dtype=torch.float32)
+            lr = torch.tensor(race_df["line_no"].fillna(0).values.astype(np.int64), dtype=torch.long)
+            with torch.no_grad():
+                probs = booster(xr, lr).numpy()
             probs = np.exp(probs - probs.max())
+        elif model_type == "catboost":
+            probs = booster.predict(X)
+            probs = np.exp(probs - probs.max())
+        else:
+            probs = booster.predict(X)
+            if calibrator is not None:
+                probs = calibrator.predict(probs)
+            if meta.get("is_lambdarank", False):
+                probs = np.exp(probs - probs.max())
         probs = np.clip(probs, 1e-6, 1.0)
         probs = probs / probs.sum()
 
@@ -1194,7 +1216,10 @@ def main():
     p_pipe.add_argument("--skip-payouts", dest="skip_payouts", action="store_true",
                         help="Step1払戻取得をスキップ（学習・比較のみ実行したい場合）")
     p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
-    p_pipe.add_argument("--lambdarank", action="store_true", help="LambdaRank (Learning-to-Rank) モードで学習")
+    p_pipe.add_argument("--lambdarank", action="store_true", help="(後方互換) --model-type lambdarankと同等")
+    p_pipe.add_argument("--model-type", dest="model_type", default="binary",
+                        choices=["binary", "lambdarank", "catboost", "gnn"],
+                        help="学習モデル種別 (default: binary)")
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
 
