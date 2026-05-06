@@ -713,7 +713,9 @@ def cmd_model_compare(args):
         for mtype in models_done:
             sess = table[mtype].get(sname)
             if sess and len(sess.bets) > 0:
-                cell = f"{sess.roi:+.1%}/{sess.hit_rate:.0%}"
+                total = sess.wins + sess.losses
+                hit_rate = sess.wins / total if total > 0 else 0
+                cell = f"{sess.roi:+.1%}/{hit_rate:.0%}"
             else:
                 cell = "---"
             row += f"{cell:>{col_w}}"
@@ -741,9 +743,11 @@ def _save_model_compare_html(table, models_done, strategies, model_label, test_d
         if not sess or len(sess.bets) == 0:
             return '<td class="na">---</td>'
         roi_cls = "pos" if sess.roi > 0 else "neg"
+        total = sess.wins + sess.losses
+        hit_rate = sess.wins / total if total > 0 else 0
         return (f'<td class="{roi_cls}">'
                 f'{sess.roi:+.1%}<br>'
-                f'<small>{sess.hit_rate:.0%} / {len(sess.bets)}回</small>'
+                f'<small>{hit_rate:.0%} / {len(sess.bets)}回</small>'
                 f'</td>')
 
     header_html = "".join(f"<th>{model_label.get(m, m)}</th>" for m in models_done)
