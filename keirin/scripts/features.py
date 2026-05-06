@@ -63,6 +63,18 @@ def add_historical_features(df: pd.DataFrame) -> pd.DataFrame:
     # 調子トレンド（直近勝率 - 通算勝率）：プラスなら上り調子
     df["form_trend"] = df["recent_win_5"] - df["win_rate"].fillna(0)
 
+    # 直近5走の競走得点トレンド（kyosotenが上昇中かどうか）
+    if "kyosoten" in df.columns:
+        df["_kys"] = pd.to_numeric(df["kyosoten"], errors="coerce").fillna(0)
+        df["recent_kyosoten_5"] = grp["_kys"].transform(
+            lambda x: x.shift(1).rolling(5, min_periods=1).mean()
+        )
+        df["kyosoten_trend"] = df["recent_kyosoten_5"] - df["_kys"]
+        df.drop(columns=["_kys"], inplace=True)
+    else:
+        df["recent_kyosoten_5"] = 0.0
+        df["kyosoten_trend"] = 0.0
+
     # --- 会場別勝率（その会場での過去実績）---
     grp_venue = df.groupby(["player_name", "venue_code"], sort=False)
     df["venue_win_rate"] = grp_venue["win"].transform(
@@ -159,6 +171,19 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["win"] = pd.to_numeric(df["win"], errors="coerce").fillna(0).astype(int)
     df["rank"] = pd.to_numeric(df["rank"], errors="coerce")
 
+    # --- 競争難易度：レース内の実力分散 ---
+    # kyosoten の標準偏差が小さい = 拮抗レース（予測困難）
+    # 標準偏差が大きい = 実力差明確（予測しやすい）
+    if "kyosoten" in df.columns:
+        race_kyosoten_std = df.groupby(race_key)["kyosoten"].transform("std").fillna(0)
+        race_kyosoten_max = df.groupby(race_key)["kyosoten"].transform("max")
+        df["race_competitiveness"] = race_kyosoten_std  # 大きいほど実力差あり
+        # レース内での自分の競走得点優位性（最強との差）
+        df["kyosoten_vs_top"] = df["kyosoten"] - race_kyosoten_max
+    else:
+        df["race_competitiveness"] = 0.0
+        df["kyosoten_vs_top"] = 0.0
+
     # --- 時系列特徴量（直近成績・会場別・調子）---
     df = add_historical_features(df)
 
@@ -208,6 +233,11 @@ FEATURE_COLS = [
     "recent_win_5_rel",
     "venue_win_rate_rel",
     "recent_avg_rank_rel",
+    # --- 新規：競走得点トレンド・競争難易度 ---
+    "recent_kyosoten_5",
+    "kyosoten_trend",
+    "race_competitiveness",
+    "kyosoten_vs_top",
 ]
 
 TARGET_COL = "win"

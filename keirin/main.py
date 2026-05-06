@@ -29,7 +29,7 @@ from keirin_jp import (
 from features import build_features, FEATURE_COLS, prepare_dataset
 from model import (
     train_evaluate, predict_race, save_model, load_model,
-    print_feature_importance, _generate_line_config,
+    print_feature_importance, _generate_line_config, tune_hyperparams,
 )
 from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
 
@@ -596,6 +596,22 @@ def cmd_train(args):
     save_model(result)
 
 
+def cmd_tune(args):
+    """Optunaでハイパーパラメータを最適化"""
+    raw_path = DATA_DIR / "raw_data.json"
+    if not raw_path.exists():
+        print("まず `python main.py collect` を実行してください")
+        return
+    with open(raw_path, encoding="utf-8") as f:
+        records = json.load(f)
+    df = pd.DataFrame(records)
+    print(f"チューニングデータ: {len(df)}件")
+    best = tune_hyperparams(df, n_trials=args.trials, n_splits=3)
+    if best:
+        print("\n最適化完了。次のコマンドでモデルを再学習してください:")
+        print("  python keirin/main.py pipeline --html --force-train --skip-payouts")
+
+
 def cmd_backtest(args):
     raw_path = DATA_DIR / "raw_data.json"
     model_path = MODEL_DIR / "lgb_model.txt"
@@ -1107,6 +1123,10 @@ def main():
 
     sub.add_parser("train", help="モデル学習")
 
+    p_tune = sub.add_parser("tune", help="Optunaでハイパーパラメータ最適化（学習前に一度だけ実行）")
+    p_tune.add_argument("--trials", type=int, default=50,
+                        help="Optuna試行回数（デフォルト: 50、多いほど精度向上・時間増）")
+
     p_bt = sub.add_parser("backtest", help="バックテスト")
     p_bt.add_argument("--bankroll", type=float, default=50000)
     p_bt.add_argument("--bet-types", dest="bet_types", type=str, default=None,
@@ -1166,6 +1186,8 @@ def main():
         cmd_collect(args)
     elif args.command == "train":
         cmd_train(args)
+    elif args.command == "tune":
+        cmd_tune(args)
     elif args.command == "backtest":
         cmd_backtest(args)
     elif args.command == "demo":

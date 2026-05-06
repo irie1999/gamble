@@ -25,7 +25,8 @@ MODEL_DIR.mkdir(exist_ok=True)
 
 from features import build_features, FEATURE_COLS, TARGET_COL
 
-LGB_PARAMS = {
+# デフォルトパラメータ（Optunaで上書き可能）
+LGB_PARAMS_DEFAULT = {
     "objective": "binary",
     "metric": "binary_logloss",
     "learning_rate": 0.05,
@@ -42,6 +43,22 @@ LGB_PARAMS = {
     "n_jobs": -1,
 }
 
+TUNED_PARAMS_PATH = MODEL_DIR / "lgb_params.json"
+
+
+def _load_params() -> dict:
+    """Optunaでチューニング済みパラメータがあれば読み込む"""
+    if TUNED_PARAMS_PATH.exists():
+        with open(TUNED_PARAMS_PATH, encoding="utf-8") as f:
+            tuned = json.load(f)
+        params = {**LGB_PARAMS_DEFAULT, **tuned}
+        print(f"  チューニング済みパラメータを使用: {TUNED_PARAMS_PATH.name}")
+        return params
+    return LGB_PARAMS_DEFAULT.copy()
+
+
+LGB_PARAMS = LGB_PARAMS_DEFAULT  # 後方互換
+
 
 def load_data(filename: str = "raw_data.json") -> pd.DataFrame:
     path = DATA_DIR / filename
@@ -50,8 +67,82 @@ def load_data(filename: str = "raw_data.json") -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def _prepare_train_data(df: pd.DataFrame):
+    """特徴量行列・ターゲット・日付を返す共通処理"""
+    df_feat = build_features(df)
+    available = [c for c in FEATURE_COLS if c in df_feat.columns]
+    X = df_feat[available].values
+    y = df_feat[TARGET_COL].values
+    dates = df_feat["date"].astype(str).values
+    sort_idx = np.argsort(dates, kind="stable")
+    return X[sort_idx], y[sort_idx], dates[sort_idx], available
+
+
+def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) -> dict:
+    """Optunaでハイパーパラメータを最適化し、lgb_params.jsonに保存"""
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        print("Optunaが未インストールです: pip install optuna")
+        return {}
+
+    X, y, dates, _ = _prepare_train_data(df)
+    unique_dates = np.unique(dates)
+    date_indices = np.searchsorted(unique_dates, dates)
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+
+    def objective(trial):
+        params = {
+            "objective": "binary",
+            "metric": "binary_logloss",
+            "verbose": -1,
+            "n_jobs": -1,
+            "random_state": 42,
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 20, 150),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 100),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
+            "n_estimators": 1000,
+        }
+        aucs = []
+        for train_di, val_di in tscv.split(unique_dates):
+            train_mask = np.isin(date_indices, train_di)
+            val_mask = np.isin(date_indices, val_di)
+            X_tr, y_tr = X[train_mask], y[train_mask]
+            X_val, y_val = X[val_mask], y[val_mask]
+            if X_tr.shape[0] < 100 or X_val.shape[0] < 10:
+                continue
+            m = lgb.LGBMClassifier(**params)
+            m.fit(X_tr, y_tr, eval_set=[(X_val, y_val)],
+                  callbacks=[lgb.early_stopping(30, verbose=False), lgb.log_evaluation(0)])
+            aucs.append(roc_auc_score(y_val, m.predict_proba(X_val)[:, 1]))
+        return np.mean(aucs) if aucs else 0.0
+
+    print(f"Optuna最適化開始: {n_trials}試行 / {n_splits}fold CV")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+
+    best = study.best_params
+    best["n_estimators"] = 1000
+    print(f"\n最良AUC: {study.best_value:.4f}")
+    print(f"最良パラメータ: {best}")
+
+    TUNED_PARAMS_PATH.parent.mkdir(exist_ok=True)
+    with open(TUNED_PARAMS_PATH, "w", encoding="utf-8") as f:
+        json.dump(best, f, ensure_ascii=False, indent=2)
+    print(f"保存: {TUNED_PARAMS_PATH}")
+    return best
+
+
 def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
     """時系列CVで評価し、全データで最終モデルを学習"""
+    params = _load_params()
+
     df_feat = build_features(df)
     available = [c for c in FEATURE_COLS if c in df_feat.columns]
     X = df_feat[available].values
@@ -85,7 +176,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
         if X_train.shape[0] < 100 or X_val.shape[0] < 10:
             continue
 
-        model = lgb.LGBMClassifier(**LGB_PARAMS)
+        model = lgb.LGBMClassifier(**params)
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
@@ -111,7 +202,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5) -> dict:
     print(f"\n平均AUC: {mean_auc:.4f}  平均LogLoss: {mean_ll:.4f}")
     print(f"ランダム基準 AUC=0.500、LogLoss={random_logloss:.4f} (1/8人想定)")
 
-    final_model = lgb.LGBMClassifier(**LGB_PARAMS)
+    final_model = lgb.LGBMClassifier(**params)
     final_model.fit(X, y, callbacks=[lgb.log_evaluation(0)])
 
     feature_importance = dict(zip(available, final_model.feature_importances_))
