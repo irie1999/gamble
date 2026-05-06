@@ -442,7 +442,7 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
     final_model = cb.CatBoost({**params, "early_stopping_rounds": None})
     final_model.fit(pool_full, verbose=0)
 
-    fi = dict(zip(available, final_model.get_feature_importance()))
+    fi = dict(zip(available, final_model.get_feature_importance(type="PredictionValuesChange")))
 
     return {
         "model": final_model,
