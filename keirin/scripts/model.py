@@ -190,6 +190,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
         train_mask = np.isin(date_indices, train_di)
         val_mask = np.isin(date_indices, val_di)
         X_train, y_train = X[train_mask], y_soft[train_mask]
+        y_soft_val = y_soft[val_mask]
         X_val = X[val_mask]
         y_val_hard = y_hard[val_mask]
 
@@ -197,7 +198,8 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
             continue
 
         dtrain = lgb.Dataset(X_train, label=y_train)
-        dval = lgb.Dataset(X_val, label=y_val_hard, reference=dtrain)
+        # Early stoppingはソフトラベルで評価（学習目標と一致させる）
+        dval = lgb.Dataset(X_val, label=y_soft_val, reference=dtrain)
         callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
         booster = lgb.train(lgb_params, dtrain, num_boost_round=num_boost_round,
                             valid_sets=[dval], callbacks=callbacks)
