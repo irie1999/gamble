@@ -98,6 +98,33 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
         "fixed_amount": 100,
     },
+    "trio_sharp": {
+        "description": "3連複厳選：確信レースのみ・的中率重視",
+        "bet_types": ["trio"],
+        "line_leader_only": False,
+        "bet_config": {"trio": (0.10, 0, 2, 15)},
+        "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
+        "fixed_amount": 100,
+    },
+    "wide_sharp": {
+        "description": "ワイド厳選：確信レースのみ・最高的中率",
+        "bet_types": ["wide"],
+        "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 2, 10)},
+        "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
+        "fixed_amount": 100,
+    },
+    "combo_sharp": {
+        "description": "3連複＋ワイド厳選：確信レースで的中率と配当を両立",
+        "bet_types": ["trio", "wide"],
+        "line_leader_only": False,
+        "bet_config": {
+            "trio": (0.10, 0, 2, 15),
+            "wide": (0.20, 0, 2, 10),
+        },
+        "min_top_prob": 0.30,
+        "fixed_amount": 100,
+    },
 }
 
 
