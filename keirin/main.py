@@ -489,6 +489,30 @@ def cmd_collect(args):
         new_count = len(merged) - len(existing_records)
         print(f"マージ完了: 既存{len(existing_records)}件 + 新規{new_count}件 → {len(merged)}件")
 
+    # --with-payouts が指定されていれば続けて払戻データを取得
+    if getattr(args, "with_payouts", False):
+        from keirin.scripts.collect_payouts import build_race_list, fetch_and_store, load_raw, load_odds, save_odds
+        print(f"\n{'─'*55}")
+        print("  払戻データ取得（--with-payouts）")
+        print(f"{'─'*55}")
+        raw_data = load_raw()
+        existing_odds = load_odds()
+        missing = sum(
+            1 for r in raw_data
+            if r.get("race_id") and (
+                r["race_id"] not in existing_odds or
+                "trifecta" not in existing_odds.get(r["race_id"], {})
+            )
+        )
+        if missing == 0:
+            print("  ✓ 全レースの払戻データ取得済み → スキップ")
+        else:
+            print(f"  → 未取得: {missing}レース → 取得開始")
+            races = build_race_list(raw_data, None)
+            updated = fetch_and_store(races, existing_odds, overwrite=False)
+            save_odds(updated)
+            print(f"  保存完了: {len(updated)}件")
+
 
 def cmd_pipeline(args):
     """払戻取得→着順修正→学習→戦略比較を一括実行。済みのステップはスキップ。"""
@@ -1120,6 +1144,8 @@ def main():
                        help="リクエスト間隔（秒、デフォルト: 1.5）")
     p_col.add_argument("--workers", type=int, default=4,
                        help="並列処理数（デフォルト: 4）")
+    p_col.add_argument("--with-payouts", dest="with_payouts", action="store_true",
+                       help="データ収集後に払戻データも続けて取得する")
 
     sub.add_parser("train", help="モデル学習")
 
