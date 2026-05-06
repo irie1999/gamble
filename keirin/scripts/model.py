@@ -144,29 +144,29 @@ def tune_hyperparams(df: pd.DataFrame, n_trials: int = 50, n_splits: int = 3) ->
 def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True) -> dict:
     """時系列CVで評価し、全データで最終モデルを学習
 
-    soft_labels=True: 1/rank正規化値を目標に学習（2位・3位にも訓練シグナル）
+    CV評価はバイナリラベルで正確なAUCを計測。
+    最終モデルのみsoft_labels=Trueの場合はソフトラベルで学習（2位・3位にも訓練シグナル）。
     """
     params = _load_params()
 
-    # ソフトラベルか通常ラベルかでターゲットを選択
     df_feat = build_features(df)
     available = [c for c in FEATURE_COLS if c in df_feat.columns]
     X = df_feat[available].values
-    target_col = "soft_label" if soft_labels and "soft_label" in df_feat.columns else TARGET_COL
-    y_soft = df_feat[target_col].values           # 学習用（ソフトまたはバイナリ）
-    y_hard = df_feat[TARGET_COL].values           # AUC評価用（常にバイナリ）
+    y_hard = df_feat[TARGET_COL].values           # バイナリラベル（CV評価用）
+    has_soft = soft_labels and "soft_label" in df_feat.columns
+    y_soft = df_feat["soft_label"].values if has_soft else y_hard  # 最終モデル用
     dates = df_feat["date"].astype(str).values
 
     sort_idx = np.argsort(dates, kind="stable")
-    X, y_soft, y_hard, dates = X[sort_idx], y_soft[sort_idx], y_hard[sort_idx], dates[sort_idx]
+    X, y_hard, y_soft, dates = X[sort_idx], y_hard[sort_idx], y_soft[sort_idx], dates[sort_idx]
 
-    if soft_labels and target_col == "soft_label":
-        print(f"  ソフトラベル学習（1/rank正規化）: {target_col}")
+    if has_soft:
+        print(f"  最終モデル: ソフトラベル学習（CV評価はバイナリ）")
 
     unique_dates = np.unique(dates)
     n_dates = len(unique_dates)
     print(f"データ期間: {unique_dates[0]} → {unique_dates[-1]} ({n_dates}日間)")
-    print(f"総レコード数: {len(X)}  (勝利数: {y_hard.sum()})")
+    print(f"総レコード数: {len(X)}  (勝利数: {int(y_hard.sum())})")
 
     n_splits = min(n_splits, n_dates - 1)
     if n_splits < 2:
@@ -189,8 +189,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     for fold, (train_di, val_di) in enumerate(tscv.split(unique_dates)):
         train_mask = np.isin(date_indices, train_di)
         val_mask = np.isin(date_indices, val_di)
-        X_train, y_train = X[train_mask], y_soft[train_mask]
-        y_soft_val = y_soft[val_mask]
+        X_train, y_train = X[train_mask], y_hard[train_mask]  # CVはバイナリで学習
         X_val = X[val_mask]
         y_val_hard = y_hard[val_mask]
 
@@ -198,8 +197,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
             continue
 
         dtrain = lgb.Dataset(X_train, label=y_train)
-        # Early stoppingはソフトラベルで評価（学習目標と一致させる）
-        dval = lgb.Dataset(X_val, label=y_soft_val, reference=dtrain)
+        dval = lgb.Dataset(X_val, label=y_val_hard, reference=dtrain)
         callbacks = [lgb.early_stopping(50, verbose=False), lgb.log_evaluation(0)]
         booster = lgb.train(lgb_params, dtrain, num_boost_round=num_boost_round,
                             valid_sets=[dval], callbacks=callbacks)
@@ -223,7 +221,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     print(f"\n平均AUC: {mean_auc:.4f}  平均LogLoss: {mean_ll:.4f}")
     print(f"ランダム基準 AUC=0.500、LogLoss={random_logloss:.4f} (1/8人想定)")
 
-    # 全データで最終モデルを学習（ネイティブAPIでソフトラベル対応）
+    # 全データで最終モデルを学習（ソフトラベルで豊富な訓練シグナル）
     dtrain_full = lgb.Dataset(X, label=y_soft)
     final_model = lgb.train(lgb_params, dtrain_full, num_boost_round=num_boost_round,
                             callbacks=[lgb.log_evaluation(0)])
