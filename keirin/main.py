@@ -634,6 +634,152 @@ def cmd_train(args):
     save_model(result)
 
 
+def cmd_model_compare(args):
+    """4モデル（binary/lambdarank/catboost/gnn）× 全戦略をまとめて比較"""
+    raw_path = DATA_DIR / "raw_data.json"
+    if not raw_path.exists():
+        print("まず `python main.py collect` を実行してください")
+        return
+
+    with open(raw_path, encoding="utf-8") as f:
+        records = json.load(f)
+    df_raw = pd.DataFrame(records)
+    df_feat = build_features(df_raw)
+
+    dates = sorted(df_feat["date"].unique())
+    test_ratio = getattr(args, "test_ratio", 0.3)
+    split_idx = int(len(dates) * (1 - test_ratio))
+    df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
+    test_days = len(dates) - split_idx
+
+    selected_models = [m.strip() for m in args.models.split(",")]
+    target_strategies = list(STRATEGIES.keys())
+
+    TRAIN_FN = {
+        "binary":     lambda: train_evaluate(df_raw, n_splits=5),
+        "lambdarank": lambda: train_lambdarank(df_raw, n_splits=5),
+        "catboost":   lambda: train_catboost(df_raw, n_splits=5),
+        "gnn":        lambda: train_gnn(df_raw, n_splits=5),
+    }
+    MODEL_LABEL = {
+        "binary": "Binary (LGB)", "lambdarank": "LambdaRank",
+        "catboost": "CatBoost", "gnn": "GNN",
+    }
+
+    # モデル×戦略の結果テーブル
+    table: dict[str, dict[str, object]] = {}   # model -> strategy -> session
+
+    for mtype in selected_models:
+        if mtype not in TRAIN_FN:
+            print(f"不明なモデル: {mtype}")
+            continue
+        print(f"\n{'='*55}")
+        print(f"  モデル学習: {MODEL_LABEL.get(mtype, mtype)}")
+        print(f"{'='*55}")
+        result = TRAIN_FN[mtype]()
+        if result is None:
+            print(f"  ✗ {mtype} の学習に失敗しました")
+            continue
+        print_feature_importance(result, top_n=5)
+
+        booster   = result["model"]
+        feat_cols = result["feature_cols"]
+        calibrator = result.get("calibrator")
+        races = _build_races(booster, feat_cols, df_test, KEIRIN_BET_TYPES,
+                             calibrator=calibrator, meta=result)
+
+        model_sessions = {}
+        for sname in target_strategies:
+            strat = STRATEGIES[sname]
+            sess = simulate_session(races, initial_bankroll=args.bankroll, strategy=strat)
+            model_sessions[sname] = sess
+        table[mtype] = model_sessions
+
+    if not table:
+        print("比較できるモデルがありません")
+        return
+
+    # ── コンソール出力 ──────────────────────────────────────────
+    models_done = list(table.keys())
+    col_w = 16
+    header = f"{'戦略':<20}" + "".join(f"{MODEL_LABEL.get(m, m):>{col_w}}" for m in models_done)
+    print(f"\n{'='*len(header)}")
+    print("  モデル比較レポート  (ROI  /  的中率)")
+    print(f"{'='*len(header)}")
+    print(f"  {header}")
+    print(f"  {'-'*len(header)}")
+    for sname in target_strategies:
+        row = f"  {sname:<20}"
+        for mtype in models_done:
+            sess = table[mtype].get(sname)
+            if sess and len(sess.bets) > 0:
+                cell = f"{sess.roi:+.1%}/{sess.hit_rate:.0%}"
+            else:
+                cell = "---"
+            row += f"{cell:>{col_w}}"
+        print(row)
+
+    # ROI最良モデル×戦略を探す
+    best_roi, best_model, best_strat = -999, "", ""
+    for mtype, sessions in table.items():
+        for sname, sess in sessions.items():
+            if sess and len(sess.bets) > 0 and sess.roi > best_roi:
+                best_roi, best_model, best_strat = sess.roi, mtype, sname
+    print(f"\n  最良: {MODEL_LABEL.get(best_model, best_model)} × {best_strat}  ROI={best_roi:+.1%}")
+
+    # ── HTML出力 ──────────────────────────────────────────────
+    if getattr(args, "html", False):
+        _save_model_compare_html(table, models_done, target_strategies,
+                                 MODEL_LABEL, test_days, args.bankroll)
+
+
+def _save_model_compare_html(table, models_done, strategies, model_label, test_days, bankroll):
+    """モデル比較HTMLを生成"""
+    import webbrowser
+
+    def fmt(sess):
+        if not sess or len(sess.bets) == 0:
+            return '<td class="na">---</td>'
+        roi_cls = "pos" if sess.roi > 0 else "neg"
+        return (f'<td class="{roi_cls}">'
+                f'{sess.roi:+.1%}<br>'
+                f'<small>{sess.hit_rate:.0%} / {len(sess.bets)}回</small>'
+                f'</td>')
+
+    header_html = "".join(f"<th>{model_label.get(m, m)}</th>" for m in models_done)
+    rows_html = ""
+    for sname in strategies:
+        strat = STRATEGIES[sname]
+        cells = "".join(fmt(table[m].get(sname)) for m in models_done)
+        rows_html += f"<tr><td class='strat'>{sname}<br><small>{strat['description']}</small></td>{cells}</tr>\n"
+
+    html = f"""<!DOCTYPE html><html lang="ja"><head><meta charset="utf-8">
+<title>モデル比較レポート</title>
+<style>
+body{{font-family:sans-serif;background:#0d1117;color:#c9d1d9;padding:24px}}
+h2{{color:#58a6ff}}
+table{{border-collapse:collapse;width:100%;margin-top:16px}}
+th,td{{padding:10px 14px;border:1px solid #30363d;text-align:center}}
+th{{background:#161b22;color:#58a6ff;font-size:13px}}
+td.strat{{text-align:left;background:#161b22;font-weight:bold;min-width:200px}}
+td.pos{{background:#0d2e1a;color:#3fb950}}
+td.neg{{background:#2e0d0d;color:#f85149}}
+td.na{{color:#484f58}}
+small{{font-size:11px;color:#8b949e}}
+</style></head><body>
+<h2>モデル比較レポート</h2>
+<p>テスト期間: {test_days}日  初期資金: {bankroll:,.0f}円　　ROI / 的中率 / ベット数</p>
+<table>
+<thead><tr><th>戦略</th>{header_html}</tr></thead>
+<tbody>{rows_html}</tbody>
+</table></body></html>"""
+
+    out = RESULTS_DIR / "model_compare.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"\n比較HTML保存: {out}")
+    webbrowser.open(out.as_uri())
+
+
 def cmd_tune(args):
     """Optunaでハイパーパラメータを最適化"""
     raw_path = DATA_DIR / "raw_data.json"
@@ -1223,6 +1369,13 @@ def main():
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
 
+    p_mc = sub.add_parser("model-compare", help="4モデル×全戦略を一括比較")
+    p_mc.add_argument("--bankroll", type=float, default=50000)
+    p_mc.add_argument("--models", type=str, default="binary,lambdarank,catboost,gnn",
+                      help="比較するモデルカンマ区切り（デフォルト: binary,lambdarank,catboost,gnn）")
+    p_mc.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+    p_mc.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3)
+
     sub.add_parser("demo", help="デモ実行")
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
@@ -1262,6 +1415,8 @@ def main():
         cmd_detail(args)
     elif args.command == "compare":
         cmd_compare(args)
+    elif args.command == "model-compare":
+        cmd_model_compare(args)
     elif args.command == "pipeline":
         cmd_pipeline(args)
     elif args.command == "predict":
