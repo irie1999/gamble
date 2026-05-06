@@ -161,7 +161,7 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     X, y_hard, y_soft, dates = X[sort_idx], y_hard[sort_idx], y_soft[sort_idx], dates[sort_idx]
 
     if has_soft:
-        print(f"  最終モデル: ソフトラベル学習（CV評価はバイナリ）")
+        print(f"  特徴量インタラクション・キャリブレーションを適用")
 
     unique_dates = np.unique(dates)
     n_dates = len(unique_dates)
@@ -221,8 +221,8 @@ def train_evaluate(df: pd.DataFrame, n_splits: int = 5, soft_labels: bool = True
     print(f"\n平均AUC: {mean_auc:.4f}  平均LogLoss: {mean_ll:.4f}")
     print(f"ランダム基準 AUC=0.500、LogLoss={random_logloss:.4f} (1/8人想定)")
 
-    # 全データで最終モデルを学習（ソフトラベルで豊富な訓練シグナル）
-    dtrain_full = lgb.Dataset(X, label=y_soft)
+    # 全データで最終モデルを学習（バイナリラベルで安定した予測）
+    dtrain_full = lgb.Dataset(X, label=y_hard)
     final_model = lgb.train(lgb_params, dtrain_full, num_boost_round=num_boost_round,
                             callbacks=[lgb.log_evaluation(0)])
 
