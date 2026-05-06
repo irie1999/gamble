@@ -453,6 +453,35 @@ def _save_signal_html(
     webbrowser.open(path.as_uri())
 
 
+def cmd_merge_data(args):
+    """別のraw_data JSONファイルをraw_data.jsonにマージする"""
+    import json
+    from pathlib import Path as _Path
+
+    src_path = _Path(args.file)
+    if not src_path.exists():
+        print(f"エラー: ファイルが見つかりません: {src_path}")
+        sys.exit(1)
+
+    with open(src_path, encoding="utf-8") as f:
+        new_records = json.load(f)
+    print(f"読み込み: {src_path} ({len(new_records)}件)")
+
+    existing_records, _ = load_existing_records("raw_data.json")
+    if existing_records:
+        dates = sorted({r.get("date") for r in existing_records if r.get("date")})
+        print(f"既存データ: {len(existing_records)}件  期間: {dates[0]}〜{dates[-1]}")
+    else:
+        print("既存データなし → 新規作成")
+
+    merged = merge_records(existing_records, new_records)
+    save_records(merged, "raw_data.json")
+
+    added = len(merged) - len(existing_records)
+    dates_merged = sorted({r.get("date") for r in merged if r.get("date")})
+    print(f"マージ完了: +{added}件  総計{len(merged)}件  期間: {dates_merged[0]}〜{dates_merged[-1]}")
+
+
 def cmd_collect(args):
     today = datetime.now()
     end_date = today.strftime("%Y%m%d")
@@ -1395,6 +1424,9 @@ def main():
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3）")
 
+    p_merge = sub.add_parser("merge-data", help="別のraw_data JSONをraw_data.jsonにマージ")
+    p_merge.add_argument("--file", required=True, help="マージするJSONファイルのパス")
+
     p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日）")
     p_pred.add_argument("--date", type=str, default=None,
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
@@ -1431,6 +1463,8 @@ def main():
         cmd_pipeline(args)
     elif args.command == "predict":
         cmd_predict(args)
+    elif args.command == "merge-data":
+        cmd_merge_data(args)
     else:
         parser.print_help()
 
