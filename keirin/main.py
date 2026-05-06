@@ -876,7 +876,13 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
                 probs = booster(xr, lr).numpy()
             probs = np.exp(probs - probs.max())
         elif model_type == "catboost":
-            probs = booster.predict(X)
+            # CatBoostはDataFrameで渡す（カテゴリ列をint型に）
+            cat_cols_cb = ["car_no", "line_no", "is_line_leader", "class_enc"]
+            df_cb = race_df[[c for c in feature_cols if c in race_df.columns]].copy()
+            for c in cat_cols_cb:
+                if c in df_cb.columns:
+                    df_cb[c] = df_cb[c].fillna(0).astype(int)
+            probs = booster.predict(df_cb)
             probs = np.exp(probs - probs.max())
         else:
             probs = booster.predict(X)

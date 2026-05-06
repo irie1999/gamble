@@ -368,7 +368,14 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
     race_id_num = df_feat.groupby(race_key).ngroup().values
     sort_idx = np.lexsort((race_id_num, df_feat["date"].astype(str).values))
 
-    X = df_feat[available].values[sort_idx]
+    # カテゴリ特徴量はint型に変換してDataFrameで渡す（numpy floatだとcatboostが拒否）
+    cat_cols = ["car_no", "line_no", "is_line_leader", "class_enc"]
+    cat_cols = [c for c in cat_cols if c in available]
+    df_X = df_feat[available].copy()
+    for c in cat_cols:
+        df_X[c] = df_X[c].fillna(0).astype(int)
+    df_X = df_X.iloc[sort_idx].reset_index(drop=True)
+
     y_ltr = df_feat["lambdarank_label"].values[sort_idx].astype(int)
     y_hard = df_feat[TARGET_COL].values[sort_idx]
     dates = df_feat["date"].astype(str).values[sort_idx]
@@ -377,7 +384,7 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
     unique_dates = np.unique(dates)
     n_dates = len(unique_dates)
     print(f"データ期間: {unique_dates[0]} → {unique_dates[-1]} ({n_dates}日間)")
-    print(f"総レコード数: {len(X)}  (勝利数: {int(y_hard.sum())})")
+    print(f"総レコード数: {len(df_X)}  (勝利数: {int(y_hard.sum())})")
 
     n_splits = min(n_splits, n_dates - 1)
     if n_splits < 2:
@@ -386,10 +393,6 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
 
     tscv = TimeSeriesSplit(n_splits=n_splits)
     date_indices = np.searchsorted(unique_dates, dates)
-
-    # カテゴリ特徴量のインデックス
-    cat_cols = ["car_no", "line_no", "is_line_leader", "class_enc"]
-    cat_indices = [available.index(c) for c in cat_cols if c in available]
 
     params = dict(
         loss_function="YetiRank",
@@ -402,33 +405,28 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
         early_stopping_rounds=50,
     )
 
+    def make_pool(df_sub, y_sub, race_ids_sub):
+        group = pd.Series(race_ids_sub).value_counts().sort_index().values
+        gid = np.repeat(np.arange(len(group)), group)
+        return cb.Pool(df_sub, label=y_sub, group_id=gid, cat_features=cat_cols)
+
     metrics = {"auc": []}
 
     for fold, (train_di, val_di) in enumerate(tscv.split(unique_dates)):
         train_mask = np.isin(date_indices, train_di)
         val_mask = np.isin(date_indices, val_di)
 
-        X_train, y_train = X[train_mask], y_ltr[train_mask]
-        race_ids_train = race_ids[train_mask]
-        X_val, y_val_hard = X[val_mask], y_hard[val_mask]
-        y_val_ltr = y_ltr[val_mask]
-        race_ids_val = race_ids[val_mask]
-
-        if X_train.shape[0] < 100 or X_val.shape[0] < 10:
+        if train_mask.sum() < 100 or val_mask.sum() < 10:
             continue
 
-        group_train = pd.Series(race_ids_train).value_counts().sort_index().values
-        group_val = pd.Series(race_ids_val).value_counts().sort_index().values
-
-        pool_train = cb.Pool(X_train, label=y_train, group_id=np.repeat(np.arange(len(group_train)), group_train),
-                             cat_features=cat_indices)
-        pool_val = cb.Pool(X_val, label=y_val_ltr, group_id=np.repeat(np.arange(len(group_val)), group_val),
-                           cat_features=cat_indices)
+        pool_train = make_pool(df_X[train_mask], y_ltr[train_mask], race_ids[train_mask])
+        pool_val   = make_pool(df_X[val_mask],   y_ltr[val_mask],   race_ids[val_mask])
+        y_val_hard = y_hard[val_mask]
 
         model = cb.CatBoost(params)
         model.fit(pool_train, eval_set=pool_val, verbose=0)
 
-        scores = model.predict(X_val)
+        scores = model.predict(df_X[val_mask])
         auc = roc_auc_score(y_val_hard, scores)
         metrics["auc"].append(auc)
         print(f"  Fold {fold+1}: AUC={auc:.4f}")
@@ -440,9 +438,7 @@ def train_catboost(df: pd.DataFrame, n_splits: int = 5) -> dict:
     print(f"\n平均AUC: {mean_auc:.4f}")
 
     # 全データで最終モデル
-    group_full = pd.Series(race_ids).value_counts().sort_index().values
-    pool_full = cb.Pool(X, label=y_ltr, group_id=np.repeat(np.arange(len(group_full)), group_full),
-                        cat_features=cat_indices)
+    pool_full = make_pool(df_X, y_ltr, race_ids)
     final_model = cb.CatBoost({**params, "early_stopping_rounds": None})
     final_model.fit(pool_full, verbose=0)
 
