@@ -485,6 +485,12 @@ def train_gnn(df: pd.DataFrame, n_splits: int = 5, epochs: int = 10) -> dict:
             )
             self.score = nn.Linear(hidden_dim, 1)
 
+        def forward(self, x, line_ids):
+            # x: (N, D) 単一レース または (B, N, D) バッチ
+            if x.dim() == 2:
+                return self.forward_batched(x.unsqueeze(0), line_ids.unsqueeze(0)).squeeze(0)
+            return self.forward_batched(x, line_ids)
+
         def forward_batched(self, x, line_ids):
             # x: (B, N, D)  line_ids: (B, N)
             B, N, D = x.shape
