@@ -377,8 +377,11 @@ def cmd_predict(args):
         for bt in bet_types:
             cfg = bet_config.get(bt)
             if cfg:
+                _, _, n_combos, top_n = cfg
+                # ライブ予測では組合確率フィルターなし・最上位n_combos点を出力
+                live_cfg = {bt: (0.0, 0, n_combos, top_n)}
                 bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
-                                 bet_config={bt: cfg})
+                                 bet_config=live_cfg)
             else:
                 bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount)
 
