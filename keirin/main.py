@@ -547,96 +547,159 @@ def _save_signal_html(
     strategy_name: str = "trifecta_sharp",
     model_type: str = "lambdarank",
 ) -> None:
+    from collections import defaultdict
+
     decided = [r for r in signal_rows if r.get("result") != "未確定"]
     wins = [r for r in decided if r.get("result") == "当たり"]
+    n_races = len({(r["venue"], r["race_no"]) for r in signal_rows})
     total = sum(r["bet_amount"] for r in signal_rows)
     total_bet_d = sum(r["bet_amount"] for r in decided)
     total_return_d = sum(r["bet_amount"] * r.get("payout", 0) for r in wins)
     profit_d = total_return_d - total_bet_d
     win_rate = len(wins) / len(decided) if decided else 0.0
 
-    def make_row(r: dict) -> str:
-        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
+    # レース単位にグループ化（top_prob降順を維持）
+    seen_order: list[tuple] = []
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for r in signal_rows:
+        key = (r["venue"], r["race_no"])
+        if key not in groups:
+            seen_order.append(key)
+        groups[key].append(r)
+
+    def combo_badge(r: dict) -> str:
         result = r.get("result", "未確定")
         payout = r.get("payout", 0.0)
-        finish = "-".join(str(x) for x in r.get("finish_order", [])[:3])
+        sel = r["selections"]
+        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
+        prob_str = f"{r['pred_prob']:.1%}" if r["pred_prob"] > 0 else "-"
 
+        nums = sel.strip("[]").replace(" ", "")
         if result == "当たり":
-            result_cell = f'<span style="color:#4ade80;font-weight:700">当たり {payout:.1f}倍</span>'
-            row_style = 'style="background:#0f2a1a"'
+            bg = "#0a2e1a"; border = "#22c55e"; badge = f'<span class="badge win">当たり {payout:.1f}倍</span>'
         elif result == "はずれ":
-            result_cell = '<span style="color:#f87171">はずれ</span>'
-            row_style = 'style="background:#1a0f0f"'
+            bg = "#1e0f0f"; border = "#7f1d1d"; badge = '<span class="badge lose">はずれ</span>'
         else:
-            result_cell = '<span style="color:#64748b">未確定</span>'
-            row_style = ''
+            bg = "#1e293b"; border = "#334155"; badge = ''
 
-        finish_cell = f'<span style="color:#94a3b8;font-size:.8rem">{finish}</span>' if finish else "-"
+        return f"""<div class="combo" style="background:{bg};border-color:{border}">
+          <div class="combo-nums">{nums}</div>
+          <div class="combo-meta">
+            <span class="tag-odds">{odds_str}</span>
+            <span class="tag-prob">{prob_str}</span>
+            {badge}
+          </div>
+        </div>"""
+
+    def race_card(key: tuple, rows: list[dict]) -> str:
+        venue, race_no = key
+        rep = rows[0]
+        top_prob = rep["top_prob"]
+        pred_str = rep["pred_str"]
+        bet_type = rep["bet_type"]
+        finish = rep.get("finish_order", [])
+        finish_str = " → ".join(f"<strong>{x}</strong>番" for x in finish[:3]) if finish else ""
+        finish_block = f'<div class="finish-order">実際の着順: {finish_str}</div>' if finish_str else ""
+
+        # レース全体の結果判定
+        race_wins = [r for r in rows if r.get("result") == "当たり"]
+        race_decided = [r for r in rows if r.get("result") != "未確定"]
+        if race_wins:
+            card_border = "#22c55e"
+            status_label = f'<span class="badge win">的中 {len(race_wins)}点</span>'
+        elif race_decided and not race_wins:
+            card_border = "#7f1d1d"
+            status_label = '<span class="badge lose">はずれ</span>'
+        else:
+            card_border = "#334155"
+            status_label = '<span class="badge pending">未確定</span>'
+
+        combos_html = "".join(combo_badge(r) for r in rows)
+
         return f"""
-        <tr {row_style}>
-          <td>{r['venue']} R{r['race_no']}</td>
-          <td>{r['bet_type']}</td>
-          <td><strong>{r['selections']}</strong></td>
-          <td style="color:#fbbf24"><strong>{r['top_prob']:.1%}</strong></td>
-          <td>{r['pred_prob']:.1%}</td>
-          <td>{odds_str}</td>
-          <td><strong>{r['bet_amount']:,}円</strong></td>
-          <td>{result_cell}</td>
-          <td>{finish_cell}</td>
-          <td style="font-size:.78rem;color:#94a3b8">{r['pred_str']}</td>
-        </tr>"""
+    <div class="race-card" style="border-color:{card_border}">
+      <div class="race-header">
+        <div class="race-title">
+          <span class="venue-name">{venue}</span>
+          <span class="race-num">R{race_no}</span>
+          <span class="bet-type-tag">{bet_type}</span>
+          {status_label}
+        </div>
+        <div class="race-prob">
+          <span class="prob-label">1位予測</span>
+          <span class="prob-value">{top_prob:.1%}</span>
+        </div>
+      </div>
+      <div class="pred-order">{pred_str}</div>
+      {finish_block}
+      <div class="combos">{combos_html}</div>
+    </div>"""
 
-    rows_html = "".join(make_row(r) for r in signal_rows)
+    cards_html = "".join(race_card(k, groups[k]) for k in seen_order)
 
-    # 損益KPI
     profit_color = "#4ade80" if profit_d >= 0 else "#f87171"
     roi_val = profit_d / total_bet_d if total_bet_d > 0 else 0.0
     result_kpi = ""
     if decided:
+        n_decided_races = len({(r["venue"], r["race_no"]) for r in decided})
         result_kpi = f"""
-    <div class="kpi-card"><div class="label">的中</div><div class="value" style="color:#4ade80">{len(wins)}/{len(decided)}件</div></div>
+    <div class="kpi-card"><div class="label">的中</div><div class="value" style="color:#4ade80">{len(wins)}/{len(decided)}点</div></div>
     <div class="kpi-card"><div class="label">的中率</div><div class="value">{win_rate:.1%}</div></div>
     <div class="kpi-card"><div class="label">損益（確定分）</div><div class="value" style="color:{profit_color}">{profit_d:+,.0f}円</div></div>
     <div class="kpi-card"><div class="label">ROI</div><div class="value" style="color:{profit_color}">{roi_val:+.1%}</div></div>"""
-
-    table_header = """
-      <thead><tr>
-        <th>レース</th><th>賭け式</th><th>買い目</th>
-        <th>1位予測P</th><th>組合P</th><th>参考オッズ</th><th>推奨額</th>
-        <th>結果</th><th>実際の着順</th><th>予測順</th>
-      </tr></thead>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
 <head><meta charset="UTF-8"><title>競輪シグナル {date_str}</title>
 <style>
-  * {{box-sizing:border-box;margin:0;padding:0}}
-  body {{font-family:'Segoe UI',sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}}
-  .header {{background:#1e293b;padding:2rem;border-bottom:1px solid #334155}}
-  .header h1 {{font-size:1.6rem;font-weight:700}}
-  .header .sub {{color:#94a3b8;margin-top:.3rem;font-size:.9rem}}
-  .container {{max-width:1600px;margin:0 auto;padding:2rem}}
-  .kpi {{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
-  .kpi-card {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
-  .kpi-card .label {{font-size:.75rem;color:#64748b;text-transform:uppercase}}
-  .kpi-card .value {{font-size:1.4rem;font-weight:700;color:#f1f5f9;margin-top:.2rem}}
-  .section {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1.5rem;margin-bottom:1.5rem}}
-  .section h2 {{font-size:.95rem;font-weight:600;color:#94a3b8;margin-bottom:1rem;text-transform:uppercase}}
-  table {{width:100%;border-collapse:collapse;font-size:.88rem}}
-  th {{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
-  td {{padding:.55rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
-  tr:hover td {{filter:brightness(1.15)}}
-  .warn {{background:#1e3a2f;border:1px solid #166534;border-radius:8px;padding:1rem;margin-top:1.5rem;color:#4ade80;font-size:.88rem}}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:'Segoe UI',Meiryo,sans-serif;background:#0b1120;color:#e2e8f0;min-height:100vh}}
+  .topbar{{background:#1e293b;padding:1.2rem 2rem;border-bottom:1px solid #334155;display:flex;align-items:baseline;gap:1.5rem}}
+  .topbar h1{{font-size:1.4rem;font-weight:700}}
+  .topbar .sub{{color:#64748b;font-size:.82rem}}
+  .container{{max-width:1200px;margin:0 auto;padding:1.5rem}}
+  /* KPI */
+  .kpi{{display:flex;gap:.8rem;margin-bottom:1.5rem;flex-wrap:wrap}}
+  .kpi-card{{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:.8rem 1.2rem;min-width:110px}}
+  .kpi-card .label{{font-size:.68rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em}}
+  .kpi-card .value{{font-size:1.25rem;font-weight:700;color:#f1f5f9;margin-top:.15rem}}
+  /* Race cards */
+  .race-card{{background:#1e293b;border:2px solid #334155;border-radius:12px;padding:1rem 1.2rem;margin-bottom:1rem;transition:border-color .2s}}
+  .race-header{{display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem}}
+  .race-title{{display:flex;align-items:center;gap:.5rem;flex-wrap:wrap}}
+  .venue-name{{font-size:1.1rem;font-weight:700}}
+  .race-num{{background:#334155;color:#94a3b8;border-radius:6px;padding:.1rem .5rem;font-size:.85rem;font-weight:600}}
+  .bet-type-tag{{background:#1d3a5f;color:#60a5fa;border-radius:6px;padding:.1rem .5rem;font-size:.78rem}}
+  .race-prob{{text-align:right}}
+  .prob-label{{font-size:.7rem;color:#64748b;display:block}}
+  .prob-value{{font-size:1.5rem;font-weight:700;color:#fbbf24}}
+  .pred-order{{font-size:.78rem;color:#64748b;margin-bottom:.4rem}}
+  .finish-order{{font-size:.82rem;color:#94a3b8;margin-bottom:.6rem;padding:.3rem .6rem;background:#0f172a;border-radius:6px;display:inline-block}}
+  .finish-order strong{{color:#e2e8f0}}
+  /* Combo grid */
+  .combos{{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}}
+  .combo{{border:1px solid #334155;border-radius:8px;padding:.35rem .7rem;display:flex;align-items:center;gap:.5rem;min-width:160px}}
+  .combo-nums{{font-size:.95rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em}}
+  .combo-meta{{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}}
+  .tag-odds{{font-size:.75rem;color:#94a3b8;background:#0f172a;border-radius:4px;padding:.1rem .35rem}}
+  .tag-prob{{font-size:.75rem;color:#64748b}}
+  /* Badges */
+  .badge{{font-size:.72rem;font-weight:700;border-radius:5px;padding:.15rem .45rem}}
+  .badge.win{{background:#14532d;color:#4ade80}}
+  .badge.lose{{background:#450a0a;color:#f87171}}
+  .badge.pending{{background:#1e293b;color:#64748b;border:1px solid #334155}}
+  .warn{{background:#1a2a1a;border:1px solid #166534;border-radius:8px;padding:.8rem 1rem;margin-top:1rem;color:#4ade80;font-size:.82rem}}
 </style>
 </head>
 <body>
-<div class="header">
+<div class="topbar">
   <h1>競輪ベッティングシグナル</h1>
-  <div class="sub">対象日: {date_str} ／ 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ モデル: {model_type.upper()} AUC: {auc:.4f} ／ 戦略: {strategy_name}</div>
+  <div class="sub">対象日: {date_str} ／ 生成: {datetime.now().strftime('%Y-%m-%d %H:%M')} ／ {model_type.upper()} AUC:{auc:.4f} ／ 戦略: {strategy_name}</div>
 </div>
 <div class="container">
   <div class="kpi">
-    <div class="kpi-card"><div class="label">シグナル数</div><div class="value" style="color:#fbbf24">{len(signal_rows)}件</div></div>
+    <div class="kpi-card"><div class="label">対象レース</div><div class="value" style="color:#fbbf24">{n_races}レース</div></div>
+    <div class="kpi-card"><div class="label">合計ベット点数</div><div class="value">{len(signal_rows)}点</div></div>
     <div class="kpi-card"><div class="label">合計推奨額</div><div class="value" style="color:#fbbf24">¥{total:,}</div></div>
     <div class="kpi-card"><div class="label">モデル</div><div class="value">{model_type.upper()}</div></div>
     <div class="kpi-card"><div class="label">戦略</div><div class="value">{strategy_name}</div></div>
@@ -644,17 +707,9 @@ def _save_signal_html(
     {result_kpi}
   </div>
 
-  <div class="section">
-    <h2>ベット一覧（1位予測確率が高い順）</h2>
-    <table>
-      {table_header}
-      <tbody>{rows_html}</tbody>
-    </table>
-  </div>
+  {cards_html}
 
-  <div class="warn">
-    ⚠ 参考オッズは取得できない場合「-」表示。実際のオッズを確認してから購入してください。
-  </div>
+  <div class="warn">⚠ 参考オッズは取得できない場合「-」表示。実際のオッズを確認してから購入してください。</div>
 </div>
 </body></html>"""
 

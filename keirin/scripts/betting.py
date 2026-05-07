@@ -260,16 +260,30 @@ def pick_bets_box(
     else:
         return []
 
-    probs = df.set_index(no_col)["win_prob"].to_dict()
-    total = sum(probs.values())
-    norm_probs = {k: v / total for k, v in probs.items()}
+    all_nos = df[no_col].astype(int).tolist()
+    win_probs = df["win_prob"].values.astype(float)
+    win_probs = win_probs / win_probs.sum()
+    from prob import trifecta_prob, trio_prob as _trio_prob
+    import numpy as np
+    prob_arr = np.array(win_probs)
+    idx_map = {no: i for i, no in enumerate(all_nos)}
 
     for sel in combos:
+        if bet_type == "trifecta":
+            try:
+                pred_p = trifecta_prob(prob_arr, idx_map[sel[0]], idx_map[sel[1]], idx_map[sel[2]])
+            except Exception:
+                pred_p = 0.0
+        else:
+            try:
+                pred_p = _trio_prob(prob_arr, idx_map[sel[0]], idx_map[sel[1]], idx_map[sel[2]])
+            except Exception:
+                pred_p = 0.0
         bets.append(BettingResult(
             race_id="",
             bet_type=bet_type,
             selections=tuple(sel),
-            predicted_prob=0.0,
+            predicted_prob=float(pred_p),
             implied_prob=0.0,
             edge=0.0,
             odds=0.0,
