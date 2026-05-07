@@ -583,12 +583,24 @@ def save_odds_data(odds: dict, filename: str = "odds_data.json") -> None:
         json.dump(existing, f, ensure_ascii=False)
 
 
+def _collect_race(race: dict, sleep_sec: float) -> tuple[list[dict], dict]:
+    """1レース分のデータを収集。戻り値: (records, odds_dict)"""
+    race_records = fetch_race_detail(race)
+    odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
+    time.sleep(sleep_sec)
+    n = len(race_records) if race_records else 0
+    status = f"{n}名" if race_records else "スキップ"
+    print(f"  {race.get('date','')} {race['venue_name']} R{race['race_no']:02d}: {status}")
+    return race_records or [], odds
+
+
 def _collect_day(
     date_str: str,
     sleep_sec: float,
     stop_event: threading.Event,
+    race_workers: int = 4,
 ) -> tuple[list[dict], dict, int]:
-    """1日分のデータを収集。戻り値: (records, {race_id: odds}, detail_races_count)"""
+    """1日分のデータを収集。レース並列処理。戻り値: (records, {race_id: odds}, detail_races_count)"""
     if stop_event.is_set():
         return [], {}, 0
 
@@ -596,25 +608,28 @@ def _collect_day(
     if not races:
         return [], {}, 0
 
+    print(f"  {date_str}: {len(races)}レース取得開始")
+
     records = []
     odds_day = {}
     detail_races = 0
-    print(f"  {date_str}: {len(races)}レース取得開始")
-    for race in races:
-        if stop_event.is_set():
-            break
-        race_records = fetch_race_detail(race)
-        n = len(race_records) if race_records else 0
-        if race_records:
-            records.extend(race_records)
-            detail_races += 1
-        # オッズ取得（単勝・複勝・2連単・2連複）
-        odds = fetch_race_odds(race, bet_types=["win", "place", "exacta", "quinella"])
-        if odds:
-            odds_day[race["race_id"]] = odds
-        status = f"{n}名" if race_records else "スキップ"
-        print(f"  {date_str} {race['venue_name']} R{race['race_no']:02d}: {status}")
-        time.sleep(sleep_sec)
+
+    with ThreadPoolExecutor(max_workers=race_workers) as ex:
+        futs = {ex.submit(_collect_race, race, sleep_sec): race for race in races}
+        for fut in as_completed(futs):
+            if stop_event.is_set():
+                break
+            race = futs[fut]
+            try:
+                race_records, odds = fut.result()
+                records.extend(race_records)
+                if race_records:
+                    detail_races += 1
+                if odds:
+                    odds_day[race["race_id"]] = odds
+            except Exception as e:
+                print(f"  [エラー] {date_str} {race['venue_name']} R{race['race_no']}: {e}")
+
     return records, odds_day, detail_races
 
 
@@ -685,9 +700,10 @@ def collect_data(
     checkpoint_days: int = 7,
     filename: str = "raw_data.json",
     workers: int = 4,
+    race_workers: int = 4,
     skip_existing_dates: bool = False,
 ) -> list[dict]:
-    """期間内の全レースデータを収集（kdreams.jp、日別並列）
+    """期間内の全レースデータを収集（kdreams.jp、日別×レース別の2段階並列）
 
     skip_existing_dates=True のとき、existing_records に含まれる日付は収集をスキップする。
     """
@@ -738,7 +754,7 @@ def collect_data(
                 break
             jitter = i * sleep_sec * 0.3 + random.uniform(0, sleep_sec * 0.3)
             futures[executor.submit(_collect_day_with_jitter,
-                                     date_str, sleep_sec, _stop_event, jitter)] = date_str
+                                     date_str, sleep_sec, _stop_event, jitter, race_workers)] = date_str
 
         all_odds: dict = {}
         for future in as_completed(futures):
@@ -767,10 +783,10 @@ def collect_data(
     return records
 
 
-def _collect_day_with_jitter(date_str, sleep_sec, stop_event, jitter):
+def _collect_day_with_jitter(date_str, sleep_sec, stop_event, jitter, race_workers=4):
     if jitter > 0:
         time.sleep(jitter)
-    return _collect_day(date_str, sleep_sec, stop_event)
+    return _collect_day(date_str, sleep_sec, stop_event, race_workers=race_workers)
 
 
 def _safe_float(text: str, divisor: float = 1.0) -> float | None:

@@ -547,6 +547,7 @@ def cmd_collect(args):
         checkpoint_days=7,
         filename="raw_data.json",
         workers=args.workers,
+        race_workers=args.race_workers,
         skip_existing_dates=True,  # 取得済みの日付はスキップ
     )
 
@@ -1402,7 +1403,9 @@ def main():
     p_col.add_argument("--sleep", type=float, default=1.5,
                        help="リクエスト間隔（秒、デフォルト: 1.5）")
     p_col.add_argument("--workers", type=int, default=4,
-                       help="並列処理数（デフォルト: 4）")
+                       help="日付レベルの並列数（デフォルト: 4）")
+    p_col.add_argument("--race-workers", dest="race_workers", type=int, default=4,
+                       help="レースレベルの並列数（デフォルト: 4）")
     p_col.add_argument("--with-payouts", dest="with_payouts", action="store_true",
                        help="データ収集後に払戻データも続けて取得する")
 
