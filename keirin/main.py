@@ -8,6 +8,12 @@
   python main.py demo      -- モックデータで全工程デモ実行
 """
 
+import os
+# LightGBM の OpenMP スレッド初期化フリーズを防ぐ（Python 3.14 / Windows 対策）
+# import より前に設定しないと効かない
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("LIGHTGBM_NUM_THREADS", "1")
+
 import sys
 import json
 import argparse
@@ -44,9 +50,6 @@ def _lazy_imports():
     print("ライブラリ読み込み中 (2/6) features...", flush=True)
     from features import build_features, FEATURE_COLS, prepare_dataset
     print("ライブラリ読み込み中 (3/6) model (LightGBM)...", flush=True)
-    import os as _os
-    _os.environ.setdefault("OMP_NUM_THREADS", "1")
-    _os.environ.setdefault("LIGHTGBM_NUM_THREADS", "1")
     from model import (
         train_evaluate, train_lambdarank, train_catboost, train_gnn,
         predict_race, save_model, load_model,
