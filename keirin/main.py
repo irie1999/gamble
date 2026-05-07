@@ -36,19 +36,26 @@ def _lazy_imports():
     global simulate_session, print_session_report, pick_bets, STRATEGIES
     global html_report, ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
 
+    print("ライブラリ読み込み中 (1/6) keirin_jp...", flush=True)
     from keirin_jp import (
         fetch_race_page, get_payout_odds, fetch_live_odds, fetch_today_races,
         get_race_encp, VENUE_CODE_TO_KCD,
     )
+    print("ライブラリ読み込み中 (2/6) features...", flush=True)
     from features import build_features, FEATURE_COLS, prepare_dataset
+    print("ライブラリ読み込み中 (3/6) model (LightGBM)...", flush=True)
     from model import (
         train_evaluate, train_lambdarank, train_catboost, train_gnn,
         predict_race, save_model, load_model,
         print_feature_importance, _generate_line_config, tune_hyperparams,
     )
+    print("ライブラリ読み込み中 (4/6) betting...", flush=True)
     from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
+    print("ライブラリ読み込み中 (5/6) report...", flush=True)
     import report as html_report
+    print("ライブラリ読み込み中 (6/6) prob...", flush=True)
     from prob import ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
+    print("読み込み完了", flush=True)
 
 DATA_DIR = Path(__file__).parent / "data"
 MODEL_DIR = Path(__file__).parent / "models"
