@@ -71,6 +71,19 @@ RESULTS_DIR.mkdir(exist_ok=True)
 CLASS_MAP_RATE = {"S1": 0.28, "S2": 0.22, "A1": 0.17, "A2": 0.13, "A3": 0.10, "B1": 0.07}
 
 
+def _open_html(path: Path) -> None:
+    """HTMLファイルをブラウザで開く（スペース・日本語パス対応）"""
+    print(f"HTMLを保存しました: {path}")
+    try:
+        if sys.platform == "win32":
+            os.startfile(str(path))
+        else:
+            import webbrowser
+            webbrowser.open(path.as_uri())
+    except Exception:
+        print(f"ブラウザで開けませんでした。手動で開いてください: {path}")
+
+
 def cmd_compare(args):
     """全戦略をバックテストして比較レポートを生成"""
     model_path = MODEL_DIR / "lgb_model.txt"
@@ -243,9 +256,7 @@ def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll
 
     path = RESULTS_DIR / "strategy_compare.html"
     path.write_text(html, encoding="utf-8")
-    print(f"比較レポート保存: {path}")
-    import webbrowser
-    webbrowser.open(path.as_uri())
+    _open_html(path)
 
 
 def _predict_probs(booster, feature_cols, meta, race_df: pd.DataFrame) -> np.ndarray:
@@ -517,9 +528,7 @@ def _save_signal_html(
 
     path = RESULTS_DIR / f"signal_{date_str}.html"
     path.write_text(html, encoding="utf-8")
-    print(f"シグナルレポート保存: {path}")
-    import webbrowser
-    webbrowser.open(path.as_uri())
+    _open_html(path)
 
 
 def cmd_merge_data(args):
@@ -853,8 +862,6 @@ def cmd_model_compare(args):
 
 
 def _save_model_compare_html(table, models_done, strategies, model_label, test_days, bankroll):
-    """モデル比較HTMLを生成"""
-    import webbrowser
 
     def fmt(sess):
         if not sess or len(sess.bets) == 0:
@@ -897,8 +904,7 @@ small{{font-size:11px;color:#8b949e}}
 
     out = RESULTS_DIR / "model_compare.html"
     out.write_text(html, encoding="utf-8")
-    print(f"\n比較HTML保存: {out}")
-    webbrowser.open(out.as_uri())
+    _open_html(out)
 
 
 def cmd_tune(args):
@@ -1400,9 +1406,7 @@ render();
     out_path = RESULTS_DIR / f"detail_{strategy_name}.html"
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"\nHTMLを保存しました: {out_path}")
-    import webbrowser
-    webbrowser.open(out_path.as_uri())
+    _open_html(out_path)
 
 
 def _save_results(session, filename: str = "backtest_result.json", html: bool = False) -> None:
