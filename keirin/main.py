@@ -269,9 +269,11 @@ def _predict_probs(booster, feature_cols, meta, race_df: pd.DataFrame) -> np.nda
 
 def cmd_predict(args):
     """明日の出走表からベッティングシグナルを生成（デフォルト戦略: trifecta_sharp）"""
+    print("モデルを読み込み中...", flush=True)
     booster, feature_cols, meta = load_model()
     mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
     model_type = meta.get("model_type", "lgb")
+    print(f"モデル読み込み完了 (AUC: {mean_auc:.4f})", flush=True)
 
     if args.date:
         date_str = args.date
@@ -299,6 +301,7 @@ def cmd_predict(args):
     print(f"  資金: {bankroll:,.0f}円")
     print(f"{'='*60}\n")
 
+    print(f"{date_str} のレーススケジュールを取得中...", flush=True)
     races = fetch_daily_schedule(date_str)
     if not races:
         print(f"{date_str} のレース情報が取得できませんでした")
