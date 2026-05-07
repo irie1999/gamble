@@ -39,7 +39,7 @@ def _lazy_imports():
     global build_features, FEATURE_COLS, prepare_dataset
     global train_evaluate, train_lambdarank, train_catboost, train_gnn
     global predict_race, save_model, load_model, print_feature_importance, _generate_line_config, tune_hyperparams
-    global simulate_session, print_session_report, pick_bets, STRATEGIES
+    global simulate_session, print_session_report, pick_bets, pick_bets_box, STRATEGIES
     global html_report, ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
 
     print("ライブラリ読み込み中 (1/6) keirin_jp...", flush=True)
@@ -56,7 +56,7 @@ def _lazy_imports():
         print_feature_importance, _generate_line_config, tune_hyperparams,
     )
     print("ライブラリ読み込み中 (4/6) betting...", flush=True)
-    from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
+    from betting import simulate_session, print_session_report, pick_bets, pick_bets_box, STRATEGIES
     print("ライブラリ読み込み中 (5/6) report...", flush=True)
     import report as html_report
     print("ライブラリ読み込み中 (6/6) prob...", flush=True)
@@ -385,16 +385,20 @@ def cmd_predict(args):
             for _, r in pred_sorted.iterrows()
         )
 
+        box_n_cars = strat.get("box_n_cars", 0)
         for bt in bet_types:
-            cfg = bet_config.get(bt)
-            if cfg:
-                _, _, n_combos, top_n = cfg
-                # ライブ予測では組合確率フィルターなし・最上位n_combos点を出力
-                live_cfg = {bt: (0.0, 0, n_combos, top_n)}
-                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
-                                 bet_config=live_cfg)
+            if box_n_cars > 0:
+                bets = pick_bets_box(pred_df, bt, n_cars=box_n_cars,
+                                     fixed_amount=fixed_amount)
             else:
-                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount)
+                cfg = bet_config.get(bt)
+                if cfg:
+                    _, _, n_combos, top_n = cfg
+                    live_cfg = {bt: (0.0, 0, n_combos, top_n)}
+                    bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
+                                     bet_config=live_cfg)
+                else:
+                    bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount)
 
             for b in bets:
                 live_odds = odds_dict.get(bt, {}).get(b.selections, 0.0)

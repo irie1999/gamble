@@ -6,6 +6,7 @@
 
 import sys
 from pathlib import Path
+from itertools import permutations, combinations
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -125,6 +126,50 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.30,
         "fixed_amount": 100,
     },
+    # ---- ボックス戦略 ----
+    # box_n_cars: 予測上位N車を選び、全順列(3連単)or全組合(3連複)を買う
+    "trifecta_box3": {
+        "description": "3連単ボックス上位3車：6点買い・着順不問",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": BET_CONFIG,
+        "box_n_cars": 3,          # 上位3車 → 3!=6点
+        "fixed_amount": 100,
+    },
+    "trifecta_box3_sharp": {
+        "description": "3連単ボックス上位3車（確信レース限定）",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": BET_CONFIG,
+        "box_n_cars": 3,
+        "min_top_prob": 0.35,
+        "fixed_amount": 100,
+    },
+    "trifecta_box4": {
+        "description": "3連単ボックス上位4車：24点買い・高的中率",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": BET_CONFIG,
+        "box_n_cars": 4,          # 上位4車 → 4*3*2=24点
+        "fixed_amount": 100,
+    },
+    "trio_box4": {
+        "description": "3連複ボックス上位4車：4点買い・的中率重視",
+        "bet_types": ["trio"],
+        "line_leader_only": False,
+        "bet_config": BET_CONFIG,
+        "box_n_cars": 4,          # 上位4車 → C(4,3)=4点
+        "fixed_amount": 100,
+    },
+    "trio_box4_sharp": {
+        "description": "3連複ボックス上位4車（確信レース限定）",
+        "bet_types": ["trio"],
+        "line_leader_only": False,
+        "bet_config": BET_CONFIG,
+        "box_n_cars": 4,
+        "min_top_prob": 0.35,
+        "fixed_amount": 100,
+    },
 }
 
 
@@ -186,6 +231,52 @@ def calc_bet_amount(
     upper = min(bankroll * max_ratio, max_amount)
     amount = min(amount, upper)
     return (int(max(0.0, amount)) // min_bet) * min_bet
+
+
+def pick_bets_box(
+    pred_df: pd.DataFrame,
+    bet_type: str = "trifecta",
+    n_cars: int = 3,
+    no_col: str = "car_no",
+    line_leader_only: bool = False,
+    fixed_amount: int = 100,
+) -> list[BettingResult]:
+    """予測上位N車を選び、全順列(3連単)または全組合(3連複)をボックス買い"""
+    df = pred_df.copy()
+    if line_leader_only and "is_line_leader" in df.columns:
+        leaders = df[(df["is_line_leader"] == 1) | (df["line_no"] == 0)]
+        if not leaders.empty:
+            df = leaders
+
+    df = df.drop_duplicates(subset=no_col, keep="first")
+    df = df.sort_values("win_prob", ascending=False)
+    top_nos = df[no_col].astype(int).head(n_cars).tolist()
+
+    bets = []
+    if bet_type == "trifecta":
+        combos = list(permutations(top_nos, 3))
+    elif bet_type == "trio":
+        combos = list(combinations(top_nos, 3))
+    else:
+        return []
+
+    probs = df.set_index(no_col)["win_prob"].to_dict()
+    total = sum(probs.values())
+    norm_probs = {k: v / total for k, v in probs.items()}
+
+    for sel in combos:
+        bets.append(BettingResult(
+            race_id="",
+            bet_type=bet_type,
+            selections=tuple(sel),
+            predicted_prob=0.0,
+            implied_prob=0.0,
+            edge=0.0,
+            odds=0.0,
+            bet_amount=fixed_amount,
+            expected_value=0.0,
+        ))
+    return bets
 
 
 def pick_bets(
@@ -282,8 +373,8 @@ def simulate_session(
     s_line_leader = strategy.get("line_leader_only", line_leader_only) if strategy else line_leader_only
     s_bet_config = strategy.get("bet_config") if strategy else None
     s_fixed_amount = strategy.get("fixed_amount", 100) if strategy else 100
-    # min_top_prob: モデルの1位予測確率がこの値未満のレースはスキップ
     s_min_top_prob = strategy.get("min_top_prob", 0.0) if strategy else 0.0
+    s_box_n_cars = strategy.get("box_n_cars", 0) if strategy else 0  # 0=通常選択
 
     bankroll = initial_bankroll
     session = SessionResult(initial_bankroll=initial_bankroll, final_bankroll=bankroll)
@@ -301,11 +392,18 @@ def simulate_session(
                 continue
 
         for bt in s_bet_types:
-            new_bets = pick_bets(
-                pred_df, bt, no_col, s_line_leader,
-                bet_config=s_bet_config,
-                fixed_amount=s_fixed_amount,
-            )
+            if s_box_n_cars > 0:
+                new_bets = pick_bets_box(
+                    pred_df, bt, n_cars=s_box_n_cars,
+                    no_col=no_col, line_leader_only=s_line_leader,
+                    fixed_amount=s_fixed_amount,
+                )
+            else:
+                new_bets = pick_bets(
+                    pred_df, bt, no_col, s_line_leader,
+                    bet_config=s_bet_config,
+                    fixed_amount=s_fixed_amount,
+                )
 
             for bet in new_bets:
                 bet.race_id = race_id
