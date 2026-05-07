@@ -11,32 +11,44 @@
 import sys
 import json
 import argparse
-import numpy as np
-import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# numpy/pandas は型ヒントで使うため常時インポート（軽量）
+import numpy as np
+import pandas as pd
+
+# scraper は collect コマンドでも必要なため常時インポート
 from scraper import (
     collect_data, save_records, load_existing_records, merge_records, VENUE_CODES,
     fetch_daily_schedule, fetch_entry_detail, fetch_race_odds, load_odds_data,
 )
-from keirin_jp import (
-    fetch_race_page, get_payout_odds, fetch_live_odds, fetch_today_races,
-    get_race_encp, VENUE_CODE_TO_KCD,
-)
-from features import build_features, FEATURE_COLS, prepare_dataset
-from model import (
-    train_evaluate, train_lambdarank, train_catboost, train_gnn,
-    predict_race, save_model, load_model,
-    print_feature_importance, _generate_line_config, tune_hyperparams,
-)
-from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-import report as html_report
-from prob import ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
+def _lazy_imports():
+    """LightGBM/CatBoost/PyTorch など重いライブラリを遅延インポート（collect では不要）"""
+    global fetch_race_page, get_payout_odds, fetch_live_odds, fetch_today_races, get_race_encp, VENUE_CODE_TO_KCD
+    global build_features, FEATURE_COLS, prepare_dataset
+    global train_evaluate, train_lambdarank, train_catboost, train_gnn
+    global predict_race, save_model, load_model, print_feature_importance, _generate_line_config, tune_hyperparams
+    global simulate_session, print_session_report, pick_bets, STRATEGIES
+    global html_report, ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
+
+    from keirin_jp import (
+        fetch_race_page, get_payout_odds, fetch_live_odds, fetch_today_races,
+        get_race_encp, VENUE_CODE_TO_KCD,
+    )
+    from features import build_features, FEATURE_COLS, prepare_dataset
+    from model import (
+        train_evaluate, train_lambdarank, train_catboost, train_gnn,
+        predict_race, save_model, load_model,
+        print_feature_importance, _generate_line_config, tune_hyperparams,
+    )
+    from betting import simulate_session, print_session_report, pick_bets, STRATEGIES
+    import report as html_report
+    from prob import ALL_BET_TYPES, BET_TYPE_NAMES, KEIRIN_BET_TYPES
 
 DATA_DIR = Path(__file__).parent / "data"
 MODEL_DIR = Path(__file__).parent / "models"
@@ -1480,9 +1492,20 @@ def main():
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     args = parser.parse_args()
-    if args.command == "collect":
-        cmd_collect(args)
-    elif args.command == "train":
+    # collect と merge-data は重いライブラリ不要
+    if args.command in ("collect", "merge-data", None):
+        if args.command == "collect":
+            cmd_collect(args)
+        elif args.command == "merge-data":
+            cmd_merge_data(args)
+        else:
+            parser.print_help()
+        return
+
+    # それ以外のコマンドは遅延インポートを実行
+    _lazy_imports()
+
+    if args.command == "train":
         cmd_train(args)
     elif args.command == "tune":
         cmd_tune(args)
@@ -1500,8 +1523,6 @@ def main():
         cmd_pipeline(args)
     elif args.command == "predict":
         cmd_predict(args)
-    elif args.command == "merge-data":
-        cmd_merge_data(args)
     else:
         parser.print_help()
 
