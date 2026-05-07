@@ -211,7 +211,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- LambdaRank用関連度ラベル（整数）---
     # 1位→3, 2位→2, 3位→1, 4位以下→0
-    df["lambdarank_label"] = (4 - df["rank"]).clip(lower=0).astype(int)
+    df["lambdarank_label"] = (4 - df["rank"]).clip(lower=0).fillna(0).astype(int)
 
     return df
 
