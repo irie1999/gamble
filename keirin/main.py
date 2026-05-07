@@ -538,6 +538,24 @@ def cmd_collect(args):
     venue_codes = args.venues.split(",") if args.venues else None
 
     existing_records, _ = load_existing_records("raw_data.json")
+
+    # data_old/raw_data.json が存在すれば日付スキップ判定に自動追加
+    old_path = DATA_DIR / "data_old" / "raw_data.json"
+    if old_path.exists():
+        import json as _json
+        try:
+            with open(old_path, encoding="utf-8") as f:
+                old_records = _json.load(f)
+            existing_dates_set = {r.get("date") for r in existing_records if r.get("date")}
+            old_dates = {r.get("date") for r in old_records if r.get("date")}
+            extra_dates = old_dates - existing_dates_set
+            if extra_dates:
+                extra = [r for r in old_records if r.get("date") in extra_dates]
+                existing_records = existing_records + extra
+                print(f"data_old から {len(extra_dates)}日分をスキップリストに追加")
+        except Exception as e:
+            print(f"data_old 読み込みスキップ: {e}")
+
     start_date = (today - timedelta(days=args.days)).strftime("%Y%m%d")
 
     # 指定期間のうち「まだ取得していない日付」だけ収集してマージ
