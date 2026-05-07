@@ -377,8 +377,8 @@ def cmd_predict(args):
         for bt in bet_types:
             cfg = bet_config.get(bt)
             if cfg:
-                min_prob, max_odds, n_combos, _ = cfg
-                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount, min_prob=min_prob, max_combos=n_combos)
+                bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
+                                 bet_config={bt: cfg})
             else:
                 bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount)
 
