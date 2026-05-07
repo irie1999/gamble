@@ -405,14 +405,20 @@ def cmd_predict(args):
                 signal_rows.append({
                     "venue": race["venue_name"],
                     "race_no": race["race_no"],
+                    "venue_code": str(race.get("venue_code", "")),
                     "bet_type": BET_TYPE_NAMES.get(b.bet_type, b.bet_type),
+                    "bet_type_key": b.bet_type,
                     "selections": str(list(b.selections)),
+                    "selections_tuple": b.selections,
                     "odds": live_odds,
                     "bet_amount": b.bet_amount,
                     "ev": live_odds * b.predicted_prob if live_odds > 0 else b.predicted_prob,
                     "pred_prob": b.predicted_prob,
                     "top_prob": top_prob,
                     "pred_str": pred_str,
+                    "result": "未確定",   # 当たり / はずれ / 未確定
+                    "payout": 0.0,        # 実際の払戻倍率（当たり時）
+                    "finish_order": [],   # [1着, 2着, 3着]
                 })
 
     print(f"フィルター通過: {len(races) - skipped}レース  スキップ: {skipped}レース\n")
@@ -421,27 +427,112 @@ def cmd_predict(args):
         print(f"シグナルなし（1位予測確率 ≥ {min_top_prob:.0%} のレースがありません）")
         return
 
+    # ---- 終了レースの結果照合 ----
+    print("終了レースの結果を確認中...", flush=True)
+    race_results_cache: dict[tuple, dict] = {}  # (venue_code, race_no) -> {payouts, finish_order}
+    for r in signal_rows:
+        key = (r["venue_code"], r["race_no"])
+        if key in race_results_cache:
+            continue
+        kcd = VENUE_CODE_TO_KCD.get(r["venue_code"])
+        if not kcd:
+            race_results_cache[key] = {}
+            continue
+        try:
+            jdata = fetch_race_page(kcd, date_str, r["race_no"])
+            if not jdata:
+                race_results_cache[key] = {}
+                continue
+            payouts = get_payout_odds(jdata)
+            # 3連単の着順から finish_order を復元
+            finish_order = []
+            tri_payouts = payouts.get("trifecta", {})
+            if tri_payouts:
+                win_combo = next(iter(tri_payouts))  # (1着, 2着, 3着)
+                finish_order = list(win_combo)
+            race_results_cache[key] = {"payouts": payouts, "finish_order": finish_order}
+        except Exception:
+            race_results_cache[key] = {}
+
+    # 各シグナルに結果を設定
+    for r in signal_rows:
+        key = (r["venue_code"], r["race_no"])
+        cache = race_results_cache.get(key, {})
+        if not cache:
+            continue
+        payouts = cache.get("payouts", {})
+        finish_order = cache.get("finish_order", [])
+        r["finish_order"] = finish_order
+
+        bt_key = r["bet_type_key"]
+        sel = r["selections_tuple"]
+
+        # 賭け式ごとに的中判定
+        won = False
+        payout_odds = 0.0
+        if bt_key == "trifecta" and len(finish_order) >= 3:
+            won = (sel == tuple(finish_order[:3]))
+            if won:
+                payout_odds = payouts.get("trifecta", {}).get(sel, 0.0)
+        elif bt_key == "trio" and len(finish_order) >= 3:
+            won = (set(sel) == set(finish_order[:3]))
+            if won:
+                sorted_key = tuple(sorted(sel))
+                payout_odds = payouts.get("trio", {}).get(sorted_key, 0.0)
+        elif bt_key == "wide" and len(finish_order) >= 3:
+            won = all(s in finish_order[:3] for s in sel)
+            if won:
+                sorted_key = tuple(sorted(sel))
+                payout_odds = payouts.get("wide", {}).get(sorted_key, 0.0)
+
+        if finish_order:
+            r["result"] = "当たり" if won else "はずれ"
+            r["payout"] = payout_odds
+
     signal_rows.sort(key=lambda x: x["top_prob"], reverse=True)
+
+    # ---- 損益サマリー計算 ----
+    decided = [r for r in signal_rows if r["result"] != "未確定"]
+    wins = [r for r in decided if r["result"] == "当たり"]
+    total_bet = sum(r["bet_amount"] for r in decided)
+    total_return = sum(r["bet_amount"] * r["payout"] for r in wins)
+    profit = total_return - total_bet
 
     print(f"━━━ {strategy_name} シグナル（{len(signal_rows)}件） ━━━")
     print(f"{'#':<3} {'レース':<12} {'賭け式':<6} {'買い目':<14} "
-          f"{'1位予測P':>8} {'組合P':>6} {'参考オッズ':>9} {'推奨額':>8}")
-    print("-" * 75)
+          f"{'1位予測P':>8} {'組合P':>6} {'参考オッズ':>9} {'推奨額':>8} {'結果':<6} {'着順'}")
+    print("-" * 95)
     for i, r in enumerate(signal_rows, 1):
         odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "    -"
+        result_str = r["result"]
+        payout_str = f"→{r['payout']:.1f}倍" if r["payout"] > 0 else ""
+        finish_str = "-".join(str(x) for x in r["finish_order"][:3]) if r["finish_order"] else ""
         print(f"{i:<3} {r['venue']} R{r['race_no']:<5} {r['bet_type']:<6} "
               f"{r['selections']:<14} {r['top_prob']:>7.1%} {r['pred_prob']:>5.1%} "
-              f"{odds_str:>9} {r['bet_amount']:>7,}円")
+              f"{odds_str:>9} {r['bet_amount']:>7,}円 {result_str:<6} {finish_str} {payout_str}")
 
-    total = sum(r["bet_amount"] for r in signal_rows)
-    print(f"\n合計推奨額: {total:,}円  ({len(signal_rows)}件)")
+    total_all = sum(r["bet_amount"] for r in signal_rows)
+    print(f"\n合計推奨額: {total_all:,}円  ({len(signal_rows)}件)")
+
+    if decided:
+        win_rate = len(wins) / len(decided) if decided else 0.0
+        print(f"\n【結果サマリー（確定分 {len(decided)}件）】")
+        print(f"  的中: {len(wins)}件 / {len(decided)}件  的中率: {win_rate:.1%}")
+        print(f"  賭け金合計:  {total_bet:,}円")
+        print(f"  回収金合計:  {total_return:,.0f}円")
+        print(f"  損益:        {profit:+,.0f}円  (ROI: {profit/total_bet:+.1%})" if total_bet > 0 else "")
+        pending = len(signal_rows) - len(decided)
+        if pending > 0:
+            print(f"  未確定:      {pending}件（レース未終了）")
+
     print(f"\n予測順位:")
     seen = set()
     for r in signal_rows:
         key = (r["venue"], r["race_no"])
         if key not in seen:
             seen.add(key)
-            print(f"  {r['venue']} R{r['race_no']}: {r['pred_str']}")
+            finish_str = f"  実際: {'-'.join(str(x) for x in r['finish_order'][:3])}" if r["finish_order"] else ""
+            print(f"  {r['venue']} R{r['race_no']}: {r['pred_str']}{finish_str}")
     print("\n⚠ 参考オッズは取得できない場合0表示。実際のオッズを確認してから購入してください。\n")
 
     if args.html:
@@ -456,10 +547,33 @@ def _save_signal_html(
     strategy_name: str = "trifecta_sharp",
     model_type: str = "lambdarank",
 ) -> None:
+    decided = [r for r in signal_rows if r.get("result") != "未確定"]
+    wins = [r for r in decided if r.get("result") == "当たり"]
+    total = sum(r["bet_amount"] for r in signal_rows)
+    total_bet_d = sum(r["bet_amount"] for r in decided)
+    total_return_d = sum(r["bet_amount"] * r.get("payout", 0) for r in wins)
+    profit_d = total_return_d - total_bet_d
+    win_rate = len(wins) / len(decided) if decided else 0.0
+
     def make_row(r: dict) -> str:
         odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
+        result = r.get("result", "未確定")
+        payout = r.get("payout", 0.0)
+        finish = "-".join(str(x) for x in r.get("finish_order", [])[:3])
+
+        if result == "当たり":
+            result_cell = f'<span style="color:#4ade80;font-weight:700">当たり {payout:.1f}倍</span>'
+            row_style = 'style="background:#0f2a1a"'
+        elif result == "はずれ":
+            result_cell = '<span style="color:#f87171">はずれ</span>'
+            row_style = 'style="background:#1a0f0f"'
+        else:
+            result_cell = '<span style="color:#64748b">未確定</span>'
+            row_style = ''
+
+        finish_cell = f'<span style="color:#94a3b8;font-size:.8rem">{finish}</span>' if finish else "-"
         return f"""
-        <tr>
+        <tr {row_style}>
           <td>{r['venue']} R{r['race_no']}</td>
           <td>{r['bet_type']}</td>
           <td><strong>{r['selections']}</strong></td>
@@ -467,16 +581,29 @@ def _save_signal_html(
           <td>{r['pred_prob']:.1%}</td>
           <td>{odds_str}</td>
           <td><strong>{r['bet_amount']:,}円</strong></td>
+          <td>{result_cell}</td>
+          <td>{finish_cell}</td>
           <td style="font-size:.78rem;color:#94a3b8">{r['pred_str']}</td>
         </tr>"""
 
     rows_html = "".join(make_row(r) for r in signal_rows)
-    total = sum(r["bet_amount"] for r in signal_rows)
+
+    # 損益KPI
+    profit_color = "#4ade80" if profit_d >= 0 else "#f87171"
+    roi_val = profit_d / total_bet_d if total_bet_d > 0 else 0.0
+    result_kpi = ""
+    if decided:
+        result_kpi = f"""
+    <div class="kpi-card"><div class="label">的中</div><div class="value" style="color:#4ade80">{len(wins)}/{len(decided)}件</div></div>
+    <div class="kpi-card"><div class="label">的中率</div><div class="value">{win_rate:.1%}</div></div>
+    <div class="kpi-card"><div class="label">損益（確定分）</div><div class="value" style="color:{profit_color}">{profit_d:+,.0f}円</div></div>
+    <div class="kpi-card"><div class="label">ROI</div><div class="value" style="color:{profit_color}">{roi_val:+.1%}</div></div>"""
 
     table_header = """
       <thead><tr>
         <th>レース</th><th>賭け式</th><th>買い目</th>
-        <th>1位予測P</th><th>組合P</th><th>参考オッズ</th><th>推奨額</th><th>予測順</th>
+        <th>1位予測P</th><th>組合P</th><th>参考オッズ</th><th>推奨額</th>
+        <th>結果</th><th>実際の着順</th><th>予測順</th>
       </tr></thead>"""
 
     html = f"""<!DOCTYPE html>
@@ -488,7 +615,7 @@ def _save_signal_html(
   .header {{background:#1e293b;padding:2rem;border-bottom:1px solid #334155}}
   .header h1 {{font-size:1.6rem;font-weight:700}}
   .header .sub {{color:#94a3b8;margin-top:.3rem;font-size:.9rem}}
-  .container {{max-width:1400px;margin:0 auto;padding:2rem}}
+  .container {{max-width:1600px;margin:0 auto;padding:2rem}}
   .kpi {{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
   .kpi-card {{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:1rem 1.5rem}}
   .kpi-card .label {{font-size:.75rem;color:#64748b;text-transform:uppercase}}
@@ -498,7 +625,7 @@ def _save_signal_html(
   table {{width:100%;border-collapse:collapse;font-size:.88rem}}
   th {{background:#0f172a;color:#64748b;padding:.6rem .8rem;text-align:left;font-size:.75rem;text-transform:uppercase}}
   td {{padding:.55rem .8rem;border-bottom:1px solid #0f172a;color:#cbd5e1}}
-  tr:hover td {{background:#263347}}
+  tr:hover td {{filter:brightness(1.15)}}
   .warn {{background:#1e3a2f;border:1px solid #166534;border-radius:8px;padding:1rem;margin-top:1.5rem;color:#4ade80;font-size:.88rem}}
 </style>
 </head>
@@ -514,6 +641,7 @@ def _save_signal_html(
     <div class="kpi-card"><div class="label">モデル</div><div class="value">{model_type.upper()}</div></div>
     <div class="kpi-card"><div class="label">戦略</div><div class="value">{strategy_name}</div></div>
     <div class="kpi-card"><div class="label">資金</div><div class="value">¥{bankroll:,.0f}</div></div>
+    {result_kpi}
   </div>
 
   <div class="section">
