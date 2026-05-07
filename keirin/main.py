@@ -1430,17 +1430,17 @@ def main():
     p_bt = sub.add_parser("backtest", help="バックテスト")
     p_bt.add_argument("--bankroll", type=float, default=50000)
     p_bt.add_argument("--bet-types", dest="bet_types", type=str, default=None,
-                      help=f"賭け式カンマ区切り (デフォルト:全式) 選択肢: {','.join(ALL_BET_TYPES)}")
+                      help="賭け式カンマ区切り (デフォルト:全式) 選択肢: win,place,exacta,quinella,trio,wide,trifecta")
     p_bt.add_argument("--line-leader", dest="line_leader", action="store_true",
                       help="ライン先頭のみ対象")
     p_bt.add_argument("--strategy", type=str, default=None,
-                      help=f"戦略プリセット: {','.join(STRATEGIES.keys())}")
+                      help="戦略プリセット: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_bt.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
 
     p_cmp = sub.add_parser("compare", help="全戦略を一括バックテストして比較")
     p_cmp.add_argument("--bankroll", type=float, default=50000)
     p_cmp.add_argument("--strategies", type=str, default=None,
-                       help=f"比較する戦略カンマ区切り（デフォルト:全戦略）: {','.join(STRATEGIES.keys())}")
+                       help="比較する戦略カンマ区切り（デフォルト:全戦略）: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_cmp.add_argument("--fixed-bet", dest="fixed_bet", type=int, default=None,
                        help="固定額ベット（例: 200）。Kellyの複利を排除し純粋な戦略比較ができる")
     p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
@@ -1472,7 +1472,7 @@ def main():
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
     p_det.add_argument("--strategy", type=str, default="trifecta_mid",
-                       help=f"戦略名（デフォルト: trifecta_mid）: {', '.join(STRATEGIES.keys())}")
+                       help="戦略名（デフォルト: trifecta_mid）: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3）")
@@ -1486,7 +1486,7 @@ def main():
     p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
     p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
     p_pred.add_argument("--strategy", type=str, default="trifecta_sharp",
-                        help=f"戦略名（デフォルト: trifecta_sharp）選択肢: {','.join(STRATEGIES)}")
+                        help="戦略名（デフォルト: trifecta_sharp）選択肢: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（デフォルト: 50000）")
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
