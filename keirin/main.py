@@ -84,6 +84,25 @@ def _open_html(path: Path) -> None:
         print(f"ブラウザで開けませんでした。手動で開いてください: {path}")
 
 
+def _filter_train_days(
+    df_feat: pd.DataFrame, df_raw: pd.DataFrame, train_days: int | None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """直近 train_days 日のデータに絞り込む。None なら全期間。"""
+    if not train_days:
+        return df_feat, df_raw
+    dates = sorted(df_feat["date"].unique())
+    if train_days >= len(dates):
+        return df_feat, df_raw
+    cutoff = dates[-train_days]
+    df_feat_f = df_feat[df_feat["date"] >= cutoff].copy()
+    if "race_id" in df_feat_f.columns and "race_id" in df_raw.columns:
+        valid_ids = set(df_feat_f["race_id"])
+        df_raw_f = df_raw[df_raw["race_id"].isin(valid_ids)].copy()
+    else:
+        df_raw_f = df_raw
+    return df_feat_f, df_raw_f
+
+
 def cmd_compare(args):
     """全戦略をバックテストして比較レポートを生成"""
     model_path = MODEL_DIR / "lgb_model.txt"
@@ -98,13 +117,16 @@ def cmd_compare(args):
         records = json.load(f)
     df = pd.DataFrame(records)
     df_feat = build_features(df)
+    train_days = getattr(args, "train_days", None)
+    df_feat, df = _filter_train_days(df_feat, df, train_days)
 
     dates = sorted(df_feat["date"].unique())
     test_ratio = getattr(args, "test_ratio", 0.3)
     split_idx = int(len(dates) * (1 - test_ratio))
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
     test_days = len(dates) - split_idx
-    print(f"テスト分割: {1-test_ratio:.0%}学習 / {test_ratio:.0%}テスト  "
+    period_label = f"直近{train_days}日" if train_days else "全期間"
+    print(f"学習期間: {period_label}  テスト分割: {1-test_ratio:.0%}学習 / {test_ratio:.0%}テスト  "
           f"({split_idx}日学習 / {test_days}日テスト)")
 
     calibrator = meta.get("calibrator")
@@ -913,7 +935,13 @@ def cmd_pipeline(args):
         with open(raw_path, encoding="utf-8") as f:
             records = json.load(f)
         df = pd.DataFrame(records)
-        print(f"  学習データ: {len(df)}件")
+        train_days = getattr(args, "train_days", None)
+        if train_days:
+            df_feat_tmp = build_features(df)
+            _, df = _filter_train_days(df_feat_tmp, df, train_days)
+            print(f"  学習データ: {len(df)}件（直近{train_days}日に絞り込み）")
+        else:
+            print(f"  学習データ: {len(df)}件")
         model_type = getattr(args, "model_type", "binary")
         if getattr(args, "lambdarank", False):
             model_type = "lambdarank"
@@ -953,26 +981,20 @@ def cmd_train(args):
     save_model(result)
 
 
-def cmd_model_compare(args):
-    """4モデル（binary/lambdarank/catboost/gnn）× 全戦略をまとめて比較"""
-    raw_path = DATA_DIR / "raw_data.json"
-    if not raw_path.exists():
-        print("まず `python main.py collect` を実行してください")
-        return
-
-    with open(raw_path, encoding="utf-8") as f:
-        records = json.load(f)
-    df_raw = pd.DataFrame(records)
-    df_feat = build_features(df_raw)
-
+def _run_model_compare_window(
+    df_raw_all: pd.DataFrame, df_feat_all: pd.DataFrame,
+    selected_models: list[str], target_strategies: list[str],
+    test_ratio: float, bankroll: float, train_days: int | None,
+) -> tuple[dict, int, list[str]]:
+    """1つの学習期間ウィンドウでモデル学習×戦略比較を実行。(table, test_days, models_done) を返す"""
+    df_feat, df_raw = _filter_train_days(df_feat_all, df_raw_all, train_days)
     dates = sorted(df_feat["date"].unique())
-    test_ratio = getattr(args, "test_ratio", 0.3)
     split_idx = int(len(dates) * (1 - test_ratio))
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
     test_days = len(dates) - split_idx
+    period_label = f"直近{train_days}日" if train_days else f"全{len(dates)}日"
 
-    selected_models = [m.strip() for m in args.models.split(",")]
-    target_strategies = list(STRATEGIES.keys())
+    print(f"\n  期間: {period_label}  ({dates[0]}〜{dates[-1]})  テスト{test_days}日")
 
     TRAIN_FN = {
         "binary":     lambda: train_evaluate(df_raw, n_splits=5),
@@ -985,8 +1007,8 @@ def cmd_model_compare(args):
         "catboost": "CatBoost", "gnn": "GNN",
     }
 
-    # モデル×戦略の結果テーブル
-    table: dict[str, dict[str, object]] = {}   # model -> strategy -> session
+    table: dict[str, dict[str, object]] = {}
+    models_done = []
 
     for mtype in selected_models:
         if mtype not in TRAIN_FN:
@@ -1010,48 +1032,131 @@ def cmd_model_compare(args):
         model_sessions = {}
         for sname in target_strategies:
             strat = STRATEGIES[sname]
-            sess = simulate_session(races, initial_bankroll=args.bankroll, strategy=strat)
+            sess = simulate_session(races, initial_bankroll=bankroll, strategy=strat)
             model_sessions[sname] = sess
         table[mtype] = model_sessions
+        models_done.append(mtype)
 
-    if not table:
+    return table, test_days, models_done
+
+
+def cmd_model_compare(args):
+    """4モデル（binary/lambdarank/catboost/gnn）× 全戦略をまとめて比較"""
+    raw_path = DATA_DIR / "raw_data.json"
+    if not raw_path.exists():
+        print("まず `python main.py collect` を実行してください")
+        return
+
+    with open(raw_path, encoding="utf-8") as f:
+        records = json.load(f)
+    df_raw_all = pd.DataFrame(records)
+    df_feat_all = build_features(df_raw_all)
+
+    selected_models = [m.strip() for m in args.models.split(",")]
+    target_strategies = list(STRATEGIES.keys())
+    test_ratio = getattr(args, "test_ratio", 0.3)
+
+    MODEL_LABEL = {
+        "binary": "Binary (LGB)", "lambdarank": "LambdaRank",
+        "catboost": "CatBoost", "gnn": "GNN",
+    }
+
+    # --compare-windows: 複数ウィンドウを並べて比較
+    compare_windows_str = getattr(args, "compare_windows", None)
+    if compare_windows_str:
+        windows = []
+        for w in compare_windows_str.split(","):
+            w = w.strip()
+            windows.append(None if w in ("all", "全期間") else int(w))
+    else:
+        windows = [getattr(args, "train_days", None)]
+
+    # ウィンドウ×モデル×戦略の結果
+    all_window_results: list[tuple[str, dict, list[str], int]] = []  # (label, table, models_done, test_days)
+    for win in windows:
+        label = f"直近{win}日" if win else "全期間"
+        table, test_days, models_done = _run_model_compare_window(
+            df_raw_all, df_feat_all, selected_models, target_strategies,
+            test_ratio, args.bankroll, win,
+        )
+        if table:
+            all_window_results.append((label, table, models_done, test_days))
+
+    if not all_window_results:
         print("比較できるモデルがありません")
         return
 
     # ── コンソール出力 ──────────────────────────────────────────
-    models_done = list(table.keys())
     col_w = 16
-    header = f"{'戦略':<20}" + "".join(f"{MODEL_LABEL.get(m, m):>{col_w}}" for m in models_done)
-    print(f"\n{'='*len(header)}")
-    print("  モデル比較レポート  (ROI  /  的中率)")
-    print(f"{'='*len(header)}")
-    print(f"  {header}")
-    print(f"  {'-'*len(header)}")
-    for sname in target_strategies:
-        row = f"  {sname:<20}"
-        for mtype in models_done:
-            sess = table[mtype].get(sname)
-            if sess and len(sess.bets) > 0:
-                total = sess.wins + sess.losses
-                hit_rate = sess.wins / total if total > 0 else 0
-                cell = f"{sess.roi:+.1%}/{hit_rate:.0%}"
-            else:
-                cell = "---"
-            row += f"{cell:>{col_w}}"
-        print(row)
+    if len(windows) == 1:
+        # 単一ウィンドウ: 従来レイアウト（モデルが列）
+        label, table, models_done, test_days = all_window_results[0]
+        header = f"{'戦略':<22}" + "".join(f"{MODEL_LABEL.get(m, m):>{col_w}}" for m in models_done)
+        print(f"\n{'='*len(header)}")
+        print(f"  モデル比較レポート  [{label}]  (ROI / 的中率)")
+        print(f"{'='*len(header)}")
+        print(f"  {header}")
+        print(f"  {'-'*len(header)}")
+        for sname in target_strategies:
+            row = f"  {sname:<22}"
+            for mtype in models_done:
+                sess = table[mtype].get(sname)
+                if sess and len(sess.bets) > 0:
+                    total = sess.wins + sess.losses
+                    hit_rate = sess.wins / total if total > 0 else 0
+                    cell = f"{sess.roi:+.1%}/{hit_rate:.0%}"
+                else:
+                    cell = "---"
+                row += f"{cell:>{col_w}}"
+            print(row)
 
-    # ROI最良モデル×戦略を探す
-    best_roi, best_model, best_strat = -999, "", ""
-    for mtype, sessions in table.items():
-        for sname, sess in sessions.items():
-            if sess and len(sess.bets) > 0 and sess.roi > best_roi:
-                best_roi, best_model, best_strat = sess.roi, mtype, sname
-    print(f"\n  最良: {MODEL_LABEL.get(best_model, best_model)} × {best_strat}  ROI={best_roi:+.1%}")
+        best_roi, best_model, best_strat = -999, "", ""
+        for mtype, sessions in table.items():
+            for sname, sess in sessions.items():
+                if sess and len(sess.bets) > 0 and sess.roi > best_roi:
+                    best_roi, best_model, best_strat = sess.roi, mtype, sname
+        print(f"\n  最良: {MODEL_LABEL.get(best_model, best_model)} × {best_strat}  ROI={best_roi:+.1%}")
 
-    # ── HTML出力 ──────────────────────────────────────────────
-    if getattr(args, "html", False):
+    else:
+        # 複数ウィンドウ: ウィンドウが列
+        # 単一モデル想定（--models lambdarank など）
+        mtype = selected_models[0]
+        win_labels = [lbl for lbl, _, _, _ in all_window_results]
+        header = f"{'戦略':<22}" + "".join(f"{lbl:>{col_w}}" for lbl in win_labels)
+        print(f"\n{'='*len(header)}")
+        print(f"  学習期間ウィンドウ比較  [{mtype}]  (ROI / 的中率)")
+        print(f"{'='*len(header)}")
+        print(f"  {header}")
+        print(f"  {'-'*len(header)}")
+        for sname in target_strategies:
+            row = f"  {sname:<22}"
+            for _, table, models_done, _ in all_window_results:
+                if mtype not in table:
+                    row += f"{'---':>{col_w}}"
+                    continue
+                sess = table[mtype].get(sname)
+                if sess and len(sess.bets) > 0:
+                    total = sess.wins + sess.losses
+                    hit_rate = sess.wins / total if total > 0 else 0
+                    cell = f"{sess.roi:+.1%}/{hit_rate:.0%}"
+                else:
+                    cell = "---"
+                row += f"{cell:>{col_w}}"
+            print(row)
+
+        print(f"\n  最良（各ウィンドウ）:")
+        for lbl, table, models_done, _ in all_window_results:
+            best_roi, best_strat = -999, ""
+            for sname, sess in table.get(mtype, {}).items():
+                if sess and len(sess.bets) > 0 and sess.roi > best_roi:
+                    best_roi, best_strat = sess.roi, sname
+            print(f"    {lbl}: {best_strat}  ROI={best_roi:+.1%}")
+
+    # ── HTML出力（単一ウィンドウのみ）──────────────────────────
+    if getattr(args, "html", False) and len(all_window_results) == 1:
+        label, table, models_done, test_days_f = all_window_results[0]
         _save_model_compare_html(table, models_done, target_strategies,
-                                 MODEL_LABEL, test_days, args.bankroll)
+                                 MODEL_LABEL, test_days_f, args.bankroll)
 
 
 def _save_model_compare_html(table, models_done, strategies, model_label, test_days, bankroll):
@@ -1399,12 +1504,16 @@ def cmd_detail(args):
         records = json.load(f)
     df = pd.DataFrame(records)
     df_feat = build_features(df)
+    train_days = getattr(args, "train_days", None)
+    df_feat, df = _filter_train_days(df_feat, df, train_days)
 
     dates = sorted(df_feat["date"].unique())
     test_ratio = getattr(args, "test_ratio", 0.3)
     split_idx = int(len(dates) * (1 - test_ratio))
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
     test_days = len(dates) - split_idx
+    if train_days:
+        print(f"期間: 直近{train_days}日  テスト{test_days}日")
 
     calibrator = meta.get("calibrator")
     races = _build_races(booster, feature_cols, df_test, KEIRIN_BET_TYPES, calibrator=calibrator, meta=meta)
@@ -1678,6 +1787,8 @@ def main():
     p_cmp.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
     p_cmp.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3=30%%）")
+    p_cmp.add_argument("--train-days", dest="train_days", type=int, default=None,
+                       help="直近N日のみ使用（例: --train-days 365）")
 
     p_pipe = sub.add_parser("pipeline", help="払戻取得→着順修正→学習→比較を一括実行（済みはスキップ）")
     p_pipe.add_argument("--bankroll", type=float, default=50000)
@@ -1694,6 +1805,8 @@ def main():
                         help="学習モデル種別 (default: binary)")
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
+    p_pipe.add_argument("--train-days", dest="train_days", type=int, default=None,
+                        help="直近N日のみ使用して学習（例: --train-days 365）")
 
     p_mc = sub.add_parser("model-compare", help="4モデル×全戦略を一括比較")
     p_mc.add_argument("--bankroll", type=float, default=50000)
@@ -1701,6 +1814,10 @@ def main():
                       help="比較するモデルカンマ区切り（デフォルト: binary,lambdarank,catboost,gnn）")
     p_mc.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
     p_mc.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3)
+    p_mc.add_argument("--train-days", dest="train_days", type=int, default=None,
+                      help="直近N日のみ使用（例: --train-days 365）")
+    p_mc.add_argument("--compare-windows", dest="compare_windows", type=str, default=None,
+                      help="複数期間を並べて比較（例: --compare-windows 180,365,all）")
 
     sub.add_parser("demo", help="デモ実行")
 
@@ -1710,6 +1827,8 @@ def main():
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3）")
+    p_det.add_argument("--train-days", dest="train_days", type=int, default=None,
+                       help="直近N日のみ使用（例: --train-days 365）")
     p_det.add_argument("--html", action="store_true", help="(常にHTML生成・省略可)")
 
     p_merge = sub.add_parser("merge-data", help="別のraw_data JSONをraw_data.jsonにマージ")
