@@ -415,8 +415,8 @@ def cmd_predict(args):
             else:
                 cfg = bet_config.get(bt)
                 if cfg:
-                    _, _, n_combos, top_n = cfg
-                    live_cfg = {bt: (0.0, 0, n_combos, top_n)}
+                    min_prob, _, n_combos, top_n = cfg
+                    live_cfg = {bt: (min_prob, 0, n_combos, top_n)}
                     bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
                                      bet_config=live_cfg)
                 else:
