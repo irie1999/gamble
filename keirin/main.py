@@ -328,7 +328,7 @@ def cmd_predict(args):
     else:
         date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
 
-    strategy_name = getattr(args, "strategy", "tf_9pct") or "tf_9pct"
+    strategy_name = getattr(args, "strategy", "trifecta_sharp2") or "trifecta_sharp2"
     strat = STRATEGIES.get(strategy_name)
     if strat is None:
         print(f"戦略 '{strategy_name}' が見つかりません。利用可能: {', '.join(STRATEGIES)}")
@@ -598,22 +598,25 @@ def _save_signal_html(
         pred_prob = r["pred_prob"]
         ev = r.get("ev", pred_prob)
         has_odds = r["odds"] > 0
+        is_premium = pred_prob >= 0.09  # バックテスト最適閾値
 
         odds_str = f"{r['odds']:.1f}倍" if has_odds else "-"
         ev_str = f"EV {ev:.2f}" if has_odds else f"組合 {pred_prob:.1%}"
-        # EVが高いほど強調色
         ev_color = "#4ade80" if ev >= 1.5 else ("#fbbf24" if ev >= 1.0 else "#94a3b8")
 
         nums = sel.strip("[]").replace(" ", "")
+        premium_badge = '<span class="badge-premium">★ 優先</span>' if is_premium else ''
         if result == "当たり":
             bg = "#0a2e1a"; border = "#22c55e"; badge = f'<span class="badge win">当たり {payout:.1f}倍</span>'
         elif result == "はずれ":
             bg = "#1e0f0f"; border = "#7f1d1d"; badge = '<span class="badge lose">はずれ</span>'
         else:
-            bg = "#1e293b"; border = "#334155"; badge = ''
+            bg = "#1e293b"
+            border = "#22d3ee" if is_premium else "#334155"
+            badge = ''
 
         return f"""<div class="combo" style="background:{bg};border-color:{border}">
-          <div class="combo-nums">{nums}</div>
+          <div class="combo-nums">{nums}{premium_badge}</div>
           <div class="combo-meta">
             <span class="tag-odds">{odds_str}</span>
             <span class="tag-prob"><span class="tag-label">組合</span>{pred_prob:.1%}</span>
@@ -736,6 +739,7 @@ def _save_signal_html(
   .badge.win{{background:#14532d;color:#4ade80}}
   .badge.lose{{background:#450a0a;color:#f87171}}
   .badge.pending{{background:#1e293b;color:#64748b;border:1px solid #334155}}
+  .badge-premium{{display:inline-block;background:#083344;color:#22d3ee;font-size:.65rem;font-weight:700;padding:.05rem .35rem;border-radius:4px;margin-left:.3rem;vertical-align:middle}}
   .warn{{background:#1a2a1a;border:1px solid #166534;border-radius:8px;padding:.8rem 1rem;margin-top:1rem;color:#4ade80;font-size:.82rem}}
 </style>
 </head>
@@ -1930,7 +1934,7 @@ def main():
     sub.add_parser("demo", help="デモ実行")
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
-    p_det.add_argument("--strategy", type=str, default="tf_9pct",
+    p_det.add_argument("--strategy", type=str, default="trifecta_sharp2",
                        help="戦略名（デフォルト: trifecta_sharp2）: wide_only,...,trifecta_sharp2,ws_63_1c")
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
@@ -1947,7 +1951,7 @@ def main():
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
     p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
     p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
-    p_pred.add_argument("--strategy", type=str, default="tf_9pct",
+    p_pred.add_argument("--strategy", type=str, default="trifecta_sharp2",
                         help="戦略名（デフォルト: trifecta_sharp2）選択肢: wide_only,...,trifecta_sharp2,ws_63_1c")
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（デフォルト: 50000）")
