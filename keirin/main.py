@@ -323,6 +323,8 @@ def cmd_predict(args):
 
     if args.date:
         date_str = args.date
+    elif getattr(args, "tomorrow", False):
+        date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
     elif getattr(args, "today", False):
         date_str = datetime.now().strftime("%Y%m%d")
     else:
