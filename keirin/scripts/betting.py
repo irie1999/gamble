@@ -112,8 +112,82 @@ STRATEGIES: dict[str, dict] = {
         "bet_types": ["wide"],
         "line_leader_only": False,
         "bet_config": {"wide": (0.20, 0, 2, 10)},
-        "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
+        "min_top_prob": 0.30,
         "fixed_amount": 100,
+    },
+    # ---- wide_sharp パラメータチューニングバリアント ----
+    # 命名規則: ws_{min_top_prob%}_{max_combos}c_{min_combo_prob%}
+    "ws_30_1c": {
+        "description": "[tune] wide: top30% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.30, "fixed_amount": 100,
+    },
+    "ws_35_1c": {
+        "description": "[tune] wide: top35% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.35, "fixed_amount": 100,
+    },
+    "ws_40_1c": {
+        "description": "[tune] wide: top40% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.40, "fixed_amount": 100,
+    },
+    "ws_45_1c": {
+        "description": "[tune] wide: top45% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.45, "fixed_amount": 100,
+    },
+    "ws_50_1c": {
+        "description": "[tune] wide: top50% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.50, "fixed_amount": 100,
+    },
+    "ws_35_2c": {
+        "description": "[tune] wide: top35% 2点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 2, 10)},
+        "min_top_prob": 0.35, "fixed_amount": 100,
+    },
+    "ws_40_2c": {
+        "description": "[tune] wide: top40% 2点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 2, 10)},
+        "min_top_prob": 0.40, "fixed_amount": 100,
+    },
+    "ws_45_2c": {
+        "description": "[tune] wide: top45% 2点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 2, 10)},
+        "min_top_prob": 0.45, "fixed_amount": 100,
+    },
+    "ws_35_1c_25": {
+        "description": "[tune] wide: top35% 1点 combo25%以上",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.25, 0, 1, 10)},
+        "min_top_prob": 0.35, "fixed_amount": 100,
+    },
+    "ws_40_1c_25": {
+        "description": "[tune] wide: top40% 1点 combo25%以上",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.25, 0, 1, 10)},
+        "min_top_prob": 0.40, "fixed_amount": 100,
+    },
+    "ws_45_1c_25": {
+        "description": "[tune] wide: top45% 1点 combo25%以上",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.25, 0, 1, 10)},
+        "min_top_prob": 0.45, "fixed_amount": 100,
+    },
+    "ws_50_1c_25": {
+        "description": "[tune] wide: top50% 1点 combo25%以上",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.25, 0, 1, 10)},
+        "min_top_prob": 0.50, "fixed_amount": 100,
     },
     "combo_sharp": {
         "description": "3連複＋ワイド厳選：確信レースで的中率と配当を両立",
