@@ -201,6 +201,42 @@ STRATEGIES: dict[str, dict] = {
         "bet_config": {"wide": (0.20, 0, 1, 10)},
         "min_top_prob": 0.60, "fixed_amount": 100,
     },
+    "ws_57_1c": {
+        "description": "[tune] wide: top57% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.57, "fixed_amount": 100,
+    },
+    "ws_58_1c": {
+        "description": "[tune] wide: top58% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.58, "fixed_amount": 100,
+    },
+    "ws_59_1c": {
+        "description": "[tune] wide: top59% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.59, "fixed_amount": 100,
+    },
+    "ws_61_1c": {
+        "description": "[tune] wide: top61% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.61, "fixed_amount": 100,
+    },
+    "ws_62_1c": {
+        "description": "[tune] wide: top62% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.62, "fixed_amount": 100,
+    },
+    "ws_63_1c": {
+        "description": "[tune] wide: top63% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.63, "fixed_amount": 100,
+    },
     "ws_65_1c": {
         "description": "[tune] wide: top65% 1点",
         "bet_types": ["wide"], "line_leader_only": False,
