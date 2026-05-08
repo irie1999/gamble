@@ -99,6 +99,22 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
         "fixed_amount": 100,
     },
+    "tf_s2_45": {
+        "description": "3連単2点 絞り込み版：top45%以上の確信レースのみ 2点",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.05, 0, 2, 20)},
+        "min_top_prob": 0.45,   # より厳選: 1/3〜1/5程度のレースに絞る
+        "fixed_amount": 100,
+    },
+    "tf_s2_40": {
+        "description": "3連単2点 中間絞り込み：top40%以上 2点",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.06, 0, 2, 20)},
+        "min_top_prob": 0.40,
+        "fixed_amount": 100,
+    },
     "trio_sharp": {
         "description": "3連複厳選：確信レースのみ・的中率重視",
         "bet_types": ["trio"],
