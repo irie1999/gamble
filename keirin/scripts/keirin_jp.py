@@ -13,6 +13,7 @@ kake番号:
 import re
 import json
 import time
+import threading
 import requests
 
 KEIRIN_JP_BASE = "https://keirin.jp/pc"
@@ -56,16 +57,28 @@ VENUE_TO_KCD = {
 VENUE_CODE_TO_KCD = {str(kcd): kcd for kcd in VENUE_TO_KCD.values()}
 
 
+_tls = threading.local()
+
+def _get_session() -> requests.Session:
+    """スレッドローカルなセッションを返す（TLSコネクション再利用）"""
+    if not hasattr(_tls, "session"):
+        s = requests.Session()
+        s.headers.update(HEADERS)
+        _tls.session = s
+    return _tls.session
+
+
 def _fetch_html(url: str, retries: int = 3) -> str | None:
-    s = requests.Session()
-    s.headers.update(HEADERS)
+    s = _get_session()
     for i in range(retries):
         try:
             r = s.get(url, timeout=15)
             if r.status_code == 200:
                 return re.sub(r'<\?xml[^>]+\?>', '',
                               r.content.decode("utf-8", errors="replace"))
-        except Exception as e:
+        except Exception:
+            _tls.session = None  # セッションをリセット
+            s = _get_session()
             time.sleep(2 ** i)
     return None
 
@@ -186,6 +199,48 @@ def fetch_race_page(kcd: int, date: str, race_no: int) -> dict | None:
     if not html:
         return None
     return _extract_json_data(html)
+
+
+def fetch_day_payouts(kcd: int, date: str) -> dict[int, dict]:
+    """
+    1日1会場の全レース払戻を取得する（高速バッチ版）。
+    RNO=1 で PC0201 からレース数を取得し、各レースの払戻をまとめて返す。
+    Returns: {race_no: payout_dict}  payout_dict は get_payout_odds と同形式
+    """
+    # まずRNO=1でその日のレース数を取得
+    jdata_first = fetch_race_page(kcd, date, 1)
+    if not jdata_first:
+        return {}
+
+    try:
+        race_list = jdata_first["PC0201"]["C0201data"]["C0201race"]
+        n_races = len(race_list)
+    except (KeyError, TypeError):
+        n_races = 12  # フォールバック
+
+    results: dict[int, dict] = {}
+
+    # RNO=1 の払戻があれば保存
+    pay1 = get_payout_odds(jdata_first)
+    if pay1:
+        results[1] = pay1
+
+    # RNO=2 以降を並行取得
+    def _fetch_rno(rno: int):
+        jdata = fetch_race_page(kcd, date, rno)
+        if not jdata:
+            return rno, {}
+        return rno, get_payout_odds(jdata)
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=min(n_races, 8)) as ex:
+        futs = {ex.submit(_fetch_rno, rno): rno for rno in range(2, n_races + 1)}
+        for fut in as_completed(futs):
+            rno, pay = fut.result()
+            if pay:
+                results[rno] = pay
+
+    return results
 
 
 def get_race_encp(jdata: dict, race_no: int) -> str | None:

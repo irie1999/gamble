@@ -1,6 +1,8 @@
 """
 keirin.jp から過去レースの払戻金を一括取得してodds_data.jsonに保存する
 
+高速バッチ版: 1日1会場単位で取得（個別レースではなく）
+
 Usage:
   python keirin/scripts/collect_payouts.py              # raw_data.jsonにある全レース
   python keirin/scripts/collect_payouts.py --date 20260504   # 特定日のみ
@@ -13,7 +15,6 @@ Usage:
 
 import sys
 import json
-import time
 import threading
 import argparse
 from pathlib import Path
@@ -21,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from keirin.scripts.keirin_jp import (
-    fetch_race_page, get_payout_odds, VENUE_CODE_TO_KCD,
+    fetch_race_page, get_payout_odds, fetch_day_payouts,
 )
 
 DATA_DIR = Path(__file__).parent.parent / "data"
@@ -54,7 +55,6 @@ def save_odds(data: dict) -> None:
 
 
 def build_race_list(records: list[dict], target_date: str | None) -> list[dict]:
-    """raw_dataからユニークなレース一覧を返す。race_idを直接使用する。"""
     seen = set()
     races = []
     for r in records:
@@ -76,30 +76,61 @@ def build_race_list(records: list[dict], target_date: str | None) -> list[dict]:
     return sorted(races, key=lambda x: x["race_id"])
 
 
-def _fetch_one(race: dict, sleep_sec: float) -> tuple[str, dict | None, str]:
-    """1レース分の払戻を取得。戻り値: (race_id, serializable_dict_or_None, status)"""
-    race_id = race["race_id"]
-    kcd = race["kcd"]
-    date = race["date"]
-    race_no = race["race_no"]
+def _group_by_day_venue(races: list[dict]) -> dict[tuple, list[dict]]:
+    """(kcd, date) でグループ化"""
+    groups: dict[tuple, list[dict]] = {}
+    for r in races:
+        key = (r["kcd"], r["date"])
+        groups.setdefault(key, []).append(r)
+    return groups
+
+
+def _serialize_payouts(payouts: dict) -> dict:
+    return {bt: {tuple_to_key(k): v for k, v in d.items()} for bt, d in payouts.items()}
+
+
+def _fetch_day_group(
+    kcd: str, date: str, races_in_day: list[dict], existing: dict, overwrite: bool
+) -> tuple[dict, int, int, int]:
+    """
+    1日1会場分の払戻を取得。
+    戻り値: (race_id -> serialized_payouts の dict, ok, skip, fail)
+    """
+    # 全レース取得済みかチェック
+    if not overwrite:
+        all_done = all(
+            r["race_id"] in existing and "trifecta" in existing[r["race_id"]]
+            for r in races_in_day
+        )
+        if all_done:
+            return {}, 0, len(races_in_day), 0
+
+    venue = races_in_day[0]["venue_name"]
+    race_nos = {r["race_no"]: r["race_id"] for r in races_in_day}
+
+    results = {}
+    ok = skip = fail = 0
+
+    # 1日1会場の全払戻を一括取得
     try:
-        jdata = fetch_race_page(kcd, date, race_no)
-        if not jdata:
-            time.sleep(sleep_sec)
-            return race_id, None, "nodata"
-        payouts = get_payout_odds(jdata)
-        if not payouts:
-            time.sleep(sleep_sec)
-            return race_id, None, "nopayout"
-        serializable = {
-            bt: {tuple_to_key(k): v for k, v in d.items()}
-            for bt, d in payouts.items()
-        }
-        time.sleep(sleep_sec)
-        return race_id, serializable, "ok"
+        day_payouts = fetch_day_payouts(int(kcd), date)
     except Exception as e:
-        time.sleep(sleep_sec)
-        return race_id, None, f"err:{e}"
+        print(f"  {venue} {date} → 一括取得エラー: {e}")
+        day_payouts = {}
+
+    for race_no, race_id in race_nos.items():
+        if not overwrite and race_id in existing and "trifecta" in existing[race_id]:
+            skip += 1
+            continue
+
+        pay = day_payouts.get(race_no, {})
+        if pay:
+            results[race_id] = _serialize_payouts(pay)
+            ok += 1
+        else:
+            fail += 1
+
+    return results, ok, skip, fail
 
 
 def fetch_and_store(
@@ -107,55 +138,51 @@ def fetch_and_store(
     existing: dict,
     overwrite: bool,
     workers: int = 8,
-    sleep_sec: float = 0.1,
+    sleep_sec: float = 0.0,  # バッチ版では不要
 ) -> dict:
-    """払戻金を並列取得してodds_dataに追記する"""
+    """払戻金を1日1会場単位で並列取得してodds_dataに追記する"""
     results = dict(existing)
     lock = threading.Lock()
-    total = len(races)
+
+    groups = _group_by_day_venue(races)
+    total_groups = len(groups)
     counters = {"ok": 0, "skip": 0, "fail": 0, "done": 0}
 
-    # スキップ対象を除外
-    to_fetch = []
-    for race in races:
-        if not overwrite and race["race_id"] in results and "trifecta" in results[race["race_id"]]:
-            counters["skip"] += 1
-        else:
-            to_fetch.append(race)
-
-    print(f"  取得対象: {len(to_fetch)}件  スキップ: {counters['skip']}件  並列数: {workers}")
-    if not to_fetch:
-        print("  全件スキップ済み")
-        return results
+    print(f"  日×会場グループ数: {total_groups}  (個別レース数: {len(races)})  並列数: {workers}")
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_fetch_one, race, sleep_sec): race for race in to_fetch}
-        for fut in as_completed(futures):
-            race_id, data, status = fut.result()
-            race = futures[fut]
-            venue = race["venue_name"]
-            date = race["date"]
-            rno = race["race_no"]
+        futs = {
+            ex.submit(_fetch_day_group, kcd, date, day_races, existing, overwrite): (kcd, date, day_races)
+            for (kcd, date), day_races in groups.items()
+        }
+        for fut in as_completed(futs):
+            kcd, date, day_races = futs[fut]
+            venue = day_races[0]["venue_name"]
+            try:
+                day_results, ok, skip, fail = fut.result()
+            except Exception as e:
+                print(f"  {venue} {date} → エラー: {e}")
+                ok, skip, fail = 0, 0, len(day_races)
+                day_results = {}
 
             with lock:
+                results.update(day_results)
+                counters["ok"] += ok
+                counters["skip"] += skip
+                counters["fail"] += fail
                 counters["done"] += 1
                 done = counters["done"]
-                if status == "ok":
-                    results[race_id] = data
-                    counters["ok"] += 1
-                    bet_summary = " ".join(f"{bt}:{len(d)}" for bt, d in data.items())
-                    print(f"  [{done}/{len(to_fetch)}] {venue} {date} R{rno:02d} → OK  {bet_summary}")
-                elif status == "nodata":
-                    counters["fail"] += 1
-                elif status == "nopayout":
-                    counters["fail"] += 1
-                else:
-                    counters["fail"] += 1
-                    print(f"  [{done}/{len(to_fetch)}] {venue} {date} R{rno:02d} → {status}")
 
-                if done % 200 == 0:
+                if ok > 0:
+                    print(f"  [{done}/{total_groups}] {venue} {date} → OK {ok}レース  skip={skip} fail={fail}")
+                elif skip == len(day_races):
+                    pass  # 全スキップは表示しない
+                else:
+                    print(f"  [{done}/{total_groups}] {venue} {date} → fail={fail} skip={skip}")
+
+                if done % 50 == 0:
                     save_odds(results)
-                    print(f"  -- 中間保存 ({done}/{len(to_fetch)}) ok={counters['ok']} skip={counters['skip']} fail={counters['fail']} --")
+                    print(f"  -- 中間保存 ({done}/{total_groups}グループ) ok={counters['ok']} skip={counters['skip']} fail={counters['fail']} --")
 
     print(f"\nok={counters['ok']} skip={counters['skip']} fail={counters['fail']}")
     return results
@@ -165,8 +192,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="特定日のみ取得 (YYYYMMDD)")
     parser.add_argument("--overwrite", action="store_true", help="既存データも再取得")
-    parser.add_argument("--workers", type=int, default=8, help="並列数（デフォルト: 8）")
-    parser.add_argument("--sleep", type=float, default=0.1, help="リクエスト間隔秒（デフォルト: 0.1）")
+    parser.add_argument("--workers", type=int, default=8, help="並列グループ数（デフォルト: 8）")
     args = parser.parse_args()
 
     records = load_raw()
@@ -178,8 +204,7 @@ def main():
         print(f"絞り込み: {args.date}")
     print()
 
-    results = fetch_and_store(races, existing, args.overwrite,
-                              workers=args.workers, sleep_sec=args.sleep)
+    results = fetch_and_store(races, existing, args.overwrite, workers=args.workers)
     save_odds(results)
 
     new_count = len(results) - len(existing)
