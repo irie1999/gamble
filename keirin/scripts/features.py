@@ -217,8 +217,12 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 FEATURE_COLS = [
-    # car_no は除外（内枠バイアスが強すぎて常に1-2-3予測になるため）
-    # is_inner_car / line_rank_in_line で位置優位性を残す
+    # 除外した car_no 関連特徴量:
+    #   car_no              → 内枠バイアスの直接原因
+    #   line_rank_in_line   → ライン内を car_no 順でランク付けしたもの（car_no の別表現）
+    #   is_inner_car        → (car_no <= 3) の直接変換
+    #   bank_inner_effect   → bank_inner_bonus * f(car_no)（car_no の関数）
+    # ライン内順序は is_line_leader で代替
     "class_enc",
     "kyosoten",
     "kyosoten_rel",
@@ -230,13 +234,10 @@ FEATURE_COLS = [
     "line_size",
     "is_line_leader",
     "line_avg_win_rate",
-    "line_rank_in_line",
     "in_big_line",
     "leader_line_size",
     "bank_length",
     "bank_inner_bonus",
-    "is_inner_car",
-    "bank_inner_effect",
     "win_rate_rel",
     "class_enc_rel",
     "top3_rate_rel",
