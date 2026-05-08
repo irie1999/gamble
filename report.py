@@ -65,6 +65,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
     roi_color = "#22c55e" if roi >= 0 else "#ef4444"
 
     bet_rows = ""
+    cumulative = 0.0
     for i, b in enumerate(bets):
         is_win = b.get("win_flag", False)
         actual_payout = b.get("actual_payout", None)
@@ -79,6 +80,8 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
             is_refund = False
             pnl = bet_amount * (b["odds"] - 1) if is_win else -bet_amount
 
+        cumulative += pnl
+
         row_class = "win-row" if is_win else ""
         if is_win:
             result_badge = f'<span class="badge win">的中 {return_odds:.1f}倍</span>'
@@ -88,6 +91,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
             result_badge = '<span class="badge loss">外れ</span>'
 
         pnl_color = "#4ade80" if pnl > 0 else ("#94a3b8" if pnl == 0 else "#f87171")
+        cum_color = "#4ade80" if cumulative > 0 else ("#94a3b8" if cumulative == 0 else "#f87171")
         bet_rows += f"""
         <tr class="{row_class}">
           <td>{i+1}</td>
@@ -98,6 +102,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
           <td>{b['bet_amount']:,}円</td>
           <td>{result_badge}</td>
           <td style="color:{pnl_color};font-weight:600">{pnl:+,.0f}円</td>
+          <td style="color:{cum_color};font-weight:600">{cumulative:+,.0f}円</td>
         </tr>"""
 
     equity_labels_js = json.dumps(equity_labels[:500])
@@ -220,7 +225,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
         <thead>
           <tr>
             <th>#</th><th>レースID</th><th>種別</th><th>選択</th>
-            <th>予測P</th><th>賭け金</th><th>結果</th><th>損益</th>
+            <th>予測P</th><th>賭け金</th><th>結果</th><th>損益</th><th>累積損益</th>
           </tr>
         </thead>
         <tbody>{bet_rows}</tbody>
