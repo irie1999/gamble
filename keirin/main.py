@@ -1704,11 +1704,12 @@ def main():
     sub.add_parser("demo", help="デモ実行")
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
-    p_det.add_argument("--strategy", type=str, default="trifecta_mid",
-                       help="戦略名（デフォルト: trifecta_mid）: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
+    p_det.add_argument("--strategy", type=str, default="wide_sharp",
+                       help="戦略名（デフォルト: wide_sharp）: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3）")
+    p_det.add_argument("--html", action="store_true", help="(常にHTML生成・省略可)")
 
     p_merge = sub.add_parser("merge-data", help="別のraw_data JSONをraw_data.jsonにマージ")
     p_merge.add_argument("--file", required=True, help="マージするJSONファイルのパス")
