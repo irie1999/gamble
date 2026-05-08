@@ -1361,11 +1361,32 @@ def _backtest_real(args, bet_types):
     df = pd.DataFrame(records)
     df_feat = build_features(df)
 
+    train_days = getattr(args, "train_days", None)
+    test_ratio = getattr(args, "test_ratio", 0.3)
+    fixed_bet = getattr(args, "fixed_bet", None)
+
+    if train_days:
+        dates_all = sorted(df_feat["date"].unique())
+        if train_days < len(dates_all):
+            cutoff = dates_all[-train_days]
+            df_feat = df_feat[df_feat["date"] >= cutoff].copy()
+
     dates = sorted(df_feat["date"].unique())
-    split_idx = int(len(dates) * 0.8)
+    split_idx = int(len(dates) * (1.0 - test_ratio))
     df_test = df_feat[df_feat["date"].isin(dates[split_idx:])]
 
+    n_test_days = len(dates) - split_idx
+    n_train_days = split_idx
+    print(f"学習期間: 直近{train_days}日  テスト分割: {100-int(test_ratio*100)}%学習 / {int(test_ratio*100)}%テスト  ({n_train_days}日学習 / {n_test_days}日テスト)" if train_days else
+          f"テスト分割: {100-int(test_ratio*100)}%学習 / {int(test_ratio*100)}%テスト  ({n_train_days}日学習 / {n_test_days}日テスト)")
+    if fixed_bet:
+        print(f"[固定額{fixed_bet}円/bet]")
+
     strategy = STRATEGIES.get(getattr(args, "strategy", None) or "")
+    if fixed_bet and strategy:
+        strategy = dict(strategy)
+        strategy["fixed_amount"] = fixed_bet
+
     calibrator = meta.get("calibrator")
     races = _build_races(booster, feature_cols, df_test, bet_types, calibrator=calibrator, meta=meta)
     session = simulate_session(races, initial_bankroll=args.bankroll,
@@ -1777,6 +1798,12 @@ def main():
     p_bt.add_argument("--strategy", type=str, default=None,
                       help="戦略プリセット: wide_only,trio_wide,balanced,value_hunt,line_leader,trio_only,trifecta_mid,trifecta_sharp,trifecta_sharp2,trio_sharp,wide_sharp,combo_sharp")
     p_bt.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+    p_bt.add_argument("--train-days", dest="train_days", type=int, default=None,
+                      help="直近N日のみ使用（例: --train-days 365）")
+    p_bt.add_argument("--fixed-bet", dest="fixed_bet", type=int, default=None,
+                      help="固定額ベット（例: --fixed-bet 100）。Kelly複利を排除し純粋な戦略比較ができる")
+    p_bt.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
+                      help="テストデータの割合（デフォルト: 0.3=30%%）")
 
     p_cmp = sub.add_parser("compare", help="全戦略を一括バックテストして比較")
     p_cmp.add_argument("--bankroll", type=float, default=50000)
