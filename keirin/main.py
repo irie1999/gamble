@@ -415,8 +415,9 @@ def cmd_predict(args):
             else:
                 cfg = bet_config.get(bt)
                 if cfg:
-                    min_prob, _, n_combos, top_n = cfg
-                    live_cfg = {bt: (min_prob, 0, n_combos, top_n)}
+                    _, _, n_combos, top_n = cfg
+                    # predict では閾値なしで全組を収集し後でtop-N絞り込み
+                    live_cfg = {bt: (0.0, 0, n_combos, top_n)}
                     bets = pick_bets(pred_df, bt, fixed_amount=fixed_amount,
                                      bet_config=live_cfg)
                 else:
@@ -448,6 +449,13 @@ def cmd_predict(args):
     if not signal_rows:
         print(f"シグナルなし（1位予測確率 ≥ {min_top_prob:.0%} のレースがありません）")
         return
+
+    # 組合確率降順でソートし上位N件に絞る（デフォルト10件）
+    top_n_signals = getattr(args, "top_signals", 10)
+    signal_rows.sort(key=lambda x: x["pred_prob"], reverse=True)
+    if top_n_signals and len(signal_rows) > top_n_signals:
+        signal_rows = signal_rows[:top_n_signals]
+    print(f"上位{len(signal_rows)}件のシグナルを表示（組合確率降順）\n")
 
     # ---- 終了レースの結果照合 ----
     print("終了レースの結果を確認中...", flush=True)
@@ -1956,6 +1964,8 @@ def main():
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（デフォルト: 50000）")
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
+    p_pred.add_argument("--top-signals", dest="top_signals", type=int, default=10,
+                        help="表示するシグナル上限数（組合確率降順、デフォルト: 10）")
 
     args = parser.parse_args()
     # collect と merge-data は重いライブラリ不要
