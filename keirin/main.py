@@ -328,7 +328,7 @@ def cmd_predict(args):
     else:
         date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
 
-    strategy_name = getattr(args, "strategy", "trifecta_sharp2") or "trifecta_sharp2"
+    strategy_name = getattr(args, "strategy", "tf_9pct") or "tf_9pct"
     strat = STRATEGIES.get(strategy_name)
     if strat is None:
         print(f"戦略 '{strategy_name}' が見つかりません。利用可能: {', '.join(STRATEGIES)}")
@@ -1929,7 +1929,7 @@ def main():
     sub.add_parser("demo", help="デモ実行")
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
-    p_det.add_argument("--strategy", type=str, default="trifecta_sharp2",
+    p_det.add_argument("--strategy", type=str, default="tf_9pct",
                        help="戦略名（デフォルト: trifecta_sharp2）: wide_only,...,trifecta_sharp2,ws_63_1c")
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
@@ -1946,7 +1946,7 @@ def main():
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
     p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
     p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
-    p_pred.add_argument("--strategy", type=str, default="trifecta_sharp2",
+    p_pred.add_argument("--strategy", type=str, default="tf_9pct",
                         help="戦略名（デフォルト: trifecta_sharp2）選択肢: wide_only,...,trifecta_sharp2,ws_63_1c")
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（デフォルト: 50000）")
