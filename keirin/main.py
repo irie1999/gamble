@@ -616,7 +616,7 @@ def _save_signal_html(
           <div class="combo-nums">{nums}</div>
           <div class="combo-meta">
             <span class="tag-odds">{odds_str}</span>
-            <span class="tag-prob">{pred_prob:.1%}</span>
+            <span class="tag-prob"><span class="tag-label">組合</span>{pred_prob:.1%}</span>
             <span class="tag-ev" style="color:{ev_color}">{ev_str}</span>
             {badge}
           </div>
@@ -728,7 +728,8 @@ def _save_signal_html(
   .combo-nums{{font-size:.95rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em}}
   .combo-meta{{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}}
   .tag-odds{{font-size:.75rem;color:#94a3b8;background:#0f172a;border-radius:4px;padding:.1rem .35rem}}
-  .tag-prob{{font-size:.75rem;color:#64748b}}
+  .tag-prob{{font-size:.75rem;color:#94a3b8}}
+  .tag-label{{font-size:.65rem;color:#475569;margin-right:.2rem}}
   .tag-ev{{font-size:.78rem;font-weight:700;background:#0f172a;border-radius:4px;padding:.1rem .4rem}}
   /* Badges */
   .badge{{font-size:.72rem;font-weight:700;border-radius:5px;padding:.15rem .45rem}}
