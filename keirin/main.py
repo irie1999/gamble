@@ -874,7 +874,8 @@ def cmd_pipeline(args):
 
         if need_payouts:
             races = build_race_list(raw_data, None)
-            updated = fetch_and_store(races, existing_odds, overwrite=args.force_payouts)
+            pw = getattr(args, "payout_workers", 8)
+            updated = fetch_and_store(races, existing_odds, overwrite=args.force_payouts, workers=pw)
             save_odds(updated)
             print(f"  保存完了: {len(updated)}件")
 
@@ -1686,6 +1687,8 @@ def main():
     p_pipe.add_argument("--force-payouts", action="store_true", help="払戻データを強制再取得")
     p_pipe.add_argument("--skip-payouts", dest="skip_payouts", action="store_true",
                         help="Step1払戻取得をスキップ（学習・比較のみ実行したい場合）")
+    p_pipe.add_argument("--payout-workers", dest="payout_workers", type=int, default=8,
+                        help="払戻取得の並列数（デフォルト: 8）")
     p_pipe.add_argument("--force-train", action="store_true", help="モデルを強制再学習")
     p_pipe.add_argument("--lambdarank", action="store_true", help="(後方互換) --model-type lambdarankと同等")
     p_pipe.add_argument("--model-type", dest="model_type", default="binary",

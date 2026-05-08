@@ -5,6 +5,7 @@ Usage:
   python keirin/scripts/collect_payouts.py              # raw_data.jsonにある全レース
   python keirin/scripts/collect_payouts.py --date 20260504   # 特定日のみ
   python keirin/scripts/collect_payouts.py --overwrite       # 既存データも再取得
+  python keirin/scripts/collect_payouts.py --workers 16      # 並列数指定（デフォルト8）
 
 出力: keirin/data/odds_data.json
   {race_id: {bet_type: {sel_tuple_str: odds}}}
@@ -13,8 +14,10 @@ Usage:
 import sys
 import json
 import time
+import threading
 import argparse
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from keirin.scripts.keirin_jp import (
@@ -44,8 +47,10 @@ def load_odds() -> dict:
 
 def save_odds(data: dict) -> None:
     path = DATA_DIR / "odds_data.json"
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    tmp.replace(path)
 
 
 def build_race_list(records: list[dict], target_date: str | None) -> list[dict]:
@@ -71,59 +76,88 @@ def build_race_list(records: list[dict], target_date: str | None) -> list[dict]:
     return sorted(races, key=lambda x: x["race_id"])
 
 
-def fetch_and_store(races: list[dict], existing: dict, overwrite: bool) -> dict:
-    """払戻金を取得してodds_dataに追記する"""
+def _fetch_one(race: dict, sleep_sec: float) -> tuple[str, dict | None, str]:
+    """1レース分の払戻を取得。戻り値: (race_id, serializable_dict_or_None, status)"""
+    race_id = race["race_id"]
+    kcd = race["kcd"]
+    date = race["date"]
+    race_no = race["race_no"]
+    try:
+        jdata = fetch_race_page(kcd, date, race_no)
+        if not jdata:
+            time.sleep(sleep_sec)
+            return race_id, None, "nodata"
+        payouts = get_payout_odds(jdata)
+        if not payouts:
+            time.sleep(sleep_sec)
+            return race_id, None, "nopayout"
+        serializable = {
+            bt: {tuple_to_key(k): v for k, v in d.items()}
+            for bt, d in payouts.items()
+        }
+        time.sleep(sleep_sec)
+        return race_id, serializable, "ok"
+    except Exception as e:
+        time.sleep(sleep_sec)
+        return race_id, None, f"err:{e}"
+
+
+def fetch_and_store(
+    races: list[dict],
+    existing: dict,
+    overwrite: bool,
+    workers: int = 8,
+    sleep_sec: float = 0.1,
+) -> dict:
+    """払戻金を並列取得してodds_dataに追記する"""
     results = dict(existing)
+    lock = threading.Lock()
     total = len(races)
-    ok = skip = fail = 0
+    counters = {"ok": 0, "skip": 0, "fail": 0, "done": 0}
 
-    for i, race in enumerate(races, 1):
-        race_id = race["race_id"]
-        kcd = race["kcd"]
-        date = race["date"]
-        race_no = race["race_no"]
-        venue_name = race["venue_name"]
-        prefix = f"[{i}/{total}] {venue_name} {date} R{race_no:02d}"
+    # スキップ対象を除外
+    to_fetch = []
+    for race in races:
+        if not overwrite and race["race_id"] in results and "trifecta" in results[race["race_id"]]:
+            counters["skip"] += 1
+        else:
+            to_fetch.append(race)
 
-        if not overwrite and race_id in results and "trifecta" in results[race_id]:
-            skip += 1
-            continue
+    print(f"  取得対象: {len(to_fetch)}件  スキップ: {counters['skip']}件  並列数: {workers}")
+    if not to_fetch:
+        print("  全件スキップ済み")
+        return results
 
-        try:
-            jdata = fetch_race_page(kcd, date, race_no)
-            if not jdata:
-                print(f"  {prefix} → データなし")
-                fail += 1
-                time.sleep(0.5)
-                continue
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_fetch_one, race, sleep_sec): race for race in to_fetch}
+        for fut in as_completed(futures):
+            race_id, data, status = fut.result()
+            race = futures[fut]
+            venue = race["venue_name"]
+            date = race["date"]
+            rno = race["race_no"]
 
-            payouts = get_payout_odds(jdata)
-            if not payouts:
-                print(f"  {prefix} → 払戻なし（未完了または非公開）")
-                fail += 1
-                time.sleep(0.5)
-                continue
+            with lock:
+                counters["done"] += 1
+                done = counters["done"]
+                if status == "ok":
+                    results[race_id] = data
+                    counters["ok"] += 1
+                    bet_summary = " ".join(f"{bt}:{len(d)}" for bt, d in data.items())
+                    print(f"  [{done}/{len(to_fetch)}] {venue} {date} R{rno:02d} → OK  {bet_summary}")
+                elif status == "nodata":
+                    counters["fail"] += 1
+                elif status == "nopayout":
+                    counters["fail"] += 1
+                else:
+                    counters["fail"] += 1
+                    print(f"  [{done}/{len(to_fetch)}] {venue} {date} R{rno:02d} → {status}")
 
-            serializable = {}
-            for bt, d in payouts.items():
-                serializable[bt] = {tuple_to_key(k): v for k, v in d.items()}
+                if done % 200 == 0:
+                    save_odds(results)
+                    print(f"  -- 中間保存 ({done}/{len(to_fetch)}) ok={counters['ok']} skip={counters['skip']} fail={counters['fail']} --")
 
-            results[race_id] = serializable
-            bet_summary = " ".join(f"{bt}:{len(d)}" for bt, d in payouts.items())
-            print(f"  {prefix} → OK  {bet_summary}")
-            ok += 1
-
-        except Exception as e:
-            print(f"  {prefix} → エラー: {e}")
-            fail += 1
-
-        time.sleep(0.4)
-
-        if i % 50 == 0:
-            save_odds(results)
-            print(f"  -- 中間保存 ({i}/{total}) ok={ok} skip={skip} fail={fail} --")
-
-    print(f"\nok={ok} skip={skip} fail={fail}")
+    print(f"\nok={counters['ok']} skip={counters['skip']} fail={counters['fail']}")
     return results
 
 
@@ -131,6 +165,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="特定日のみ取得 (YYYYMMDD)")
     parser.add_argument("--overwrite", action="store_true", help="既存データも再取得")
+    parser.add_argument("--workers", type=int, default=8, help="並列数（デフォルト: 8）")
+    parser.add_argument("--sleep", type=float, default=0.1, help="リクエスト間隔秒（デフォルト: 0.1）")
     args = parser.parse_args()
 
     records = load_raw()
@@ -142,7 +178,8 @@ def main():
         print(f"絞り込み: {args.date}")
     print()
 
-    results = fetch_and_store(races, existing, args.overwrite)
+    results = fetch_and_store(races, existing, args.overwrite,
+                              workers=args.workers, sleep_sec=args.sleep)
     save_odds(results)
 
     new_count = len(results) - len(existing)
