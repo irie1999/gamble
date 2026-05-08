@@ -1374,6 +1374,62 @@ def _build_races(booster, feature_cols, df_feat, bet_types, odds_data: dict | No
     return races
 
 
+def _print_prob_breakdown(session) -> None:
+    """組合確率帯ごとのROI分析 → 有効な確率閾値を特定"""
+    bets = session.bets
+    if not bets:
+        return
+
+    # 確率帯の定義
+    bands = [
+        ("3%未満",   0.00, 0.03),
+        ("3〜5%",    0.03, 0.05),
+        ("5〜7%",    0.05, 0.07),
+        ("7〜10%",   0.07, 0.10),
+        ("10〜15%",  0.10, 0.15),
+        ("15%以上",  0.15, 1.00),
+    ]
+
+    print("\n" + "=" * 72)
+    print(" 組合確率帯別 ROI分析（どの確率閾値が有効か）")
+    print("=" * 72)
+    print(f"{'確率帯':<12} {'ベット':>6} {'的中':>5} {'的中率':>7} {'賭け金':>10} {'回収':>10} {'ROI':>8}  判定")
+    print("-" * 72)
+
+    for label, lo, hi in bands:
+        subset = [b for b in bets if lo <= b.predicted_prob < hi]
+        if not subset:
+            continue
+        n = len(subset)
+        wins = [b for b in subset if b.win_flag]
+        wagered = sum(b.bet_amount for b in subset)
+        returned = sum(b.actual_payout for b in subset)
+        roi = (returned - wagered) / wagered if wagered > 0 else 0.0
+        hit = len(wins) / n
+        mark = "✓ 黒字" if roi > 0 else "✗ 赤字"
+        print(f"{label:<12} {n:>6} {len(wins):>5} {hit:>7.1%} {wagered:>10,.0f} {returned:>10,.0f} {roi:>+8.1%}  {mark}")
+
+    print("-" * 72)
+
+    # 累積閾値分析（prob ≥ X の場合のROI）
+    thresholds = [0.03, 0.05, 0.07, 0.08, 0.09, 0.10, 0.12, 0.15]
+    print(f"\n【累積閾値分析】組合確率 ≥ X のベットだけに絞った場合のROI")
+    print(f"{'閾値':>8} {'ベット':>7} {'的中':>6} {'的中率':>8} {'ROI':>9}  判定")
+    print("-" * 50)
+    for thr in thresholds:
+        subset = [b for b in bets if b.predicted_prob >= thr]
+        if len(subset) < 10:
+            continue
+        wins = [b for b in subset if b.win_flag]
+        wagered = sum(b.bet_amount for b in subset)
+        returned = sum(b.actual_payout for b in subset)
+        roi = (returned - wagered) / wagered if wagered > 0 else 0.0
+        hit = len(wins) / len(subset)
+        mark = "✓ 黒字" if roi > 0 else "✗ 赤字"
+        print(f"{thr:>7.0%} {len(subset):>7} {len(wins):>6} {hit:>8.1%} {roi:>+9.1%}  {mark}")
+    print("=" * 72)
+
+
 def _backtest_real(args, bet_types):
     booster, feature_cols, meta = load_model()
 
@@ -1415,6 +1471,7 @@ def _backtest_real(args, bet_types):
                                line_leader_only=getattr(args, "line_leader", False),
                                strategy=strategy)
     print_session_report(session)
+    _print_prob_breakdown(session)
     _save_results(session, html=getattr(args, "html", False))
 
 
