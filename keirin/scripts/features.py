@@ -217,7 +217,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 FEATURE_COLS = [
-    "car_no",
+    # car_no は除外（内枠バイアスが強すぎて常に1-2-3予測になるため）
+    # is_inner_car / line_rank_in_line で位置優位性を残す
     "class_enc",
     "kyosoten",
     "kyosoten_rel",
@@ -241,7 +242,7 @@ FEATURE_COLS = [
     "top3_rate_rel",
     "is_solo",
     "s1_leader",
-    # --- 新規：時系列特徴量 ---
+    # --- 時系列特徴量 ---
     "recent_win_3",
     "recent_win_5",
     "recent_top3_5",
@@ -252,12 +253,12 @@ FEATURE_COLS = [
     "recent_win_5_rel",
     "venue_win_rate_rel",
     "recent_avg_rank_rel",
-    # --- 新規：競走得点トレンド・競争難易度 ---
+    # --- 競走得点トレンド・競争難易度 ---
     "recent_kyosoten_5",
     "kyosoten_trend",
     "race_competitiveness",
     "kyosoten_vs_top",
-    # --- 新規：特徴量交互作用 ---
+    # --- 特徴量交互作用 ---
     "leader_recent_form",
     "kyosoten_edge",
     "venue_leader",
