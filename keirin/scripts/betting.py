@@ -254,6 +254,69 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.30,
         "fixed_amount": 100,
     },
+    # ---- 3連単 パラメータチューニングバリアント ----
+    # 命名規則: tf_{min_top_prob%}_{max_combos}c
+    # min_combo_prob=0.02 (Harville確率2%以上) は3連単として現実的な下限
+    "tf_no_1c": {
+        "description": "[tune] 3連単: フィルターなし 1点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "fixed_amount": 100,
+    },
+    "tf_50_1c": {
+        "description": "[tune] 3連単: top50% 1点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "min_top_prob": 0.50, "fixed_amount": 100,
+    },
+    "tf_55_1c": {
+        "description": "[tune] 3連単: top55% 1点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "min_top_prob": 0.55, "fixed_amount": 100,
+    },
+    "tf_60_1c": {
+        "description": "[tune] 3連単: top60% 1点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
+    "tf_65_1c": {
+        "description": "[tune] 3連単: top65% 1点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "min_top_prob": 0.65, "fixed_amount": 100,
+    },
+    "tf_60_2c": {
+        "description": "[tune] 3連単: top60% 2点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 2, 20)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
+    "tf_60_3c": {
+        "description": "[tune] 3連単: top60% 3点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 3, 20)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
+    "tf_55_2c": {
+        "description": "[tune] 3連単: top55% 2点",
+        "bet_types": ["trifecta"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 2, 20)},
+        "min_top_prob": 0.55, "fixed_amount": 100,
+    },
+    "tf_60_line1c": {
+        "description": "[tune] 3連単: top60% 1点 ライン先頭固定",
+        "bet_types": ["trifecta"], "line_leader_only": True,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
+    "tf_wide_60": {
+        "description": "[tune] 3連単+ワイド同時: top60% 各1点ヘッジ",
+        "bet_types": ["trifecta", "wide"], "line_leader_only": False,
+        "bet_config": {"trifecta": (0.02, 0, 1, 20), "wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
     # ---- ボックス戦略 ----
     # box_n_cars: 予測上位N車を選び、全順列(3連単)or全組合(3連複)を買う
     "trifecta_box3": {
