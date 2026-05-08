@@ -189,6 +189,24 @@ STRATEGIES: dict[str, dict] = {
         "bet_config": {"wide": (0.25, 0, 1, 10)},
         "min_top_prob": 0.50, "fixed_amount": 100,
     },
+    "ws_55_1c": {
+        "description": "[tune] wide: top55% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.55, "fixed_amount": 100,
+    },
+    "ws_60_1c": {
+        "description": "[tune] wide: top60% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.60, "fixed_amount": 100,
+    },
+    "ws_65_1c": {
+        "description": "[tune] wide: top65% 1点",
+        "bet_types": ["wide"], "line_leader_only": False,
+        "bet_config": {"wide": (0.20, 0, 1, 10)},
+        "min_top_prob": 0.65, "fixed_amount": 100,
+    },
     "combo_sharp": {
         "description": "3連複＋ワイド厳選：確信レースで的中率と配当を両立",
         "bet_types": ["trio", "wide"],
