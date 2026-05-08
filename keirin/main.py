@@ -1418,14 +1418,11 @@ def cmd_detail(args):
 
 def _save_detail_html(session, strategy_name: str, description: str, auc: float, test_days: int, bankroll: float) -> None:
     """全ベット明細 + 累積損益グラフをHTMLで保存"""
-    # 累積損益データ（ベット順）
+    # 累積損益データ（ベット順）- actual_payoutで正確に計算
     cumulative = []
     running = 0.0
     for b in session.bets:
-        if b.win_flag:
-            running += b.bet_amount * b.return_odds - b.bet_amount
-        else:
-            running -= b.bet_amount
+        running += b.actual_payout - b.bet_amount  # 払戻なし返金は±0
         cumulative.append(running)
 
     cumulative_json = json.dumps(cumulative)
@@ -1435,9 +1432,10 @@ def _save_detail_html(session, strategy_name: str, description: str, auc: float,
     for i, b in enumerate(session.bets):
         sel_str = "-".join(str(s) for s in b.selections)
         bt_name = BET_TYPE_NAMES.get(b.bet_type, b.bet_type)
+        is_refund = not b.win_flag and b.actual_payout == b.bet_amount
         win_cls = "win" if b.win_flag else "lose"
-        win_str = f"◎ {b.return_odds:.1f}倍" if b.win_flag else "✗"
-        payout = b.bet_amount * b.return_odds if b.win_flag else 0
+        win_str = f"◎ {b.return_odds:.1f}倍" if b.win_flag else ("返金" if is_refund else "✗")
+        payout = b.actual_payout
         net = payout - b.bet_amount
         net_str = f"{net:+,.0f}"
         net_cls = "pos" if net > 0 else "neg"

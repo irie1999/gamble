@@ -314,6 +314,7 @@ class BettingResult:
     expected_value: float
     win_flag: bool = False
     return_odds: float = 0.0  # 実際の払戻倍率（当選時に設定）
+    actual_payout: float = 0.0  # 実際の受取額（loss=0, win=bet*odds, refund=bet）
 
 
 @dataclass
@@ -557,14 +558,17 @@ def simulate_session(
                     actual = payouts_all.get(bt, {}).get(bet.selections)
                     if actual and actual > 1.0:
                         bet.return_odds = actual
-                        bankroll += bet.bet_amount * actual
+                        bet.actual_payout = bet.bet_amount * actual
+                        bankroll += bet.actual_payout
                         session.wins += 1
                     else:
-                        # 払戻データなし → 的中としてカウントしない
-                        bankroll += bet.bet_amount  # 返金扱い
+                        # 払戻データなし → 的中としてカウントしない（返金扱い）
+                        bet.actual_payout = bet.bet_amount
+                        bankroll += bet.bet_amount
                         bet.win_flag = False
                         session.losses += 1
                 else:
+                    bet.actual_payout = 0.0
                     session.losses += 1
 
                 session.bets.append(bet)
