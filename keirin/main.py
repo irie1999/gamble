@@ -510,6 +510,9 @@ def cmd_predict(args):
         if finish_order:
             r["result"] = "当たり" if won else "はずれ"
             r["payout"] = payout_odds
+            # 実際の着順の3連単オッズを保存
+            finish_key = tuple(finish_order[:3])
+            r["finish_payout"] = payouts.get("trifecta", {}).get(finish_key, 0.0)
 
     signal_rows.sort(key=lambda x: x["top_prob"], reverse=True)
 
@@ -624,8 +627,13 @@ def _save_signal_html(
         pred_str = rep["pred_str"]
         bet_type = rep["bet_type"]
         finish = rep.get("finish_order", [])
-        finish_str = " → ".join(f"<strong>{x}</strong>番" for x in finish[:3]) if finish else ""
-        finish_block = f'<div class="finish-order">実際の着順: {finish_str}</div>' if finish_str else ""
+        finish_payout = max((r.get("finish_payout", 0.0) for r in rows), default=0.0)
+        if finish:
+            finish_str = " → ".join(f"<strong>{x}</strong>番" for x in finish[:3])
+            odds_tag = f' <span class="finish-odds">{finish_payout:.1f}倍</span>' if finish_payout > 0 else ""
+            finish_block = f'<div class="finish-order">実際の着順: {finish_str}{odds_tag}</div>'
+        else:
+            finish_block = ""
 
         # レース全体の結果判定
         race_wins = [r for r in rows if r.get("result") == "当たり"]
@@ -677,6 +685,7 @@ def _save_signal_html(
     html = f"""<!DOCTYPE html>
 <html lang="ja">
 <head><meta charset="UTF-8"><title>競輪シグナル {date_str}</title>
+<meta http-equiv="refresh" content="60">
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
   body{{font-family:'Segoe UI',Meiryo,sans-serif;background:#0b1120;color:#e2e8f0;min-height:100vh}}
@@ -702,6 +711,7 @@ def _save_signal_html(
   .pred-order{{font-size:.78rem;color:#64748b;margin-bottom:.4rem}}
   .finish-order{{font-size:.82rem;color:#94a3b8;margin-bottom:.6rem;padding:.3rem .6rem;background:#0f172a;border-radius:6px;display:inline-block}}
   .finish-order strong{{color:#e2e8f0}}
+  .finish-odds{{color:#fbbf24;font-weight:700;margin-left:.4rem;font-size:.88rem}}
   /* Combo grid */
   .combos{{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.5rem}}
   .combo{{border:1px solid #334155;border-radius:8px;padding:.35rem .7rem;display:flex;align-items:center;gap:.5rem;min-width:160px}}
@@ -740,7 +750,8 @@ def _save_signal_html(
 </div>
 </body></html>"""
 
-    path = RESULTS_DIR / f"signal_{date_str}.html"
+    # 固定ファイル名に書き込む → 既存タブをリロードするだけで最新表示
+    path = RESULTS_DIR / "signal_today.html"
     path.write_text(html, encoding="utf-8")
     _open_html(path)
 
