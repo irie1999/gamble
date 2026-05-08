@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.ipynb_checkpoints/
+
+# Data and model artifacts (keep directory structure via .gitkeep)
+data/raw/*
+data/processed/*
+data/models/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/models/.gitkeep
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
