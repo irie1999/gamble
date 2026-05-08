@@ -184,7 +184,7 @@ def cmd_compare(args):
 
     results.sort(key=lambda x: x["roi"], reverse=True)
     best = results[0]["name"] if results else "-"
-    print(f"\n最良戦略: {best}  ※オッズは推定値のためROIの絶対値は参考程度\n")
+    print(f"\n最良戦略: {best}\n")
 
     if args.html:
         _save_compare_html(results, mean_auc, test_days, args.bankroll, mode_label)
@@ -272,7 +272,7 @@ def _save_compare_html(results: list[dict], auc: float, test_days: int, bankroll
     </table>
   </div>
   <div class="warn">
-    ⚠ オッズは過去勝率ベースの推定値です。実際の市場オッズとは異なります。ROIの絶対値より各戦略の相対比較にご活用ください。
+    ⚠ バックテストは実際の払戻データを使用。ただし払戻未取得レースは結果から除外されます。
   </div>
 </div></body></html>"""
 
