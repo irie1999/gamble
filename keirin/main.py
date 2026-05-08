@@ -314,7 +314,7 @@ def _predict_probs(booster, feature_cols, meta, race_df: pd.DataFrame) -> np.nda
 
 
 def cmd_predict(args):
-    """明日の出走表からベッティングシグナルを生成（デフォルト戦略: ws_60_1c）"""
+    """明日の出走表からベッティングシグナルを生成（デフォルト戦略: tf_65_1c）"""
     print("モデルを読み込み中...", flush=True)
     booster, feature_cols, meta = load_model()
     mean_auc = meta.get("metrics", {}).get("cv_auc", meta.get("metrics", {}).get("mean_auc", 0))
@@ -328,7 +328,7 @@ def cmd_predict(args):
     else:
         date_str = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
 
-    strategy_name = getattr(args, "strategy", "ws_60_1c") or "ws_60_1c"
+    strategy_name = getattr(args, "strategy", "tf_65_1c") or "tf_65_1c"
     strat = STRATEGIES.get(strategy_name)
     if strat is None:
         print(f"戦略 '{strategy_name}' が見つかりません。利用可能: {', '.join(STRATEGIES)}")
@@ -1805,8 +1805,8 @@ def main():
                         help="学習モデル種別 (default: binary)")
     p_pipe.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                         help="テストデータの割合（デフォルト: 0.3=30%%）")
-    p_pipe.add_argument("--train-days", dest="train_days", type=int, default=None,
-                        help="直近N日のみ使用して学習（例: --train-days 365）")
+    p_pipe.add_argument("--train-days", dest="train_days", type=int, default=365,
+                        help="直近N日のみ使用して学習（デフォルト: 365）")
 
     p_mc = sub.add_parser("model-compare", help="4モデル×全戦略を一括比較")
     p_mc.add_argument("--bankroll", type=float, default=50000)
@@ -1822,8 +1822,8 @@ def main():
     sub.add_parser("demo", help="デモ実行")
 
     p_det = sub.add_parser("detail", help="指定戦略の全ベット明細をHTMLで出力")
-    p_det.add_argument("--strategy", type=str, default="ws_60_1c",
-                       help="戦略名（デフォルト: ws_60_1c）: wide_only,trio_wide,balanced,...,ws_60_1c,combo_sharp")
+    p_det.add_argument("--strategy", type=str, default="tf_65_1c",
+                       help="戦略名（デフォルト: tf_65_1c）: wide_only,...,ws_60_1c,tf_65_1c,combo_sharp")
     p_det.add_argument("--bankroll", type=float, default=50000)
     p_det.add_argument("--test-ratio", dest="test_ratio", type=float, default=0.3,
                        help="テストデータの割合（デフォルト: 0.3）")
@@ -1834,13 +1834,13 @@ def main():
     p_merge = sub.add_parser("merge-data", help="別のraw_data JSONをraw_data.jsonにマージ")
     p_merge.add_argument("--file", required=True, help="マージするJSONファイルのパス")
 
-    p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日・ws_60_1c戦略）")
+    p_pred = sub.add_parser("predict", help="シグナル生成（デフォルト: 明日・tf_65_1c戦略）")
     p_pred.add_argument("--date", type=str, default=None,
                         help="対象日 YYYYMMDD（デフォルト: 明日）")
     p_pred.add_argument("--tomorrow", action="store_true", help="明日を対象にする（デフォルト動作）")
     p_pred.add_argument("--today", action="store_true", help="今日を対象にする")
-    p_pred.add_argument("--strategy", type=str, default="ws_60_1c",
-                        help="戦略名（デフォルト: ws_60_1c）選択肢: wide_only,trio_wide,...,ws_60_1c,combo_sharp")
+    p_pred.add_argument("--strategy", type=str, default="tf_65_1c",
+                        help="戦略名（デフォルト: tf_65_1c）選択肢: wide_only,trio_wide,...,tf_65_1c,combo_sharp")
     p_pred.add_argument("--bankroll", type=float, default=50000,
                         help="資金（デフォルト: 50000）")
     p_pred.add_argument("--html", action="store_true", help="HTMLレポートを生成してブラウザで開く")
