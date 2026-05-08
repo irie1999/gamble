@@ -54,6 +54,7 @@ ODDS_KAKESHIKI = {
     "place":    "hukushyo",
     "exacta":   "2rentan",
     "quinella": "2hukurentan",
+    "wide":     "wide",
     "trifecta": "3rentan",
     "trio":     "3hukurentan",
 }

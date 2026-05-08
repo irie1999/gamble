@@ -571,8 +571,21 @@ def _save_signal_html(
         result = r.get("result", "未確定")
         payout = r.get("payout", 0.0)
         sel = r["selections"]
-        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
-        prob_str = f"{r['pred_prob']:.1%}" if r["pred_prob"] > 0 else "-"
+        pred_prob = r["pred_prob"]
+
+        # オッズ表示: 実オッズ → なければ推定オッズ(控除率25%で逆算)
+        if r["odds"] > 0:
+            odds_str = f"{r['odds']:.1f}倍"
+            odds_cls = "tag-odds"
+        elif pred_prob > 0:
+            est = 0.75 / pred_prob
+            odds_str = f"≈{est:.1f}倍"
+            odds_cls = "tag-odds-est"
+        else:
+            odds_str = "-"
+            odds_cls = "tag-odds"
+
+        prob_str = f"{pred_prob:.1%}" if pred_prob > 0 else "-"
 
         nums = sel.strip("[]").replace(" ", "")
         if result == "当たり":
@@ -585,7 +598,7 @@ def _save_signal_html(
         return f"""<div class="combo" style="background:{bg};border-color:{border}">
           <div class="combo-nums">{nums}</div>
           <div class="combo-meta">
-            <span class="tag-odds">{odds_str}</span>
+            <span class="{odds_cls}">{odds_str}</span>
             <span class="tag-prob">{prob_str}</span>
             {badge}
           </div>
@@ -682,6 +695,7 @@ def _save_signal_html(
   .combo-nums{{font-size:.95rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em}}
   .combo-meta{{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}}
   .tag-odds{{font-size:.75rem;color:#94a3b8;background:#0f172a;border-radius:4px;padding:.1rem .35rem}}
+  .tag-odds-est{{font-size:.75rem;color:#64748b;background:#0f172a;border-radius:4px;padding:.1rem .35rem;border:1px dashed #334155}}
   .tag-prob{{font-size:.75rem;color:#64748b}}
   /* Badges */
   .badge{{font-size:.72rem;font-weight:700;border-radius:5px;padding:.15rem .45rem}}
@@ -709,7 +723,7 @@ def _save_signal_html(
 
   {cards_html}
 
-  <div class="warn">⚠ 参考オッズは取得できない場合「-」表示。実際のオッズを確認してから購入してください。</div>
+  <div class="warn">⚠ オッズについて：実オッズが取得できた場合は「X.X倍」、取得できない場合は確率から推定した「≈X.X倍」（破線枠）を表示します。実際のオッズはkeirin.jpで確認してから購入してください。</div>
 </div>
 </body></html>"""
 
