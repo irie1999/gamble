@@ -514,7 +514,8 @@ def cmd_predict(args):
             finish_key = tuple(finish_order[:3])
             r["finish_payout"] = payouts.get("trifecta", {}).get(finish_key, 0.0)
 
-    signal_rows.sort(key=lambda x: x["top_prob"], reverse=True)
+    # EV降順でソート（オッズがない場合はコンボ確率を代理指標）
+    signal_rows.sort(key=lambda x: x["ev"], reverse=True)
 
     # ---- 損益サマリー計算 ----
     decided = [r for r in signal_rows if r["result"] != "未確定"]
@@ -583,25 +584,25 @@ def _save_signal_html(
     profit_d = total_return_d - total_bet_d
     win_rate = len(wins) / len(decided) if decided else 0.0
 
-    # レース単位にグループ化（top_prob降順を維持）
-    seen_order: list[tuple] = []
+    # レース単位にグループ化 → レースのベストEV降順で並べる
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in signal_rows:
         key = (r["venue"], r["race_no"])
-        if key not in groups:
-            seen_order.append(key)
         groups[key].append(r)
+    seen_order = sorted(groups.keys(), key=lambda k: max(r.get("ev", 0) for r in groups[k]), reverse=True)
 
     def combo_badge(r: dict) -> str:
         result = r.get("result", "未確定")
         payout = r.get("payout", 0.0)
         sel = r["selections"]
         pred_prob = r["pred_prob"]
+        ev = r.get("ev", pred_prob)
+        has_odds = r["odds"] > 0
 
-        odds_str = f"{r['odds']:.1f}倍" if r["odds"] > 0 else "-"
-        odds_cls = "tag-odds"
-
-        prob_str = f"{pred_prob:.1%}" if pred_prob > 0 else "-"
+        odds_str = f"{r['odds']:.1f}倍" if has_odds else "-"
+        ev_str = f"EV {ev:.2f}" if has_odds else f"組合 {pred_prob:.1%}"
+        # EVが高いほど強調色
+        ev_color = "#4ade80" if ev >= 1.5 else ("#fbbf24" if ev >= 1.0 else "#94a3b8")
 
         nums = sel.strip("[]").replace(" ", "")
         if result == "当たり":
@@ -614,8 +615,9 @@ def _save_signal_html(
         return f"""<div class="combo" style="background:{bg};border-color:{border}">
           <div class="combo-nums">{nums}</div>
           <div class="combo-meta">
-            <span class="{odds_cls}">{odds_str}</span>
-            <span class="tag-prob">{prob_str}</span>
+            <span class="tag-odds">{odds_str}</span>
+            <span class="tag-prob">{pred_prob:.1%}</span>
+            <span class="tag-ev" style="color:{ev_color}">{ev_str}</span>
             {badge}
           </div>
         </div>"""
@@ -648,7 +650,13 @@ def _save_signal_html(
             card_border = "#334155"
             status_label = '<span class="badge pending">未確定</span>'
 
-        combos_html = "".join(combo_badge(r) for r in rows)
+        # コンボをEV降順にソート
+        sorted_rows = sorted(rows, key=lambda x: x.get("ev", 0), reverse=True)
+        best_ev = sorted_rows[0].get("ev", 0) if sorted_rows else 0
+        has_odds = any(r["odds"] > 0 for r in rows)
+        ev_label = f"EV {best_ev:.2f}" if has_odds else f"組合 {best_ev:.1%}"
+        ev_color = "#4ade80" if best_ev >= 1.5 else ("#fbbf24" if best_ev >= 1.0 else "#94a3b8")
+        combos_html = "".join(combo_badge(r) for r in sorted_rows)
 
         return f"""
     <div class="race-card" style="border-color:{card_border}">
@@ -662,6 +670,8 @@ def _save_signal_html(
         <div class="race-prob">
           <span class="prob-label">1位予測</span>
           <span class="prob-value">{top_prob:.1%}</span>
+          <span class="prob-label" style="margin-left:.8rem">最良EV</span>
+          <span class="prob-value" style="color:{ev_color}">{ev_label}</span>
         </div>
       </div>
       <div class="pred-order">{pred_str}</div>
@@ -718,8 +728,8 @@ def _save_signal_html(
   .combo-nums{{font-size:.95rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em}}
   .combo-meta{{display:flex;align-items:center;gap:.3rem;flex-wrap:wrap}}
   .tag-odds{{font-size:.75rem;color:#94a3b8;background:#0f172a;border-radius:4px;padding:.1rem .35rem}}
-
   .tag-prob{{font-size:.75rem;color:#64748b}}
+  .tag-ev{{font-size:.78rem;font-weight:700;background:#0f172a;border-radius:4px;padding:.1rem .4rem}}
   /* Badges */
   .badge{{font-size:.72rem;font-weight:700;border-radius:5px;padding:.15rem .45rem}}
   .badge.win{{background:#14532d;color:#4ade80}}
