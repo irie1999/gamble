@@ -1751,6 +1751,8 @@ def _save_results(session, filename: str = "backtest_result.json", html: bool = 
                 "bet_amount": b.bet_amount,
                 "expected_value": b.expected_value,
                 "win_flag": bool(b.win_flag),
+                "return_odds": b.return_odds,
+                "actual_payout": b.actual_payout,
             }
             for b in session.bets
         ],

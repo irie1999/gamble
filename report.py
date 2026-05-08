@@ -46,14 +46,18 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
     win_rate = wins / total if total > 0 else 0
     total_bet = session_data["total_bet"]
 
-    # 資産推移の計算（win_flag を使用）
+    # 資産推移の計算（actual_payout で正確に計算）
     equity_labels = ["開始"]
     equity_values = [initial]
     running = initial
     for b in bets:
-        running -= b["bet_amount"]
-        if b.get("win_flag", False):
-            running += b["bet_amount"] * b["odds"]
+        actual = b.get("actual_payout", None)
+        if actual is None:
+            # 旧形式フォールバック: win_flag + return_odds
+            payout = b["bet_amount"] * b.get("return_odds", b["odds"]) if b.get("win_flag") else 0.0
+        else:
+            payout = actual
+        running += payout - b["bet_amount"]
         equity_labels.append(b["race_id"])
         equity_values.append(round(running, 0))
 
@@ -63,13 +67,27 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
     bet_rows = ""
     for i, b in enumerate(bets):
         is_win = b.get("win_flag", False)
+        actual_payout = b.get("actual_payout", None)
+        return_odds = b.get("return_odds", 0.0)
+        bet_amount = b["bet_amount"]
+
+        # 払戻・損益の計算
+        if actual_payout is not None:
+            is_refund = (not is_win) and actual_payout == bet_amount
+            pnl = actual_payout - bet_amount
+        else:
+            is_refund = False
+            pnl = bet_amount * (b["odds"] - 1) if is_win else -bet_amount
+
         row_class = "win-row" if is_win else ""
-        result_badge = (
-            '<span class="badge win">的中</span>' if is_win
-            else '<span class="badge loss">外れ</span>'
-        )
-        pnl = b["bet_amount"] * (b["odds"] - 1) if is_win else -b["bet_amount"]
-        pnl_color = "#4ade80" if pnl >= 0 else "#f87171"
+        if is_win:
+            result_badge = f'<span class="badge win">的中 {return_odds:.1f}倍</span>'
+        elif is_refund:
+            result_badge = '<span class="badge" style="background:rgba(250,204,21,0.15);color:#fbbf24">返金</span>'
+        else:
+            result_badge = '<span class="badge loss">外れ</span>'
+
+        pnl_color = "#4ade80" if pnl > 0 else ("#94a3b8" if pnl == 0 else "#f87171")
         bet_rows += f"""
         <tr class="{row_class}">
           <td>{i+1}</td>
@@ -77,11 +95,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
           <td>{b['bet_type']}</td>
           <td>{b['selections']}</td>
           <td>{b['predicted_prob']:.3f}</td>
-          <td>{b['implied_prob']:.3f}</td>
-          <td><span class="edge {'pos' if b['edge']>=0 else 'neg'}">{b['edge']:+.3f}</span></td>
-          <td>{b['odds']:.1f}倍</td>
           <td>{b['bet_amount']:,}円</td>
-          <td>{b['expected_value']:.3f}</td>
           <td>{result_badge}</td>
           <td style="color:{pnl_color};font-weight:600">{pnl:+,.0f}円</td>
         </tr>"""
@@ -206,8 +220,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
         <thead>
           <tr>
             <th>#</th><th>レースID</th><th>種別</th><th>選択</th>
-            <th>予測P</th><th>市場P</th><th>エッジ</th>
-            <th>オッズ</th><th>賭け金</th><th>EV</th><th>結果</th><th>損益</th>
+            <th>予測P</th><th>賭け金</th><th>結果</th><th>損益</th>
           </tr>
         </thead>
         <tbody>{bet_rows}</tbody>
@@ -274,25 +287,30 @@ new Chart(wl, {{
 
 
 def _odds_breakdown_html(bets: list[dict]) -> str:
-    """オッズ帯別の的中率バーチャート"""
+    """払戻倍率帯別の的中数バーチャート（実際の払戻倍率を使用）"""
     bands = [
-        ("〜2倍", 0, 2),
-        ("2〜5倍", 2, 5),
-        ("5〜10倍", 5, 10),
-        ("10〜20倍", 10, 20),
-        ("20倍〜", 20, 9999),
+        ("〜5倍", 0, 5),
+        ("5〜15倍", 5, 15),
+        ("15〜30倍", 15, 30),
+        ("30〜100倍", 30, 100),
+        ("100倍〜", 100, 9999),
     ]
-    rows = ""
+    wins = [b for b in bets if b.get("win_flag", False)]
+    if not wins:
+        return "<p style='color:#64748b;font-size:0.85rem'>的中なし</p>"
+
+    total_wins = len(wins)
+    rows = f"<p style='color:#94a3b8;font-size:0.8rem;margin-bottom:0.8rem'>的中{total_wins}件の払戻倍率分布</p>"
     for label, lo, hi in bands:
-        subset = [b for b in bets if lo <= b["odds"] < hi]
+        subset = [b for b in wins if lo <= b.get("return_odds", 0) < hi]
         if not subset:
             continue
-        w = sum(1 for b in subset if b.get("win_flag", False))
-        rate = w / len(subset)
+        avg_odds = sum(b.get("return_odds", 0) for b in subset) / len(subset)
+        rate = len(subset) / total_wins
         rows += f"""
-        <div class="bar-label"><span>{label}</span><span>{w}/{len(subset)} ({rate:.0%})</span></div>
+        <div class="bar-label"><span>{label} (平均{avg_odds:.1f}倍)</span><span>{len(subset)}件 ({rate:.0%})</span></div>
         <div class="bar-track"><div class="bar-fill" style="width:{rate*100:.0f}%;background:#60a5fa"></div></div>"""
-    return rows or "<p style='color:#64748b;font-size:0.85rem'>データなし</p>"
+    return rows
 
 
 def save_and_open(
