@@ -99,6 +99,14 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
         "fixed_amount": 100,
     },
+    "tf_9pct": {
+        "description": "3連単 組合確率9%以上限定：バックテスト最適閾値",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.09, 0, 2, 20)},
+        "min_top_prob": 0.30,
+        "fixed_amount": 100,
+    },
     "tf_s2_45": {
         "description": "3連単2点 絞り込み版：top45%以上の確信レースのみ 2点",
         "bet_types": ["trifecta"],
