@@ -46,12 +46,13 @@ def _normalize(text: str) -> str:
 
 
 def _detect_date(text: str) -> Optional[str]:
-    """日付検出。'YYYY年M月D日' / 'YY/MM/DD' / 'YYYY/MM/DD' に対応。"""
+    """日付検出。'YYYY年M月D日' / 'YY/MM/DD' / 'YYYY/ M/D'（空白入り） に対応。"""
     m = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
     if m:
         y, mo, d = m.groups()
         return f"{int(y):04d}{int(mo):02d}{int(d):02d}"
-    m = re.search(r"(\d{2,4})/(\d{1,2})/(\d{1,2})", text)
+    # K ファイルは "2024/ 8/15" のように単桁の月日にスペースが入ることがある
+    m = re.search(r"(\d{2,4})/\s*(\d{1,2})/\s*(\d{1,2})", text)
     if m:
         y, mo, d = m.groups()
         yyyy = int(y) if int(y) > 1900 else (2000 + int(y) if int(y) < 80 else 1900 + int(y))
