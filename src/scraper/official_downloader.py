@@ -5,14 +5,20 @@ URL（公式・古くから安定）:
     成績:  http://www1.mbrace.or.jp/od2/K/{YYYYMM}/k{YYMMDD}.lzh
 
 LZH内部のテキストはShift-JISの固定幅。1日1ファイルで全24場・全レースが入る。
+
+解凍バックエンド（自動検出・優先度順）:
+    1. lhafile (Python, 推奨)
+    2. 7z.exe / 7z (Windows: 7-Zip / Linux: p7zip)
+    3. unar (macOS: brew install unar)
 """
 from __future__ import annotations
 
 import io
+import shutil
+import subprocess
+import tempfile
 from datetime import date
 from pathlib import Path
-
-import lhafile  # type: ignore
 
 from src.scraper.http_client import HttpClient
 from src.utils.config import RAW_DIR
@@ -31,15 +37,98 @@ def result_url(d: date) -> str:
     return f"{OFFICIAL_BASE}/K/{d:%Y%m}/k{d:%y%m%d}.lzh"
 
 
-def _extract_lzh(blob: bytes) -> str:
-    """LZHバイト列を解凍し、内部の最初のファイルをShift-JISでデコードして返す。"""
-    bio = io.BytesIO(blob)
-    archive = lhafile.Lhafile(bio)
-    # 通常1ファイルだけ
+# ---------- 解凍バックエンド ----------
+
+def _try_lhafile(blob: bytes) -> str | None:
+    try:
+        import lhafile  # type: ignore
+    except ImportError:
+        return None
+    archive = lhafile.Lhafile(io.BytesIO(blob))
     name = archive.namelist()[0]
     raw = archive.read(name)
-    # 公式はShift-JIS。エラー時は cp932 で寛容に
     return raw.decode("shift_jis", errors="replace")
+
+
+def _try_7z(blob: bytes) -> str | None:
+    """7-Zipコマンドで解凍。Windowsなら C:\\Program Files\\7-Zip\\7z.exe など。"""
+    sevenz = shutil.which("7z") or shutil.which("7z.exe")
+    if not sevenz:
+        # Windowsの標準インストール先をチェック
+        for cand in (
+            r"C:\Program Files\7-Zip\7z.exe",
+            r"C:\Program Files (x86)\7-Zip\7z.exe",
+        ):
+            if Path(cand).exists():
+                sevenz = cand
+                break
+    if not sevenz:
+        return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        lzh_path = tmp_path / "input.lzh"
+        lzh_path.write_bytes(blob)
+        # -y: 上書き許可, x: 展開（パス保持）, -o: 出力先
+        proc = subprocess.run(
+            [sevenz, "x", str(lzh_path), f"-o{tmp_path}", "-y"],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning("7z exit=%d stderr=%s", proc.returncode, proc.stderr.decode(errors="replace"))
+            return None
+        # 解凍されたファイルを探す（input.lzh以外）
+        files = [p for p in tmp_path.iterdir() if p.is_file() and p.suffix.lower() != ".lzh"]
+        if not files:
+            return None
+        return files[0].read_bytes().decode("shift_jis", errors="replace")
+
+
+def _try_unar(blob: bytes) -> str | None:
+    unar = shutil.which("unar")
+    if not unar:
+        return None
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        lzh_path = tmp_path / "input.lzh"
+        lzh_path.write_bytes(blob)
+        proc = subprocess.run(
+            [unar, "-q", "-o", str(tmp_path), str(lzh_path)],
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        files = [p for p in tmp_path.iterdir() if p.is_file() and p.suffix.lower() != ".lzh"]
+        if not files:
+            return None
+        return files[0].read_bytes().decode("shift_jis", errors="replace")
+
+
+def extract_lzh(blob: bytes) -> str:
+    """LZHバイト列を解凍し、内部の最初のファイルをShift-JISでデコードして返す。
+
+    バックエンドを自動選択:
+      lhafile -> 7z -> unar
+    すべて失敗した場合は RuntimeError。
+    """
+    for backend in (_try_lhafile, _try_7z, _try_unar):
+        try:
+            text = backend(blob)
+        except Exception as e:
+            logger.warning("%s 解凍失敗: %s", backend.__name__, e)
+            continue
+        if text is not None:
+            logger.debug("使用バックエンド: %s", backend.__name__)
+            return text
+    raise RuntimeError(
+        "LZH解凍バックエンドが見つかりません。以下のいずれかを導入してください:\n"
+        "  - lhafile (推奨, Python): pip install lhafile  (要 C++ Build Tools)\n"
+        "  - 7-Zip (推奨, Windows): https://www.7-zip.org/  → 7z.exe を PATH に追加\n"
+        "  - p7zip (Linux): apt install p7zip-full\n"
+        "  - unar (macOS): brew install unar"
+    )
 
 
 class OfficialDownloader:
@@ -57,13 +146,12 @@ class OfficialDownloader:
     def _fetch_with_cache(self, url: str, cache_path: Path) -> str:
         if cache_path.exists():
             logger.info("cache hit: %s", cache_path)
-            return _extract_lzh(cache_path.read_bytes())
+            return extract_lzh(cache_path.read_bytes())
         logger.info("download: %s", url)
-        # http_client.get は str を返すが、ここではバイナリが必要
         resp = self.client.session.get(url, timeout=(5.0, 30.0))
         resp.raise_for_status()
         cache_path.write_bytes(resp.content)
-        return _extract_lzh(resp.content)
+        return extract_lzh(resp.content)
 
     def download_banzuke(self, d: date) -> str:
         url = banzuke_url(d)

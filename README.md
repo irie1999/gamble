@@ -55,6 +55,18 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+### LZH解凍ツールの準備（公式データ取得に必須）
+
+`requirements.txt` の `lhafile` がインストール出来ればそれだけでOK。
+**Windows + Python 3.14 で C++ Build Tools が入っていない**等で `lhafile` が
+入らない場合は、以下のいずれかを用意してください:
+
+- **7-Zip** (推奨・Windows): https://www.7-zip.org/ からインストール → `7z.exe` を PATH に追加（標準の `C:\Program Files\7-Zip` も自動検出）
+- **p7zip** (Linux): `sudo apt install p7zip-full`
+- **unar** (macOS): `brew install unar`
+
+スクレイパーは `lhafile` → `7z` → `unar` の順に自動検出します。
+
 ## 使い方
 
 ### 1. データ取得
