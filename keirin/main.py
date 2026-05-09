@@ -1011,7 +1011,14 @@ def cmd_train(args):
     with open(raw_path, encoding="utf-8") as f:
         records = json.load(f)
     df = pd.DataFrame(records)
-    print(f"学習データ: {len(df)}件")
+    train_days = getattr(args, "train_days", None)
+    if train_days:
+        from features import build_features
+        df_feat = build_features(df)
+        df_feat, df = _filter_train_days(df_feat, df, train_days)
+        print(f"学習データ: {len(df)}件（直近{train_days}日に絞り込み）")
+    else:
+        print(f"学習データ: {len(df)}件")
     result = train_evaluate(df, n_splits=5)
     print_feature_importance(result)
     save_model(result)
@@ -1878,7 +1885,9 @@ def main():
     p_col.add_argument("--with-payouts", dest="with_payouts", action="store_true",
                        help="データ収集後に払戻データも続けて取得する")
 
-    sub.add_parser("train", help="モデル学習")
+    p_train = sub.add_parser("train", help="モデル学習")
+    p_train.add_argument("--train-days", dest="train_days", type=int, default=None,
+                         help="直近N日のデータで学習（例: 365）。未指定で全期間")
 
     p_tune = sub.add_parser("tune", help="Optunaでハイパーパラメータ最適化（学習前に一度だけ実行）")
     p_tune.add_argument("--trials", type=int, default=50,
