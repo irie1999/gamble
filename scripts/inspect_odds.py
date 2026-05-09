@@ -28,8 +28,12 @@ def main() -> None:
     print(f"URL: {url}\n")
 
     client = HttpClient()
-    html = client.get(url)
-    print(f"HTML length: {len(html)} bytes\n")
+    # OddsScraperと同じ条件（20秒・retry無し）でテストする
+    html = client.get(url, max_retries=1, read_timeout=20.0)
+    print(f"HTML length: {len(html)} bytes")
+    if "データがありません" in html:
+        print("⚠️ 'データがありません' page = 中止/休場/未開催レース。")
+    print()
     if args.raw:
         print(html)
         return
