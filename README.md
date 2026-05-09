@@ -132,6 +132,29 @@ python -m scripts.backtest --features ... --payouts ... --strategy model_top1
 python -m scripts.backtest --features ... --payouts ... --strategy flat
 ```
 
+#### 単勝オッズを取得して Benter ブレンド + EV 戦略を活用
+
+```bash
+# まず期間×場の単勝オッズを取得（HTML経由なので遅い）
+python -m scripts.scrape_odds --from 2024-08-15 --to 2024-08-31 --venues 12
+
+# odds CSV を渡してバックテスト
+python -m scripts.backtest \
+    --features data/processed/features.parquet \
+    --payouts  data/raw/races_payouts.csv \
+    --odds     data/raw/odds_win.csv \
+    --strategy kelly --since 2024-08-15
+```
+
+オッズが揃ったレースは Benter式 `p_blend ∝ p_model^α × p_market^(1-α)` で
+モデル確率と市場確率を統合し、EV > 1.05 のときだけ Kelly でベットします。
+
+オッズパースが失敗する場合は inspect で生HTMLを確認:
+```bash
+python -m scripts.inspect_odds --venue 12 --race 1 --date 2024-08-15
+python -m scripts.inspect_odds --venue 12 --race 1 --date 2024-08-15 --raw  # 全文
+```
+
 出力: `data/models/backtest/summary_<strategy>.json`、
 `bets_<strategy>.csv`、`equity_<strategy>.csv`。
 
