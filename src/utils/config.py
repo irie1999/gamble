@@ -17,7 +17,7 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 REQUEST_INTERVAL_SEC = 1.0  # スクレイピングのマナーとして1秒間隔
-REQUEST_TIMEOUT_SEC = 20
+REQUEST_TIMEOUT_SEC = 10    # 読み込みタイムアウト（秒）。長過ぎると hang しやすい
 
 # 場コード（24場）
 VENUE_CODES: dict[str, str] = {

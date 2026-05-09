@@ -359,17 +359,23 @@ class BoatraceScraper:
     ):
         """期間×場をループしてカード・結果をyieldする。"""
         venues = list(venue_codes) if venue_codes else list(VENUE_CODES.keys())
-        for d in dates:
+        dates_list = list(dates)
+        total_yielded = 0
+        for d in dates_list:
             for jcd in venues:
                 try:
                     rnos = self.fetch_race_index(jcd, d)
                 except Exception as e:
                     logger.warning("index失敗 jcd=%s date=%s err=%s", jcd, d, e)
                     continue
+                logger.info("[%s jcd=%s] %d races to fetch", d, jcd, len(rnos))
                 for rno in rnos:
                     try:
                         card = self.fetch_race_card(jcd, rno, d)
                         result = self.fetch_race_result(jcd, rno, d)
+                        total_yielded += 1
+                        logger.info("  [%s jcd=%s] R%02d ok (entries=%d, results=%d) total=%d",
+                                    d, jcd, rno, len(card.entries), len(result.rows), total_yielded)
                         yield card, result
                     except Exception as e:
                         logger.warning("レース取得失敗 jcd=%s rno=%s date=%s err=%s",
