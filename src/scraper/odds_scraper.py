@@ -59,7 +59,9 @@ class OddsScraper:
     def fetch_win_odds(self, jcd: str, race_no: int, race_date: date | str) -> WinOdds:
         hd = self._ymd(race_date)
         url = f"{BASE_URL}/oddstf?rno={race_no}&jcd={jcd}&hd={hd}"
-        html = self.client.get(url)
+        # オッズページは応答が遅いため timeout を長め (20s)・リトライ無し（fail-fast）。
+        # 1日 数百〜数千リクエストを捌くため、無駄なリトライを排除して総時間を短縮。
+        html = self.client.get(url, max_retries=1, read_timeout=20.0)
         odds = self._parse_win_odds(html)
         return WinOdds(race_date=hd, venue_code=jcd, race_no=race_no, odds=odds)
 

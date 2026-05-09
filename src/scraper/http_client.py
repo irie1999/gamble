@@ -25,7 +25,14 @@ class HttpClient:
         self.session.headers.update({"User-Agent": user_agent})
         self._last_request_at: float = 0.0
 
-    def get(self, url: str, *, params: Optional[dict] = None, max_retries: int = 2) -> str:
+    def get(
+        self,
+        url: str,
+        *,
+        params: Optional[dict] = None,
+        max_retries: int = 2,
+        read_timeout: Optional[float] = None,
+    ) -> str:
         # リクエスト間隔を担保
         wait = self.interval_sec - (time.time() - self._last_request_at)
         if wait > 0:
@@ -33,7 +40,8 @@ class HttpClient:
 
         last_exc: Optional[Exception] = None
         # (connect timeout, read timeout) - 読み込みが遅い場合に hang しないよう分離
-        timeout = (5.0, float(self.timeout_sec))
+        rt = float(read_timeout) if read_timeout is not None else float(self.timeout_sec)
+        timeout = (5.0, rt)
         for attempt in range(1, max_retries + 1):
             try:
                 resp = self.session.get(url, params=params, timeout=timeout)
@@ -43,6 +51,8 @@ class HttpClient:
                 return resp.text
             except requests.RequestException as e:
                 last_exc = e
+                if attempt >= max_retries:
+                    break
                 backoff = 2 ** (attempt - 1)
                 logger.warning("GET failed (%s/%s) url=%s err=%s retry in %ss",
                                attempt, max_retries, url, e, backoff)
