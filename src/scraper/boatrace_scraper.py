@@ -9,17 +9,22 @@
 from __future__ import annotations
 
 import re
+import warnings
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Iterable, Optional
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 from src.scraper.http_client import HttpClient
 from src.utils.config import BASE_URL, LANES, VENUE_CODES
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# boatrace.jp の HTML は XML 風宣言を含むため XMLParsedAsHTMLWarning が出るが
+# HTMLとしてパースして問題ないので抑制する。
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 
 # ---------- データ構造 ----------
