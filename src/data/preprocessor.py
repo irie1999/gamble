@@ -53,6 +53,30 @@ def result_to_rows(result: RaceResult) -> list[dict]:
     return rows
 
 
+def payouts_to_rows(result: RaceResult) -> list[dict]:
+    """払戻情報をレース×券種×組合せ単位のレコードに展開。"""
+    rid = make_race_id(result.race_date, result.venue_code, result.race_no)
+    rows = []
+    for bet_type, items in result.payouts.items():
+        for combo, amount in items:
+            rows.append({
+                "race_id": rid,
+                "bet_type": bet_type,  # win/place/exacta/quinella/trifecta/trio
+                "combo": combo,        # 例 "1-2-3" or "1=2=3"
+                "payout_yen": amount,  # 100円ベース
+            })
+    return rows
+
+
+def build_payouts(pairs: Iterable[tuple[RaceCard, RaceResult]]) -> pd.DataFrame:
+    rows = []
+    for _, result in pairs:
+        rows.extend(payouts_to_rows(result))
+    if not rows:
+        return pd.DataFrame(columns=["race_id", "bet_type", "combo", "payout_yen"])
+    return pd.DataFrame(rows)
+
+
 def build_dataset(
     pairs: Iterable[tuple[RaceCard, RaceResult]],
 ) -> pd.DataFrame:

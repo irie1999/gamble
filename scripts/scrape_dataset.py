@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.data.preprocessor import build_dataset, add_targets
+from src.data.preprocessor import build_dataset, add_targets, build_payouts
 from src.scraper.boatrace_scraper import BoatraceScraper
 from src.utils.config import RAW_DIR
 from src.utils.logger import get_logger
@@ -45,14 +45,18 @@ def main() -> None:
 
     df = build_dataset(pairs)
     df = add_targets(df)
+    payouts_df = build_payouts(pairs)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    payouts_path = out_path.with_name(out_path.stem + "_payouts" + out_path.suffix)
     if out_path.suffix == ".parquet":
         df.to_parquet(out_path, index=False)
+        payouts_df.to_parquet(payouts_path, index=False)
     else:
         df.to_csv(out_path, index=False)
-    logger.info("保存: %s rows=%d", out_path, len(df))
+        payouts_df.to_csv(payouts_path, index=False)
+    logger.info("保存: %s rows=%d / payouts=%d", out_path, len(df), len(payouts_df))
 
 
 if __name__ == "__main__":
