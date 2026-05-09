@@ -31,7 +31,8 @@ def main() -> None:
     # OddsScraperと同じ条件（20秒・retry無し）でテストする
     html = client.get(url, max_retries=1, read_timeout=20.0)
     print(f"HTML length: {len(html)} bytes")
-    if "データがありません" in html:
+    no_data = "データがありません" in html
+    if no_data:
         print("⚠️ 'データがありません' page = 中止/休場/未開催レース。")
     print()
     if args.raw:
@@ -42,7 +43,7 @@ def main() -> None:
     scraper = OddsScraper(client=client)
     odds = OddsScraper._parse_win_odds(html)
     print(f"Parsed win odds: {odds}")
-    if len(odds) != 6:
+    if len(odds) != 6 and not no_data:
         print("\n⚠️ 6艇分そろっていません。--raw で生HTML確認推奨。")
 
 
