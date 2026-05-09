@@ -51,24 +51,47 @@ SAMPLE_BANZUKE = textwrap.dedent("""\
     """)
 
 
+# 実Kファイル（住之江 2024-08-15）の構造を模したサンプル
 SAMPLE_RESULT = textwrap.dedent("""\
-    ボートレース芦　屋   ２０２４年　８月１５日
+    ２０２４年　８月１５日
+    ボートレース住之江
 
-       １Ｒ
-    01 4 5105富田恕生
-    02 2 4495森晋太郎
-    03 3 5073上原健次
-    転 1 5018竹下大樹
-    エ 6 5351齊藤　廉
-    妨 5 5263花田凱成
+       1R       予選                 H1800m  曇り  風  北東   1m  波   1cm
+      着 艇 登番   選手名      ﾓｰﾀｰ ﾎﾞｰﾄ 展示 進入 ｽﾀｰﾄﾀｲﾐﾝｸ ﾚｰｽﾀｲﾑ まくり
+    -------------------------------------------------------------------------------
+      01  4 3963 原 田  秀 弥 14   66  7.12   4    0.11     1.52.9
+      02  2 3951 石 川  吉 鎬 33   30  6.99   2    0.21     1.53.6
+      03  1 5054 佐々木  大 河 66   60  7.01   1    0.19     1.54.7
+      04  5 3370 坪 内      実 27   69  7.01   5    0.19     1.55.8
+      05  3 4904 松 本  一 毅 74   80  6.95   3    0.22     1.56.7
+      06  6 5325 澁 川      夏 75   22  7.03   6    0.20     1.58.5
 
-    単勝 4 530
-    複勝 4 320
-    複勝 2 760
-    2連単 4-2 3,950
-    2連複 2=4 3,190
-    3連単 4-2-3 26,420
-    3連複 2=3=4 4,480
+            単勝     4          640
+            複勝     4          330  2          210
+            2連単   4-2       2580  人気    11
+            2連複   2-4       1130  人気     5
+            拡連複   2-4        210  人気     5
+                     1-4        190  人気     3
+                     1-2        200  人気     4
+            3連単   4-2-1     7530  人気    28
+            3連複   1-2-4      350  人気     2
+
+       2R       予選                 H1800m  雨   風  南    3m  波   1cm
+      着 艇 登番   選手名      ﾓｰﾀｰ ﾎﾞｰﾄ 展示 進入 ｽﾀｰﾄﾀｲﾐﾝｸ ﾚｰｽﾀｲﾑ 逃げ
+    -------------------------------------------------------------------------------
+      01  1 4977 馬 野      耀 15   54  7.19   1    0.20     1.52.0
+      02  4 4200 早 川  尚 人 86   92  7.24   4    0.16     1.54.3
+      03  6 4651 佐 藤  大 騎 32   93  7.21   5    0.24     1.55.1
+      04  3 3997 北 村  征 嗣 58   37  7.12   3    0.30     1.55.1
+      05  2 5049 松 井  友 汰 87   83  7.13   2    0.22     1.58.2
+      06  5 5302 秋 末  秦 悟 64   61  7.18   6    0.36     1.59.4
+
+            単勝     1          110
+            複勝     1          100  4          370
+            2連単   1-4       2160  人気     7
+            2連複   1-4       1950  人気     5
+            3連単   1-4-6    14380  人気    28
+            3連複   1-4-6     4610  人気     9
     """)
 
 
@@ -106,24 +129,39 @@ def test_parse_banzuke_real_format():
     assert e6.grade == "B2"
 
 
-def test_parse_results_with_disqualification():
+def test_parse_results_real_format():
     results = parse_results(SAMPLE_RESULT)
-    assert len(results) == 1
-    r = results[0]
-    assert r.venue_code == "21"
-    assert r.race_no == 1
-    # 6艇分（うち3艇は失格・妨害・転覆で rank=None）
-    assert len(r.rows) == 6
-    winner = next(row for row in r.rows if row.rank == 1)
-    assert winner.lane == 4
-    assert winner.racer_id == "5105"
-    # 失格系
-    dnf_lanes = [row.lane for row in r.rows if row.rank is None]
-    assert set(dnf_lanes) == {1, 5, 6}
+    assert len(results) == 2
+    r1 = results[0]
+    assert r1.race_date == "20240815"
+    assert r1.venue_code == "12"  # 住之江
+    assert r1.race_no == 1
+    assert len(r1.rows) == 6
 
-    # 払戻
-    assert ("4", 530) in r.payouts.get("win", [])
-    assert ("4-2", 3950) in r.payouts.get("exacta", [])
-    assert ("2=4", 3190) in r.payouts.get("quinella", [])
-    assert ("4-2-3", 26420) in r.payouts.get("trifecta", [])
-    assert ("2=3=4", 4480) in r.payouts.get("trio", [])
+    # 1着 lane=4, racer 3963
+    winner = next(row for row in r1.rows if row.rank == 1)
+    assert winner.lane == 4
+    assert winner.racer_id == "3963"
+    # レースタイム 1.52.9 = 1*60 + 52 + 0.9 = 112.9
+    assert abs(winner.race_time_sec - 112.9) < 1e-6
+    # ST 0.11
+    assert abs(winner.start_timing - 0.11) < 1e-6
+
+    # 払戻（連複も "-" 区切り）
+    assert ("4", 640) in r1.payouts.get("win", [])
+    assert ("4", 330) in r1.payouts.get("place", [])
+    assert ("2", 210) in r1.payouts.get("place", [])
+    assert ("4-2", 2580) in r1.payouts.get("exacta", [])
+    assert ("2-4", 1130) in r1.payouts.get("quinella", [])
+    assert ("4-2-1", 7530) in r1.payouts.get("trifecta", [])
+    assert ("1-2-4", 350) in r1.payouts.get("trio", [])
+    # 拡連複3点
+    wide = r1.payouts.get("wide", [])
+    assert ("2-4", 210) in wide
+    assert ("1-4", 190) in wide
+    assert ("1-2", 200) in wide
+
+    # 2レース目も成立
+    r2 = results[1]
+    assert r2.race_no == 2
+    assert ("1-4-6", 14380) in r2.payouts.get("trifecta", [])

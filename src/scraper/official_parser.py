@@ -188,33 +188,83 @@ def parse_banzuke(text: str) -> list[RaceCard]:
 
 # ---------- 競走成績（K）パーサ ----------
 
-# 着順行（NFKC後想定）: "01 4 5105富田恕生  ..."
-# 形式は番組表に準じ、着順(2桁)・艇番(1桁)・登番(4桁)・氏名... が密着
+# 着順行（NFKC後）の例:
+#   "  01  4 3963 原 田  秀 弥 14   66  7.12   4    0.11     1.52.9"
+#    rank lane id   name (内部空白あり) motor boat 展示  進入 ST   レースタイム(m.ss.f)
 _RANK_LINE_RE = re.compile(
-    r"^\s*(\d{2}|S\d|F\d|失|妨|エ|転)\s+([1-6])\s+(\d{4})([^\d\n]+?)(?=\s|\d|$)",
+    r"^\s*(\d{2}|S\d|F\d|K\d|失|妨|エ|転|不|落)"   # rank token
+    r"\s+([1-6])"                                    # lane
+    r"\s+(\d{4})"                                    # racer_id
+    r"\s+(.+?)"                                      # name (内部空白を含む可変長)
+    r"\s+(\d{1,2})"                                  # motor_no
+    r"\s+(\d{1,2})"                                  # boat_no
+    r"\s+(\d+\.\d{2})"                               # 展示タイム
+    r"\s+([1-6])"                                    # 進入コース
+    r"\s+(\d+\.\d{2})"                               # ST
+    r"(?:\s+(\d+)\.(\d{2})\.(\d))?",                # race time "1.52.9" (optional)
     re.MULTILINE,
 )
 
-# 払戻表（NFKC後）。組番が "1-2-3" / "1=2=3" / "1" のいずれか。
-# 例: "3連単 4-2-3 26,420" / "単勝 4 530"
+
+def _parse_race_time(m_min, m_sec, m_dec) -> Optional[float]:
+    if m_min is None:
+        return None
+    try:
+        return int(m_min) * 60 + int(m_sec) + int(m_dec) / 10.0
+    except (TypeError, ValueError):
+        return None
+
+
+# 払戻表（NFKC後）。Kファイルは連複も "-" 区切り。
+# レース末尾のブロック例:
+#         単勝     4          640
+#         複勝     4          330  2          210
+#         2連単   4-2       2580  人気    11
+#         2連複   2-4       1130  人気     5
+#         拡連複   2-4        210  人気     5
+#                  1-4        190  人気     3
+#                  1-2        200  人気     4
+#         3連単   4-2-1     7530  人気    28
+#         3連複   1-2-4      350  人気     2
 _PAYOUT_BLOCKS = [
-    ("trifecta", r"3連単\s+([1-6])-([1-6])-([1-6])\s+(\d{1,3}(?:,\d{3})*)", "-"),
-    ("trio", r"3連複\s+([1-6])=([1-6])=([1-6])\s+(\d{1,3}(?:,\d{3})*)", "="),
-    ("exacta", r"2連単\s+([1-6])-([1-6])\s+(\d{1,3}(?:,\d{3})*)", "-"),
-    ("quinella", r"2連複\s+([1-6])=([1-6])\s+(\d{1,3}(?:,\d{3})*)", "="),
-    ("win", r"単勝\s+([1-6])\s+(\d{1,3}(?:,\d{3})*)", None),
-    ("place", r"複勝\s+([1-6])\s+(\d{1,3}(?:,\d{3})*)", None),
+    ("trifecta", r"3連単\s+([1-6])-([1-6])-([1-6])\s+(\d+)", "-"),
+    ("trio",     r"3連複\s+([1-6])-([1-6])-([1-6])\s+(\d+)", "-"),
+    ("exacta",   r"2連単\s+([1-6])-([1-6])\s+(\d+)", "-"),
+    ("quinella", r"2連複\s+([1-6])-([1-6])\s+(\d+)", "-"),
 ]
 
 
 def _parse_payouts(race_text: str) -> dict[str, list[tuple[str, int]]]:
     out: dict[str, list[tuple[str, int]]] = {}
+
+    # 単勝: 単勝 [lane] [amount]
+    for m in re.finditer(r"単勝\s+([1-6])\s+(\d+)", race_text):
+        out.setdefault("win", []).append((m.group(1), int(m.group(2).replace(",", ""))))
+
+    # 複勝: 同一行に最大2艇分。 例: "複勝     4          330  2          210"
+    for line_m in re.finditer(r"複勝\s+(.+?)(?:\n|$)", race_text):
+        body = line_m.group(1)
+        for pm in re.finditer(r"([1-6])\s+(\d+)", body):
+            out.setdefault("place", []).append((pm.group(1), int(pm.group(2).replace(",", ""))))
+
+    # 拡連複: 「拡連複」見出しから次のラベルまでの3行分を回収
+    wide_m = re.search(
+        r"拡連複\s+(.+?)(?=\n\s*(?:3連単|3連複|2連単|2連複|単勝|複勝)|\Z)",
+        race_text, re.DOTALL,
+    )
+    if wide_m:
+        for pm in re.finditer(r"([1-6])-([1-6])\s+(\d+)", wide_m.group(1)):
+            out.setdefault("wide", []).append((
+                f"{pm.group(1)}-{pm.group(2)}",
+                int(pm.group(3).replace(",", "")),
+            ))
+
+    # 連単・連複（単行）
     for key, pat, sep in _PAYOUT_BLOCKS:
         for m in re.finditer(pat, race_text):
             groups = m.groups()
             amount = int(groups[-1].replace(",", ""))
-            nums = groups[:-1]
-            combo = nums[0] if sep is None else sep.join(nums)
+            combo = sep.join(groups[:-1])
             out.setdefault(key, []).append((combo, amount))
     return out
 
@@ -238,13 +288,14 @@ def parse_results(text: str) -> list[RaceResult]:
             rows: list[RaceResultRow] = []
             for m in _RANK_LINE_RE.finditer(race_text):
                 rank = _rank_token_to_int(m.group(1))
+                rt = _parse_race_time(m.group(10), m.group(11), m.group(12))
                 rows.append(RaceResultRow(
                     lane=int(m.group(2)),
                     rank=rank,
                     racer_id=m.group(3),
                     name=re.sub(r"\s+", "", m.group(4)),
-                    race_time_sec=None,
-                    start_timing=None,
+                    race_time_sec=rt,
+                    start_timing=_to_float(m.group(9)),
                 ))
             payouts = _parse_payouts(race_text)
             if rows or payouts:
