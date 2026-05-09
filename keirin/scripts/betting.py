@@ -123,6 +123,22 @@ STRATEGIES: dict[str, dict] = {
         "min_top_prob": 0.40,
         "fixed_amount": 100,
     },
+    "tf_10pct": {
+        "description": "3連単 組合確率10%以上：新モデル最適閾値（ROI+12%実績）",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.10, 0, 2, 20)},
+        "min_top_prob": 0.30,
+        "fixed_amount": 100,
+    },
+    "tf_10pct_strict": {
+        "description": "3連単 組合確率10%以上・1位確率35%以上の高確信レース限定",
+        "bet_types": ["trifecta"],
+        "line_leader_only": False,
+        "bet_config": {"trifecta": (0.10, 0, 2, 20)},
+        "min_top_prob": 0.35,
+        "fixed_amount": 100,
+    },
     "trio_sharp": {
         "description": "3連複厳選：確信レースのみ・的中率重視",
         "bet_types": ["trio"],
