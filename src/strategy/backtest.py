@@ -27,6 +27,9 @@ import pandas as pd
 from src.strategy.blending import add_blended_probability
 from src.strategy.ev import select_value_bets
 from src.strategy.kelly import kelly_stake
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 Strategy = Literal["flat", "kelly", "always_top1", "model_top1"]
@@ -70,7 +73,10 @@ def _build_pred_with_odds(
     pred_df: pd.DataFrame,
     odds_df: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
-    """予測DFに odds_win を結合（無ければ後段で実払戻から逆算）。"""
+    """予測DFに実オッズを結合。オッズが渡されない/不足する行は NaN のまま。
+
+    EV系戦略は実オッズが揃っているレースだけで動作する（補完はしない）。
+    """
     if odds_df is None or odds_df.empty:
         out = pred_df.copy()
         out["odds_win"] = np.nan
@@ -79,27 +85,6 @@ def _build_pred_with_odds(
         odds_df[["race_id", "lane", "odds_win"]],
         on=["race_id", "lane"], how="left",
     )
-    return out
-
-
-def _impute_odds_from_payouts(
-    pred_df: pd.DataFrame,
-    payouts_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """単勝オッズが未取得のとき、勝者の払戻から勝者lane分のオッズを近似。
-
-    勝者以外のオッズは未知なので、市場ブレンドはそのレースで使えない。
-    （ここでは valuation 用に勝者行のみ odds を補完する）
-    """
-    winners = _winner_lane_from_payouts(payouts_df)
-    out = pred_df.copy()
-    if "odds_win" not in out.columns:
-        out["odds_win"] = np.nan
-
-    merged = out.merge(winners, on="race_id", how="left")
-    is_winner = merged["lane"] == merged["winner_lane"]
-    odds_from_payout = merged["win_payout_yen"] / 100.0
-    out.loc[is_winner & out["odds_win"].isna(), "odds_win"] = odds_from_payout[is_winner & out["odds_win"].isna()]
     return out
 
 
@@ -114,15 +99,15 @@ def run_backtest(
 
     pred_df: race_id, lane, pred_win_prob (+ optional race_date)
     payouts_df: race_id, bet_type, combo, payout_yen
-    odds_df:  race_id, lane, odds_win  (任意)
+    odds_df:  race_id, lane, odds_win  (実オッズ。EV系戦略では必須)
+
+    EV系（kelly/flat）は実オッズが揃ったレースだけを対象にする。
+    オッズが無い場合はそのレースをスキップ（人工オッズで埋めない）。
 
     戻り値: bets（個別ベット内訳）、summary（指標）、equity_curve。
     """
     # --- 確率の準備 ---
     pred = _build_pred_with_odds(pred_df, odds_df)
-    if odds_df is None:
-        # 勝者lane分は payouts から補完（valuation用）
-        pred = _impute_odds_from_payouts(pred, payouts_df)
 
     # 市場ブレンド：odds が全艇分そろっているレースのみで適用
     full_odds = pred.groupby("race_id")["odds_win"].transform(lambda s: s.notna().all())
@@ -145,8 +130,16 @@ def run_backtest(
         )
         bets["stake"] = config.flat_stake
     else:
+        # EV系戦略は実オッズが揃ったレースのみ対象
+        eligible = pred[full_odds].copy()
+        if eligible.empty:
+            logger.warning(
+                "EV系戦略 '%s' を実行するための実オッズが1件もありません。"
+                " --odds で odds_win.csv を渡してください。",
+                config.strategy,
+            )
         candidates = select_value_bets(
-            pred,
+            eligible,
             prob_col="blended_win_prob",
             odds_col="odds_win",
             ev_threshold=config.ev_threshold,
