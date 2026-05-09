@@ -129,6 +129,12 @@ def main() -> None:
         help="既に出力ファイルにある race_id はスキップして追記する",
     )
     parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="リクエスト間隔(秒)。サーバー側が遅い時は 3〜5 に上げる",
+    )
+    parser.add_argument(
         "--checkpoint-every",
         type=int,
         default=200,
@@ -153,7 +159,8 @@ def main() -> None:
         logger.info("取得対象なし。終了。")
         return
 
-    scraper = OddsScraper()
+    from src.scraper.http_client import HttpClient
+    scraper = OddsScraper(client=HttpClient(interval_sec=args.interval))
     rows: list[dict] = []
     success = 0
     attempts = 0
