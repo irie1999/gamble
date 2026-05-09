@@ -57,16 +57,34 @@ pip install -r requirements.txt
 
 ## 使い方
 
-### 1. データ取得（スクレイピング）
+### 1. データ取得
+
+デフォルトは **公式LZHデータ** (`--source official`)。1日1ファイル＝高速・安定。
 
 ```bash
-# 例: 2024年1月の住之江(12)・福岡(22) を取得
-python -m scripts.scrape_dataset --from 2024-01-01 --to 2024-01-31 --venues 12 22
-# 全場なら --venues を省略
-python -m scripts.scrape_dataset --from 2024-01-01 --to 2024-01-31
+# 1日分（住之江と福岡のみ）
+python -m scripts.scrape_dataset --from 2024-08-15 --to 2024-08-15 --venues 12 22 --out data/raw/races.csv
+
+# 1ヶ月分・全場
+python -m scripts.scrape_dataset --from 2024-08-01 --to 2024-08-31 --out data/raw/races.parquet
 ```
 
-出力: `data/raw/races.parquet`（1艇1行のlong形式）。
+出力: `data/raw/races.parquet` と `data/raw/races_payouts.parquet`。
+LZHキャッシュは `data/raw/official/{B,K}/` に保存されるため、再実行は爆速。
+
+#### パース確認用 inspect ツール
+
+公式ファイルの中身（生テキスト）を見たい場合:
+
+```bash
+python -m scripts.inspect_official --date 2024-08-15 --type B --venue 住之江 --race 1
+```
+
+#### HTMLスクレイプにフォールバックしたい場合
+
+```bash
+python -m scripts.scrape_dataset --source html --from 2024-08-15 --to 2024-08-15 --venues 12
+```
 
 ### 2. 学習
 
