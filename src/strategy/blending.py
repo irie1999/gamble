@@ -19,7 +19,9 @@ def odds_to_implied(odds: np.ndarray, takeout: float = 0.25) -> np.ndarray:
     p_market_i = (1 - takeout) / odds_i  を正規化して使うのが標準。
     """
     odds = np.asarray(odds, dtype=float)
-    raw = np.where(odds > 0, 1.0 / odds, 0.0)
+    safe = np.where(odds > 0, odds, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw = np.where(odds > 0, 1.0 / safe, 0.0)
     s = raw.sum()
     if s <= 0:
         return np.full_like(raw, 1.0 / len(raw))
