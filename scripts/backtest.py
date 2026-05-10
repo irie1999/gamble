@@ -48,6 +48,12 @@ def main() -> None:
     parser.add_argument("--kelly-fraction", type=float, default=0.25)
     parser.add_argument("--ev-threshold", type=float, default=1.05)
     parser.add_argument("--blend-alpha", type=float, default=0.7)
+    parser.add_argument(
+        "--exclude-venues",
+        nargs="*",
+        default=[],
+        help="1コース勝率が低い場を lane1_value/lane1_kelly から除外（例: 24 で大村除外）",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -70,6 +76,7 @@ def main() -> None:
         kelly_fraction=args.kelly_fraction,
         ev_threshold=args.ev_threshold,
         blend_alpha=args.blend_alpha,
+        excluded_venues=tuple(args.exclude_venues),
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 

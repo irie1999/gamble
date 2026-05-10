@@ -46,6 +46,8 @@ class BacktestConfig:
     blend_alpha: float = 0.7        # Benter ブレンド比（モデル側）
     takeout: float = 0.25           # 単勝の控除率
     bet_type: str = "win"           # 当面は単勝のみ
+    # 1コース勝率が低い場（例: 大村24）を除外する。lane1_value/lane1_kelly でのみ効く。
+    excluded_venues: tuple[str, ...] = ()
 
 
 @dataclass
@@ -133,6 +135,11 @@ def run_backtest(
         # 1号艇限定: 実オッズと推定確率から EV>閾値 のレースのみベット
         # 過小評価された1号艇本命を狙う（穴狙いではなく本命の妙味）
         eligible = pred[full_odds & (pred["lane"] == 1)].copy()
+        # 場フィルタ: 1コース勝率が構造的に低い場を除外
+        if config.excluded_venues:
+            venue_codes = eligible["race_id"].astype(str).str.split("-").str[1]
+            eligible = eligible[~venue_codes.isin(config.excluded_venues)]
+            logger.info("excluded_venues=%s 適用後 %d候補", config.excluded_venues, len(eligible))
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
         if config.strategy == "lane1_kelly":

@@ -43,11 +43,13 @@ def _eval_threshold(
     strategy: str,
     ev_threshold: float,
     blend_alpha: float,
+    excluded_venues: tuple[str, ...] = (),
 ) -> dict:
     cfg = BacktestConfig(
         strategy=strategy,
         ev_threshold=ev_threshold,
         blend_alpha=blend_alpha,
+        excluded_venues=excluded_venues,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
     return result.summary
@@ -68,6 +70,12 @@ def main() -> None:
         type=float,
         default=[1.00, 1.05, 1.10, 1.15, 1.20, 1.30],
         help="スキャンする ev_threshold のリスト",
+    )
+    parser.add_argument(
+        "--exclude-venues",
+        nargs="*",
+        default=[],
+        help="lane1_value/lane1_kelly から除外する場（例: 24 で大村除外）",
     )
     args = parser.parse_args()
 
@@ -96,7 +104,8 @@ def main() -> None:
     for thr in args.thresholds:
         s = _eval_threshold(train_pred, payouts, odds,
                             strategy=args.strategy, ev_threshold=thr,
-                            blend_alpha=args.blend_alpha)
+                            blend_alpha=args.blend_alpha,
+                            excluded_venues=tuple(args.exclude_venues))
         train_results[thr] = s
         print(f"{thr:>8.2f} {s['n_bets']:>8d} {s['hit_rate']:>6.3f} {s['roi']:>+8.3f}")
 
@@ -111,7 +120,8 @@ def main() -> None:
     print("\n=== 検証期間（後半・OOS） ===")
     s_oos = _eval_threshold(test_pred, payouts, odds,
                             strategy=args.strategy, ev_threshold=best_thr,
-                            blend_alpha=args.blend_alpha)
+                            blend_alpha=args.blend_alpha,
+                            excluded_venues=tuple(args.exclude_venues))
     print(f"  ev_threshold = {best_thr}")
     for k, v in s_oos.items():
         print(f"  {k}: {v}")
@@ -122,7 +132,8 @@ def main() -> None:
     for thr in args.thresholds:
         s = _eval_threshold(test_pred, payouts, odds,
                             strategy=args.strategy, ev_threshold=thr,
-                            blend_alpha=args.blend_alpha)
+                            blend_alpha=args.blend_alpha,
+                            excluded_venues=tuple(args.exclude_venues))
         marker = " ← 採用" if abs(thr - best_thr) < 1e-9 else ""
         print(f"{thr:>8.2f} {s['n_bets']:>8d} {s['hit_rate']:>6.3f} {s['roi']:>+8.3f}{marker}")
 
