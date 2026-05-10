@@ -154,10 +154,10 @@ HTML_TEMPLATE = """<!doctype html>
   <tbody>{rows_venue}</tbody>
 </table>
 
-<h2>個別ベット（直近20件）</h2>
+<h2>個別ベット（全{n_bets}件・新しい順）</h2>
 <table>
   <thead><tr><th>日付</th><th>レース</th><th>オッズ</th><th>p_blend</th><th>EV</th><th>stake</th><th>結果</th><th>PnL</th></tr></thead>
-  <tbody>{rows_recent}</tbody>
+  <tbody>{rows_all}</tbody>
 </table>
 
 <script>
@@ -251,7 +251,7 @@ def main() -> None:
     by_odds = _by_odds_bucket(bets)
     by_venue = _by_venue(bets)
 
-    recent = bets.sort_values("race_date", ascending=False).head(20)
+    all_bets = bets.sort_values("race_date", ascending=False)
 
     payload = {
         "cumPnl": {"dates": cum_dates, "values": cum_values},
@@ -274,7 +274,7 @@ def main() -> None:
         avg_odds=f"{summ['avg_odds']:.2f}",
         rows_odds="".join(_row_odds(b) for b in by_odds),
         rows_venue="".join(_row_venue(b) for b in by_venue),
-        rows_recent="".join(_row_recent(r) for _, r in recent.iterrows()),
+        rows_all="".join(_row_recent(r) for _, r in all_bets.iterrows()),
         data_json=json.dumps(payload, ensure_ascii=False),
     )
     out = Path(args.out)
