@@ -54,6 +54,12 @@ def main() -> None:
         default=[],
         help="1コース勝率が低い場を lane1_value/lane1_kelly から除外（例: 24 で大村除外）",
     )
+    parser.add_argument(
+        "--max-odds",
+        type=float,
+        default=None,
+        help="1号艇オッズの上限。これ超のレースは除外（高オッズ1号艇=構造的弱）",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -77,6 +83,7 @@ def main() -> None:
         ev_threshold=args.ev_threshold,
         blend_alpha=args.blend_alpha,
         excluded_venues=tuple(args.exclude_venues),
+        max_odds=args.max_odds,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 

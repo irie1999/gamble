@@ -48,6 +48,8 @@ class BacktestConfig:
     bet_type: str = "win"           # 当面は単勝のみ
     # 1コース勝率が低い場（例: 大村24）を除外する。lane1_value/lane1_kelly でのみ効く。
     excluded_venues: tuple[str, ...] = ()
+    # 1号艇のオッズがこの値超だと「構造的に1号艇が弱いレース」とみなして除外。None で無効。
+    max_odds: Optional[float] = None
 
 
 @dataclass
@@ -140,6 +142,10 @@ def run_backtest(
             venue_codes = eligible["race_id"].astype(str).str.split("-").str[1]
             eligible = eligible[~venue_codes.isin(config.excluded_venues)]
             logger.info("excluded_venues=%s 適用後 %d候補", config.excluded_venues, len(eligible))
+        if config.max_odds is not None:
+            before = len(eligible)
+            eligible = eligible[eligible["odds_win"] <= config.max_odds]
+            logger.info("max_odds=%s 適用後 %d候補（%d→）", config.max_odds, len(eligible), before)
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
         if config.strategy == "lane1_kelly":
