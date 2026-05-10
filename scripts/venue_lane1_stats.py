@@ -36,9 +36,18 @@ def _venue_from_race_id(race_id: pd.Series) -> pd.Series:
 
 def lane1_base_rate(payouts: pd.DataFrame, since: Optional[str]) -> pd.DataFrame:
     """払戻データから「実勝者=1コース」の頻度を場別に集計。"""
-    if since and "race_date" in payouts.columns:
-        payouts = payouts[pd.to_datetime(payouts["race_date"]) >= pd.Timestamp(since)]
-    df = payouts.copy()
+    from src.strategy.backtest import _winner_lane_from_payouts
+
+    winners = _winner_lane_from_payouts(payouts)
+    if since:
+        # race_id の3桁目以降に日付が含まれるので、payouts 経由で日付を引く
+        if "race_date" in payouts.columns:
+            date_map = (
+                payouts[["race_id", "race_date"]].drop_duplicates("race_id").set_index("race_id")["race_date"]
+            )
+            winners["race_date"] = winners["race_id"].map(date_map)
+            winners = winners[pd.to_datetime(winners["race_date"]) >= pd.Timestamp(since)]
+    df = winners
     df["venue"] = _venue_from_race_id(df["race_id"])
     df["lane1_won"] = (df["winner_lane"] == 1).astype(int)
     g = df.groupby("venue").agg(
