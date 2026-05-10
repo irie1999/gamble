@@ -36,6 +36,7 @@ def _summary(bets: pd.DataFrame) -> dict:
     stake = float(bets["stake"].sum())
     ret = float(bets["return_yen"].sum())
     pnl = ret - stake
+    avg_odds = float(bets["odds_win"].mean()) if "odds_win" in bets.columns else float("nan")
     return {
         "n_bets": n,
         "wins": wins,
@@ -44,7 +45,7 @@ def _summary(bets: pd.DataFrame) -> dict:
         "return": ret,
         "pnl": pnl,
         "roi": pnl / stake if stake > 0 else 0.0,
-        "avg_odds": float(bets["odds_win"].mean()),
+        "avg_odds": avg_odds,
     }
 
 
@@ -55,6 +56,8 @@ def _cumulative_pnl(bets: pd.DataFrame) -> tuple[list[str], list[float]]:
 
 
 def _by_odds_bucket(bets: pd.DataFrame) -> list[dict]:
+    if "odds_win" not in bets.columns or bets["odds_win"].isna().all():
+        return []
     bins = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 100.0]
     labels = ["1-2", "2-3", "3-5", "5-7", "7-10", "10+"]
     bets = bets.copy()
@@ -223,15 +226,24 @@ def _row_venue(b: dict) -> str:
             f"<td class='{cls}'>¥{_fmt_yen(b['pnl'])}</td></tr>")
 
 
+def _cell(value, fmt: str = "{}") -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "<td>-</td>"
+    return f"<td>{fmt.format(value)}</td>"
+
+
 def _row_recent(r: pd.Series) -> str:
     cls = "pos" if r["pnl"] >= 0 else "neg"
     venue = str(r["race_id"]).split("-")[1] if "-" in str(r["race_id"]) else "?"
     result = "🟢 的中" if r["hit"] else "✕ 不的中"
+    odds = r.get("odds_win") if "odds_win" in r else None
+    p_blend = r.get("blended_win_prob") if "blended_win_prob" in r else r.get("pred_win_prob")
+    ev = r.get("ev") if "ev" in r else None
     return (f"<tr><td>{r['race_date']}</td>"
             f"<td>{venue}/{r['race_id']}</td>"
-            f"<td>{r['odds_win']:.2f}</td>"
-            f"<td>{r['blended_win_prob']:.3f}</td>"
-            f"<td>{r['ev']:.3f}</td>"
+            f"{_cell(odds, '{:.2f}')}"
+            f"{_cell(p_blend, '{:.3f}')}"
+            f"{_cell(ev, '{:.3f}')}"
             f"<td>¥{_fmt_yen(r['stake'])}</td>"
             f"<td>{result}</td>"
             f"<td class='{cls}'>¥{_fmt_yen(r['pnl'])}</td></tr>")
@@ -271,7 +283,7 @@ def main() -> None:
         pnl=_fmt_yen(summ["pnl"]),
         pnl_cls="pos" if summ["pnl"] >= 0 else "neg",
         stake=_fmt_yen(summ["stake"]),
-        avg_odds=f"{summ['avg_odds']:.2f}",
+        avg_odds=f"{summ['avg_odds']:.2f}" if not pd.isna(summ["avg_odds"]) else "-",
         rows_odds="".join(_row_odds(b) for b in by_odds),
         rows_venue="".join(_row_venue(b) for b in by_venue),
         rows_all="".join(_row_recent(r) for _, r in all_bets.iterrows()),
