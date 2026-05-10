@@ -186,10 +186,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- 時系列特徴量（直近成績・会場別・調子）---
     df = add_historical_features(df)
 
-    # --- レース番号（後半ほど格上レース）---
-    if "race_no" in df.columns:
-        df["race_no_enc"] = pd.to_numeric(df["race_no"], errors="coerce").fillna(6).clip(1, 12)
-
     # --- 時系列特徴量のレース内相対値 ---
     for col in ["recent_win_5", "venue_win_rate", "recent_avg_rank"]:
         if col in df.columns:
@@ -266,8 +262,6 @@ FEATURE_COLS = [
     "leader_recent_form",
     "kyosoten_edge",
     "venue_leader",
-    # --- レース番号（後半ほど格上）---
-    "race_no_enc",
 ]
 
 TARGET_COL = "win"

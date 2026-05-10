@@ -95,7 +95,7 @@ STRATEGIES: dict[str, dict] = {
         "description": "3連単2点勝負：モデル確信レースのみ",
         "bet_types": ["trifecta"],
         "line_leader_only": False,
-        "bet_config": {"trifecta": (0.08, 0, 2, 20)},
+        "bet_config": {"trifecta": (0.07, 0, 2, 20)},
         "min_top_prob": 0.30,   # 1位予測確率30%以上のレースのみ
         "fixed_amount": 100,
     },
