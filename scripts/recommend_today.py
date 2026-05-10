@@ -140,6 +140,8 @@ def main() -> None:
     p.add_argument("--exclude-venues", nargs="*", default=["24"],
                    help="除外場コード（デフォルト 24=大村）")
     p.add_argument("--ev-threshold", type=float, default=1.05)
+    p.add_argument("--max-odds", type=float, default=None,
+                   help="このオッズ超の1号艇は除外（高オッズ1号艇=構造的に弱いレース対策）")
     p.add_argument("--blend-alpha", type=float, default=0.7)
     p.add_argument("--takeout", type=float, default=0.25)
     p.add_argument("--bankroll", type=float, default=100_000.0)
@@ -180,6 +182,8 @@ def main() -> None:
             if done % 20 == 0 or done == len(futures):
                 print(f"  進捗 {done}/{len(futures)}", flush=True)
             if res is None or res["ev"] <= args.ev_threshold:
+                continue
+            if args.max_odds is not None and res["odds_win"] > args.max_odds:
                 continue
             if args.kelly_fraction > 0:
                 stake = kelly_stake(
