@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument(
         "--strategy",
         default="kelly",
-        choices=["flat", "kelly", "always_top1", "model_top1"],
+        choices=["flat", "kelly", "always_top1", "model_top1", "lane1_value"],
     )
     parser.add_argument("--since", default=None, help="この日付以降のレースのみ評価 (YYYY-MM-DD)")
     parser.add_argument("--initial-bankroll", type=float, default=100_000.0)

@@ -26,16 +26,22 @@ def load_model(path: Path | None = None) -> dict:
 
 
 def predict_win_probability(features_df: pd.DataFrame, *, model_path: Path | None = None) -> pd.DataFrame:
-    """1艇1行のDataFrameに pred_win_prob 列を追加して返す。"""
+    """1艇1行のDataFrameに pred_win_prob 列を追加して返す。
+
+    bundle に calibrator が含まれていれば isotonic 補正を通したスコアを
+    使う。レース単位ソフトマックス正規化はその後に適用。
+    """
     bundle = load_model(model_path)
     model = bundle["model"]
+    calibrator = bundle.get("calibrator")
     feat_cols = bundle["feature_columns"]
 
     X = features_df[feat_cols]
     raw = model.predict_proba(X)[:, 1]
+    score = calibrator.transform(raw) if calibrator is not None else raw
 
     out = features_df.copy()
-    out["raw_score"] = raw
+    out["raw_score"] = score
     out["pred_win_prob"] = (
         out.groupby("race_id")["raw_score"]
         .transform(lambda s: _softmax(s.to_numpy()))

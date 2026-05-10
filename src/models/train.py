@@ -2,6 +2,11 @@
 
 レース内6艇でソフトマックス正規化して各艇の1着確率を出す。
 時系列リークを避けるため、学習は古い→新しい順に時系列分割で評価する。
+
+Isotonic 回帰によるキャリブレーション付き:
+  生のLightGBM出力は穴艇の確率を過大評価しがち（バックテストで穴狙いが
+  大爆死する原因）。学習後、検証セット前半で IsotonicRegression を学習し、
+  予測時に必ず通すことで calibration curve を補正する。
 """
 from __future__ import annotations
 
@@ -13,7 +18,8 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.metrics import log_loss
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import log_loss, brier_score_loss
 
 from src.features.feature_engineering import FEATURE_COLUMNS
 from src.utils.config import MODELS_DIR
@@ -34,6 +40,7 @@ class TrainConfig:
     bagging_freq: int = 5
     early_stopping_rounds: int = 50
     valid_ratio: float = 0.2  # 末尾を検証
+    calib_ratio: float = 0.5  # valid のうち前半を calibration、後半をテスト用
 
 
 def time_split(df: pd.DataFrame, valid_ratio: float) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -51,12 +58,19 @@ def train_model(
     df[config.target] = df[config.target].astype(int)
 
     train_df, valid_df = time_split(df, config.valid_ratio)
-    logger.info("train=%d, valid=%d, features=%d", len(train_df), len(valid_df), len(FEATURE_COLUMNS))
+    # valid を時系列で前半 (calibration) / 後半 (テスト) に分割
+    valid_df = valid_df.sort_values("race_date").reset_index(drop=True)
+    cut = int(len(valid_df) * config.calib_ratio)
+    calib_df, test_df = valid_df.iloc[:cut].copy(), valid_df.iloc[cut:].copy()
+    logger.info("train=%d, calib=%d, test=%d, features=%d",
+                len(train_df), len(calib_df), len(test_df), len(FEATURE_COLUMNS))
 
     X_train = train_df[FEATURE_COLUMNS]
     y_train = train_df[config.target]
-    X_valid = valid_df[FEATURE_COLUMNS]
-    y_valid = valid_df[config.target]
+    X_calib = calib_df[FEATURE_COLUMNS]
+    y_calib = calib_df[config.target]
+    X_test = test_df[FEATURE_COLUMNS]
+    y_test = test_df[config.target]
 
     model = lgb.LGBMClassifier(
         n_estimators=config.n_estimators,
@@ -70,34 +84,49 @@ def train_model(
     )
     model.fit(
         X_train, y_train,
-        eval_set=[(X_valid, y_valid)],
+        eval_set=[(X_calib, y_calib)],
         eval_metric="binary_logloss",
         callbacks=[lgb.early_stopping(config.early_stopping_rounds, verbose=False)],
     )
 
-    # レース単位のソフトマックス正規化後にlog_lossを評価
-    valid_df = valid_df.assign(
-        raw_score=model.predict_proba(X_valid)[:, 1]
+    # ----- Isotonic キャリブレーション -----
+    # calibration set 上で raw 予測 → 真の確率の写像を学習する
+    calib_raw = model.predict_proba(X_calib)[:, 1]
+    calibrator = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    calibrator.fit(calib_raw, y_calib)
+
+    # ----- テストセットで raw vs calibrated を比較 -----
+    test_raw = model.predict_proba(X_test)[:, 1]
+    test_cal = calibrator.transform(test_raw)
+    test_df = test_df.assign(raw_score=test_raw, cal_score=test_cal)
+    test_df["pred_win_prob_raw"] = (
+        test_df.groupby("race_id")["raw_score"].transform(lambda s: _softmax(s.to_numpy()))
     )
-    valid_df["pred_win_prob"] = (
-        valid_df.groupby("race_id")["raw_score"]
-        .transform(lambda s: _softmax(s.to_numpy()))
+    test_df["pred_win_prob"] = (
+        test_df.groupby("race_id")["cal_score"].transform(lambda s: _softmax(s.to_numpy()))
     )
-    # レース内で 1艇だけ y=1 になるはずなので、レース単位 multi-class log loss も算出
-    race_logloss = _race_logloss(valid_df, target=config.target)
 
     metrics = {
-        "valid_binary_logloss": float(log_loss(y_valid, valid_df["raw_score"].clip(1e-6, 1 - 1e-6))),
-        "valid_race_softmax_logloss": float(race_logloss),
+        "test_binary_logloss_raw": float(log_loss(y_test, np.clip(test_raw, 1e-6, 1 - 1e-6))),
+        "test_binary_logloss_calibrated": float(log_loss(y_test, np.clip(test_cal, 1e-6, 1 - 1e-6))),
+        "test_brier_raw": float(brier_score_loss(y_test, test_raw)),
+        "test_brier_calibrated": float(brier_score_loss(y_test, test_cal)),
+        "test_race_softmax_logloss_raw": float(_race_logloss(test_df, target=config.target, prob_col="pred_win_prob_raw")),
+        "test_race_softmax_logloss_calibrated": float(_race_logloss(test_df, target=config.target, prob_col="pred_win_prob")),
         "best_iteration": int(getattr(model, "best_iteration_", 0) or 0),
         "n_train": int(len(train_df)),
-        "n_valid": int(len(valid_df)),
+        "n_calib": int(len(calib_df)),
+        "n_test": int(len(test_df)),
     }
     logger.info("metrics=%s", metrics)
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODELS_DIR / "lgb_win_model.joblib"
-    joblib.dump({"model": model, "feature_columns": FEATURE_COLUMNS}, model_path)
+    joblib.dump({
+        "model": model,
+        "calibrator": calibrator,
+        "feature_columns": FEATURE_COLUMNS,
+    }, model_path)
     (MODELS_DIR / "metrics.json").write_text(json.dumps(metrics, indent=2, ensure_ascii=False))
 
     return {"model_path": str(model_path), "metrics": metrics}
@@ -110,12 +139,12 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
-def _race_logloss(df: pd.DataFrame, *, target: str) -> float:
+def _race_logloss(df: pd.DataFrame, *, target: str, prob_col: str = "pred_win_prob") -> float:
     losses = []
     for _, g in df.groupby("race_id"):
         if g[target].sum() != 1:
             continue
-        p = g["pred_win_prob"].to_numpy().clip(1e-6, 1 - 1e-6)
+        p = g[prob_col].to_numpy().clip(1e-6, 1 - 1e-6)
         y = g[target].to_numpy()
         losses.append(-np.log(p[y == 1])[0])
     return float(np.mean(losses)) if losses else float("nan")
