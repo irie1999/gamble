@@ -32,7 +32,7 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-Strategy = Literal["flat", "kelly", "always_top1", "model_top1", "lane1_value"]
+Strategy = Literal["flat", "kelly", "always_top1", "model_top1", "lane1_value", "lane1_kelly"]
 
 
 @dataclass
@@ -129,13 +129,25 @@ def run_backtest(
                 .copy()
         )
         bets["stake"] = config.flat_stake
-    elif config.strategy == "lane1_value":
+    elif config.strategy in ("lane1_value", "lane1_kelly"):
         # 1号艇限定: 実オッズと推定確率から EV>閾値 のレースのみベット
         # 過小評価された1号艇本命を狙う（穴狙いではなく本命の妙味）
         eligible = pred[full_odds & (pred["lane"] == 1)].copy()
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
-        candidates["stake"] = config.flat_stake
+        if config.strategy == "lane1_kelly":
+            stakes = []
+            for _, r in candidates.iterrows():
+                stakes.append(kelly_stake(
+                    bankroll=config.initial_bankroll,
+                    p=float(r["blended_win_prob"]),
+                    odds=float(r["odds_win"]),
+                    fraction=config.kelly_fraction,
+                ))
+            candidates["stake"] = stakes
+            candidates = candidates[candidates["stake"] > 0]
+        else:
+            candidates["stake"] = config.flat_stake
         bets = candidates
     else:
         # EV系戦略は実オッズが揃ったレースのみ対象
