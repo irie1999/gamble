@@ -75,19 +75,59 @@ def add_historical_features(df: pd.DataFrame) -> pd.DataFrame:
         df["recent_kyosoten_5"] = 0.0
         df["kyosoten_trend"] = 0.0
 
-    # --- 会場別勝率（その会場での過去実績）---
+    # --- 会場別勝率・3着内率（その会場での過去実績）---
     grp_venue = df.groupby(["player_name", "venue_code"], sort=False)
     df["venue_win_rate"] = grp_venue["win"].transform(
         lambda x: x.shift(1).expanding(min_periods=1).mean()
     )
-    # データ不足時は通算勝率で補完
     df["venue_win_rate"] = df["venue_win_rate"].fillna(df["win_rate"].fillna(0))
+
+    # 会場別3着内率（得意バンク指標）
+    top3_flag = (df["rank"] <= 3).astype(float)
+    df["_top3_flag"] = top3_flag
+    df["venue_top3_rate"] = grp_venue["_top3_flag"].transform(
+        lambda x: x.shift(1).expanding(min_periods=1).mean()
+    )
+    df["venue_top3_rate"] = df["venue_top3_rate"].fillna(
+        df["win_rate"].fillna(0) + df["second_rate"].fillna(0) + df["third_rate"].fillna(0)
+    )
+    df.drop(columns=["_top3_flag"], inplace=True)
+
+    # 会場での出走回数（信頼性スコア：回数が多いほど会場実績が信頼できる）
+    df["venue_race_count"] = grp_venue["win"].transform(
+        lambda x: x.shift(1).expanding(min_periods=1).count()
+    ).fillna(0).clip(upper=30)
 
     # --- 前走からの休養日数 ---
     df["_date_dt"] = pd.to_datetime(df["date"], format="%Y%m%d")
     df["_last_date"] = grp["_date_dt"].transform(lambda x: x.shift(1))
     df["days_since_last"] = (df["_date_dt"] - df["_last_date"]).dt.days.fillna(14).clip(1, 60)
+
+    # --- 季節性（月）---
+    df["month"] = df["_date_dt"].dt.month
+    df["month_sin"] = np.sin(2 * np.pi * df["month"] / 12)
+    df["month_cos"] = np.cos(2 * np.pi * df["month"] / 12)
+
     df.drop(columns=["_date_dt", "_last_date"], inplace=True)
+
+    # --- 連勝・連敗フラグ（勢い指標）---
+    def streak(x):
+        s = x.shift(1)
+        result = []
+        cur = 0
+        for v in s:
+            if pd.isna(v):
+                result.append(0)
+                cur = 0
+            elif v == 1:
+                cur = max(cur + 1, 1) if cur >= 0 else 1
+                result.append(cur)
+            else:
+                cur = min(cur - 1, -1) if cur <= 0 else -1
+                result.append(cur)
+        return result
+
+    df["win_streak"] = grp["win"].transform(streak)
 
     # 欠損補完
     for col in ["recent_win_3", "recent_win_5", "recent_top3_5"]:
@@ -187,20 +227,26 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- 時系列特徴量（直近成績・会場別・調子）---
     df = add_historical_features(df)
 
+    # --- レース番号（後半ほど格上レース）---
+    if "race_no" in df.columns:
+        df["race_no_enc"] = pd.to_numeric(df["race_no"], errors="coerce").fillna(6).clip(1, 12)
+
     # --- 時系列特徴量のレース内相対値 ---
-    for col in ["recent_win_5", "venue_win_rate", "recent_avg_rank"]:
+    for col in ["recent_win_5", "venue_win_rate", "recent_avg_rank",
+                "venue_top3_rate", "win_streak"]:
         if col in df.columns:
             race_mean = df.groupby(race_key)[col].transform("mean")
             race_std = df.groupby(race_key)[col].transform("std").replace(0, np.nan)
             df[f"{col}_rel"] = (df[col] - race_mean) / race_std.fillna(1)
 
     # --- 特徴量交互作用 ---
-    # ラインリーダー × 直近調子（強いリーダーが好調なら最強）
     df["leader_recent_form"] = df["is_line_leader"] * df.get("recent_win_5", 0)
-    # 競走得点相対優位 × レース難易度（強い選手が明確に有利なレース）
     df["kyosoten_edge"] = df["kyosoten_rel"] * df["race_competitiveness"].clip(lower=0)
-    # 会場巧者 × ライン先頭（地力+本拠地効果）
     df["venue_leader"] = df["is_line_leader"] * df.get("venue_win_rate", 0)
+    # 得意バンク × ライン先頭（地力+本拠地効果の強化版）
+    df["venue_top3_leader"] = df["is_line_leader"] * df.get("venue_top3_rate", 0)
+    # 連勝中 × 競走得点優位（勢いがある強い選手）
+    df["streak_kyosoten"] = df.get("win_streak", 0) * df["kyosoten_rel"].clip(lower=0)
 
     # --- ソフトラベル（学習用：着順の逆数を正規化）---
     soft = 1.0 / df["rank"].clip(lower=1)
@@ -263,6 +309,17 @@ FEATURE_COLS = [
     "leader_recent_form",
     "kyosoten_edge",
     "venue_leader",
+    # --- 新特徴量 ---
+    "venue_top3_rate",        # 会場別3着内率（得意バンク）
+    "venue_top3_rate_rel",    # 同レース内相対値
+    "venue_race_count",       # 会場での出走経験数
+    "month_sin",              # 季節性（月）sin
+    "month_cos",              # 季節性（月）cos
+    "win_streak",             # 連勝(+)/連敗(-)フラグ
+    "win_streak_rel",         # 同レース内相対値
+    "race_no_enc",            # レース番号
+    "venue_top3_leader",      # 得意バンク × ライン先頭
+    "streak_kyosoten",        # 連勝 × 競走得点優位
 ]
 
 TARGET_COL = "win"
