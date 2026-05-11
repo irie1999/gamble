@@ -1,10 +1,14 @@
 """保存したデータセットから特徴量を作成しモデルを学習する。
 
 使い方:
+    # 特徴量生成 + 学習（モデル新規作成 or 更新したい時）
     python -m scripts.train_model --input data/raw/races.parquet
 
     # 過去1年をOOS検証用に空けたい場合（=2025-05-10以前のみで学習）
     python -m scripts.train_model --input data/raw/races.parquet --train-until 2025-05-10
+
+    # 特徴量だけ更新（毎日の運用ではこれ。モデルは固定で使う）
+    python -m scripts.train_model --input data/raw/races.parquet --features-only
 """
 from __future__ import annotations
 
@@ -30,6 +34,11 @@ def main() -> None:
         default=None,
         help="この日付以前のレースだけで学習。これ以降を OOS バックテスト期間にできる（YYYY-MM-DD）",
     )
+    parser.add_argument(
+        "--features-only",
+        action="store_true",
+        help="特徴量だけ再生成しモデル学習はスキップ（毎日の運用用）",
+    )
     args = parser.parse_args()
 
     p = Path(args.input)
@@ -39,6 +48,11 @@ def main() -> None:
     features = build_features(df)
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     features.to_parquet(PROCESSED_DIR / "features.parquet", index=False)
+    logger.info("特徴量保存: %s rows=%d", PROCESSED_DIR / "features.parquet", len(features))
+
+    if args.features_only:
+        logger.info("--features-only 指定のため学習はスキップ")
+        return
 
     train_features = features
     if args.train_until:
