@@ -151,10 +151,18 @@ class BoatraceScraper:
 
     # ----- 出走表 -----
 
-    def fetch_race_card(self, jcd: str, race_no: int, race_date: date | str) -> RaceCard:
+    def fetch_race_card(
+        self,
+        jcd: str,
+        race_no: int,
+        race_date: date | str,
+        *,
+        max_retries: int = 2,
+        read_timeout: Optional[float] = None,
+    ) -> RaceCard:
         hd = self._ymd(race_date)
         url = self._url("racelist", rno=race_no, jcd=jcd, hd=hd)
-        html = self.client.get(url)
+        html = self.client.get(url, max_retries=max_retries, read_timeout=read_timeout)
         return self._parse_race_card(html, jcd=jcd, race_no=race_no, hd=hd)
 
     @staticmethod
@@ -262,10 +270,18 @@ class BoatraceScraper:
 
     # ----- レース結果 -----
 
-    def fetch_race_result(self, jcd: str, race_no: int, race_date: date | str) -> RaceResult:
+    def fetch_race_result(
+        self,
+        jcd: str,
+        race_no: int,
+        race_date: date | str,
+        *,
+        max_retries: int = 2,
+        read_timeout: Optional[float] = None,
+    ) -> RaceResult:
         hd = self._ymd(race_date)
         url = self._url("raceresult", rno=race_no, jcd=jcd, hd=hd)
-        html = self.client.get(url)
+        html = self.client.get(url, max_retries=max_retries, read_timeout=read_timeout)
         return self._parse_race_result(html, jcd=jcd, race_no=race_no, hd=hd)
 
     @staticmethod

@@ -56,12 +56,25 @@ class OddsScraper:
             return d.replace("-", "").replace("/", "")
         return d.strftime("%Y%m%d")
 
-    def fetch_win_odds(self, jcd: str, race_no: int, race_date: date | str) -> WinOdds:
+    def fetch_win_odds(
+        self,
+        jcd: str,
+        race_no: int,
+        race_date: date | str,
+        *,
+        max_retries: int = 1,
+        read_timeout: float = 20.0,
+    ) -> WinOdds:
+        """単勝オッズを取得。
+
+        デフォルトは fail-fast（リトライ無し・timeout 20s）。バッチ用途で
+        無駄なリトライを排除して総時間を短縮するため。1レースの取りこぼしを
+        許さない用途（recommend_today 等）では呼び出し側で max_retries を増やし、
+        timeout を短めにして外側でバックオフリトライするのが望ましい。
+        """
         hd = self._ymd(race_date)
         url = f"{BASE_URL}/oddstf?rno={race_no}&jcd={jcd}&hd={hd}"
-        # オッズページは応答が遅いため timeout を長め (20s)・リトライ無し（fail-fast）。
-        # 1日 数百〜数千リクエストを捌くため、無駄なリトライを排除して総時間を短縮。
-        html = self.client.get(url, max_retries=1, read_timeout=20.0)
+        html = self.client.get(url, max_retries=max_retries, read_timeout=read_timeout)
         # 中止・休場で「データがありません」を返すページは早期 return
         if "データがありません" in html:
             logger.debug("no-data page jcd=%s rno=%s d=%s", jcd, race_no, hd)

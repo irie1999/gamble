@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
@@ -115,30 +116,59 @@ def _predict_with_bundle(features_df: pd.DataFrame, bundle: dict) -> pd.DataFram
     return out
 
 
+def _fetch_odds_robust(jcd: str, race_no: int, target: date,
+                       max_attempts: int = 6) -> tuple[Optional[dict], Optional[str]]:
+    """単勝オッズを最大 max_attempts 回まで指数バックオフでリトライ取得。
+
+    戻り値: ({lane: odds} dict, reason_when_none)
+      - 成功: ({1: 4.2, 2: ...}, None)
+      - 中止/休場（リトライ無意味）: (None, "no_data")
+      - 全試行失敗: (None, "failed_after_N_attempts")
+    """
+    _, od = _scrapers()
+    last_err = "unknown"
+    for attempt in range(1, max_attempts + 1):
+        try:
+            wo = od.fetch_win_odds(jcd, race_no, target,
+                                   max_retries=1, read_timeout=8.0)
+        except Exception as e:
+            last_err = f"{type(e).__name__}"
+        else:
+            if not wo.odds:
+                # データなし: 中止/休場/開催前。リトライしても変わらない。
+                return None, "no_data"
+            if len(wo.odds) >= 6:
+                return wo.odds, None
+            last_err = f"partial_{len(wo.odds)}"
+        if attempt < max_attempts:
+            backoff = min(2 ** (attempt - 1), 8)
+            time.sleep(backoff)
+    logger.warning("odds FINAL FAIL jcd=%s rno=%s d=%s after %d attempts (last: %s)",
+                   jcd, race_no, target, max_attempts, last_err)
+    return None, f"failed_{last_err}"
+
+
 def _process_race(
     jcd: str, race_no: int, target: date, bundle: dict,
     blend_alpha: float, takeout: float,
     max_odds: Optional[float] = None,
 ) -> Optional[dict]:
-    br, od = _scrapers()
+    br, _ = _scrapers()
     # 先に odds を取得：max_odds で弾くレースは racecard を取らずに早期スキップ。
-    # 1号艇のオッズが max_odds 超 = 構造的に1号艇が弱いレースなので、特徴量計算する価値も無い。
-    try:
-        wo = od.fetch_win_odds(jcd, race_no, target)
-    except Exception as e:
-        logger.debug("odds failed jcd=%s rno=%s: %s", jcd, race_no, e)
-        return None
-    if not wo.odds or len(wo.odds) < 6:
+    odds_map, _reason = _fetch_odds_robust(jcd, race_no, target)
+    if odds_map is None:
         return None
     if max_odds is not None:
-        lane1_odds = wo.odds.get(1)
+        lane1_odds = odds_map.get(1)
         if lane1_odds is None or lane1_odds > max_odds:
             return None
 
     try:
-        card = br.fetch_race_card(jcd, race_no, target)
+        card = br.fetch_race_card(jcd, race_no, target,
+                                  max_retries=3, read_timeout=8.0)
     except Exception as e:
-        logger.debug("racelist failed jcd=%s rno=%s: %s", jcd, race_no, e)
+        logger.warning("racelist FINAL FAIL jcd=%s rno=%s d=%s: %s",
+                       jcd, race_no, target, type(e).__name__)
         return None
     empty = RaceResult(race_date=card.race_date, venue_code=card.venue_code, race_no=card.race_no)
     df = build_dataset([(card, empty)])
@@ -146,7 +176,7 @@ def _process_race(
     pred = _predict_with_bundle(feats, bundle)
 
     pred = pred.copy()
-    pred["odds_win"] = pred["lane"].map(wo.odds).astype(float)
+    pred["odds_win"] = pred["lane"].map(odds_map).astype(float)
     if pred["odds_win"].isna().any():
         return None
     blended = add_blended_probability(pred, alpha=blend_alpha, takeout=takeout)
@@ -171,33 +201,46 @@ def _process_race(
     }
 
 
-def _fetch_result(jcd: str, race_no: int, target: date) -> tuple[Optional[dict], Optional[str]]:
-    """レース結果を取得。
+def _fetch_result(jcd: str, race_no: int, target: date,
+                  max_attempts: int = 4) -> tuple[Optional[dict], Optional[str]]:
+    """レース結果を最大 max_attempts 回まで指数バックオフで取得。
 
     戻り値: (result_dict or None, reason_when_none)
-      reason: "fetch_failed" / "no_rows" / "no_winner" など。デバッグ用。
+      reason: "no_rows"（未開催/結果未公開・リトライ無意味）
+             / "no_winner"（全艇失格レアケース）
+             / "failed_after_N_attempts"（HTTP/timeout）
     """
     br = _result_scraper()
-    try:
-        result = br.fetch_race_result(jcd, race_no, target)
-    except Exception as e:
-        logger.warning("result fetch failed jcd=%s rno=%s d=%s err=%s",
-                       jcd, race_no, target, type(e).__name__)
-        return None, "fetch_failed"
-    if not result.rows:
-        return None, "no_rows"  # 未開催 or 結果未公開
-    winner = next((r for r in result.rows if r.rank == 1), None)
-    if winner is None:
-        return None, "no_winner"  # 全艇失格 等のレアケース
-    win_payout = None
-    for combo, amt in result.payouts.get("win", []):
+    last_err = "unknown"
+    for attempt in range(1, max_attempts + 1):
         try:
-            if int(combo) == winner.lane:
-                win_payout = amt
-                break
-        except (ValueError, TypeError):
+            result = br.fetch_race_result(jcd, race_no, target,
+                                          max_retries=1, read_timeout=10.0)
+        except Exception as e:
+            last_err = f"{type(e).__name__}"
+            if attempt < max_attempts:
+                time.sleep(min(2 ** (attempt - 1), 8))
             continue
-    return {"winner_lane": int(winner.lane), "win_payout_yen": win_payout}, None
+
+        if not result.rows:
+            # 未開催 or 結果未公開: リトライしても変わらない
+            return None, "no_rows"
+        winner = next((r for r in result.rows if r.rank == 1), None)
+        if winner is None:
+            return None, "no_winner"
+        win_payout = None
+        for combo, amt in result.payouts.get("win", []):
+            try:
+                if int(combo) == winner.lane:
+                    win_payout = amt
+                    break
+            except (ValueError, TypeError):
+                continue
+        return {"winner_lane": int(winner.lane), "win_payout_yen": win_payout}, None
+
+    logger.warning("result FINAL FAIL jcd=%s rno=%s d=%s after %d attempts (last: %s)",
+                   jcd, race_no, target, max_attempts, last_err)
+    return None, f"failed_{last_err}"
 
 
 def _attach_results(rows: list[dict], target: date, workers: int) -> dict:
@@ -243,16 +286,23 @@ def _attach_results(rows: list[dict], target: date, workers: int) -> dict:
     return failures
 
 
-def _scan_targets(target: date, venues: list[str], workers: int) -> list[tuple[str, int]]:
-    """各場の開催レース番号を並列に取得。"""
+def _scan_targets(target: date, venues: list[str], workers: int,
+                  max_attempts: int = 4) -> list[tuple[str, int]]:
+    """各場の開催レース番号を並列に取得。失敗した場は最大 max_attempts まで再試行。"""
     out: list[tuple[str, int]] = []
     def task(jcd: str) -> tuple[str, list[int]]:
         br, _ = _scrapers()
-        try:
-            return jcd, br.fetch_race_index(jcd, target)
-        except Exception as e:
-            logger.warning("raceindex failed jcd=%s: %s", jcd, e)
-            return jcd, []
+        last_err = "unknown"
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return jcd, br.fetch_race_index(jcd, target)
+            except Exception as e:
+                last_err = f"{type(e).__name__}"
+                if attempt < max_attempts:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+        logger.warning("raceindex FINAL FAIL jcd=%s after %d attempts (last: %s)",
+                       jcd, max_attempts, last_err)
+        return jcd, []
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for jcd, rnos in ex.map(task, venues):
             for r in rnos:
