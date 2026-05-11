@@ -12,16 +12,21 @@
     # 中断時の再開（既に取得済みのrace_idはスキップ）
     python -m scripts.scrape_odds --from ... --to ... --resume
 
+    # 並列度を上げて高速化（4並列で約4倍速）
+    python -m scripts.scrape_odds --from ... --to ... --workers 4
+
 注意:
-    - boatrace.jp HTML から取得するため遅い（1リクエスト1秒）。
+    - boatrace.jp HTML から取得するため遅い。
     - 過去レースは「締切時オッズ」が表示される。
-    - レート制限を守って節度ある利用を。
+    - レート制限を守って節度ある利用を。並列度を上げすぎるとブロックされる。
 """
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
+from threading import Lock, local
 from typing import Optional
 
 import pandas as pd
@@ -140,6 +145,12 @@ def main() -> None:
         default=200,
         help="N レース毎に部分結果を保存（中断耐性）",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="並列スクレイパー数。2〜6 推奨。1 で従来のシリアル動作",
+    )
     parser.add_argument("--out", default=str(RAW_DIR / "odds_win.csv"))
     args = parser.parse_args()
 
@@ -154,22 +165,35 @@ def main() -> None:
         targets = [(d, jcd, rno) for (d, jcd, rno) in targets
                    if _race_id(d.strftime("%Y%m%d"), jcd, rno) not in skip_ids]
 
-    logger.info("対象レース数: %d", len(targets))
+    logger.info("対象レース数: %d (workers=%d)", len(targets), args.workers)
     if not targets:
         logger.info("取得対象なし。終了。")
         return
 
     from src.scraper.http_client import HttpClient
-    scraper = OddsScraper(client=HttpClient(interval_sec=args.interval))
+
+    # スレッドローカルなスクレイパー（HttpClient のスロットリングをワーカー毎に独立させる）
+    _TLS = local()
+
+    def _scraper() -> OddsScraper:
+        if not hasattr(_TLS, "od"):
+            _TLS.od = OddsScraper(client=HttpClient(interval_sec=args.interval))
+        return _TLS.od
+
     rows: list[dict] = []
+    rows_lock = Lock()
     success = 0
     attempts = 0
+    counter_lock = Lock()
 
     def _flush() -> None:
-        if not rows:
+        with rows_lock:
+            current = list(rows)
+            rows.clear()
+        if not current:
             return
-        new_df = pd.DataFrame(rows)
-        if args.resume and out_path.exists():
+        new_df = pd.DataFrame(current)
+        if (args.resume and out_path.exists()) or out_path.exists():
             old = _read_table(out_path)
             new_df = pd.concat([old, new_df], ignore_index=True).drop_duplicates(
                 subset=["race_id", "lane"], keep="last"
@@ -179,27 +203,55 @@ def main() -> None:
         else:
             new_df.to_csv(out_path, index=False)
 
-    try:
-        for d, jcd, rno in targets:
-            attempts += 1
-            try:
-                wo = scraper.fetch_win_odds(jcd, rno, d)
-            except Exception as e:
-                logger.warning("odds失敗 jcd=%s rno=%s d=%s err=%s", jcd, rno, d, e)
-                continue
-            if not wo.odds:
-                continue
-            success += 1
-            rid = _race_id(d.strftime("%Y%m%d"), jcd, rno)
-            for lane, odds in wo.odds.items():
-                rows.append({"race_id": rid, "lane": lane, "odds_win": odds})
+    def _fetch_one(triple: tuple[date, str, int]) -> tuple[Optional[str], list[dict]]:
+        d, jcd, rno = triple
+        od = _scraper()
+        try:
+            wo = od.fetch_win_odds(jcd, rno, d)
+        except Exception as e:
+            logger.warning("odds失敗 jcd=%s rno=%s d=%s err=%s", jcd, rno, d, e)
+            return None, []
+        if not wo.odds:
+            return None, []
+        rid = _race_id(d.strftime("%Y%m%d"), jcd, rno)
+        return rid, [{"race_id": rid, "lane": lane, "odds_win": odds}
+                     for lane, odds in wo.odds.items()]
 
-            if attempts % 50 == 0:
-                logger.info("progress: %d/%d (success=%d)", attempts, len(targets), success)
-            if attempts % args.checkpoint_every == 0:
-                _flush()
-                rows = []
-                logger.info("checkpoint saved: %s", out_path)
+    try:
+        if args.workers <= 1:
+            # 従来のシリアル動作
+            for triple in targets:
+                attempts += 1
+                rid, new_rows = _fetch_one(triple)
+                if rid is not None:
+                    success += 1
+                    with rows_lock:
+                        rows.extend(new_rows)
+                if attempts % 50 == 0:
+                    logger.info("progress: %d/%d (success=%d)", attempts, len(targets), success)
+                if attempts % args.checkpoint_every == 0:
+                    _flush()
+                    logger.info("checkpoint saved: %s", out_path)
+        else:
+            # 並列実行: スレッドローカル HttpClient で interval_sec をワーカー毎に独立。
+            # 各ワーカーが interval_sec 間隔でリクエストするので、合算 RPS は workers/interval_sec。
+            with ThreadPoolExecutor(max_workers=args.workers) as ex:
+                futures = {ex.submit(_fetch_one, t): t for t in targets}
+                for fut in as_completed(futures):
+                    with counter_lock:
+                        attempts += 1
+                        cur = attempts
+                    rid, new_rows = fut.result()
+                    if rid is not None:
+                        with counter_lock:
+                            success += 1
+                        with rows_lock:
+                            rows.extend(new_rows)
+                    if cur % 50 == 0:
+                        logger.info("progress: %d/%d (success=%d)", cur, len(targets), success)
+                    if cur % args.checkpoint_every == 0:
+                        _flush()
+                        logger.info("checkpoint saved: %s", out_path)
     finally:
         _flush()
 
