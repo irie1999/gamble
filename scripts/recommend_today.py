@@ -286,27 +286,70 @@ def _attach_results(rows: list[dict], target: date, workers: int) -> dict:
     return failures
 
 
+class MaintenanceMode(RuntimeError):
+    """boatrace.jp がシステムメンテナンス中。これ以上のリクエストは無意味。"""
+
+
+# プロセスで一度メンテ検出したら全スレッドの再試行を即座に止めるためのフラグ
+_MAINTENANCE_DETECTED = False
+
+
+def _check_maintenance(html: str) -> bool:
+    """レスポンス本文にメンテナンス告知が含まれているか。
+
+    boatrace.jp は 22:00〜翌朝にメンテすると、どの URL でも「システムメンテナンス」を
+    含む案内ページを返してくる。タイムアウトより前に検出できるケースもある。
+    """
+    return ("システムメンテナンス" in html) or ("ご利用になれません" in html)
+
+
 def _scan_targets(target: date, venues: list[str], workers: int,
                   max_attempts: int = 4) -> list[tuple[str, int]]:
-    """各場の開催レース番号を並列に取得。失敗した場は最大 max_attempts まで再試行。"""
+    """各場の開催レース番号を並列に取得。失敗した場は最大 max_attempts まで再試行。
+
+    メンテナンス検出 or 全場初回失敗の時点で早期に MaintenanceMode を投げて呼び出し側を
+    短絡させる（無駄なリトライで数十秒消費しないため）。
+    """
+    global _MAINTENANCE_DETECTED
     out: list[tuple[str, int]] = []
+
     def task(jcd: str) -> tuple[str, list[int]]:
+        global _MAINTENANCE_DETECTED
         br, _ = _scrapers()
         last_err = "unknown"
         for attempt in range(1, max_attempts + 1):
+            if _MAINTENANCE_DETECTED:
+                return jcd, []
             try:
-                return jcd, br.fetch_race_index(jcd, target)
+                rnos = br.fetch_race_index(jcd, target)
+                return jcd, rnos
             except Exception as e:
                 last_err = f"{type(e).__name__}"
+                # HTTPエラー本文を見られる場合はメンテ判定
+                resp_text = getattr(getattr(e, "response", None), "text", "") or ""
+                if _check_maintenance(resp_text):
+                    _MAINTENANCE_DETECTED = True
+                    return jcd, []
                 if attempt < max_attempts:
                     time.sleep(min(2 ** (attempt - 1), 8))
         logger.warning("raceindex FINAL FAIL jcd=%s after %d attempts (last: %s)",
                        jcd, max_attempts, last_err)
         return jcd, []
+
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for jcd, rnos in ex.map(task, venues):
-            for r in rnos:
-                out.append((jcd, r))
+        results = list(ex.map(task, venues))
+
+    # 全場が初回試行で失敗（rnos が空かつ メンテ検出済み）なら、メンテ確定
+    failed_count = sum(1 for _, rnos in results if not rnos)
+    if _MAINTENANCE_DETECTED or (len(venues) >= 3 and failed_count == len(venues)):
+        raise MaintenanceMode(
+            "boatrace.jp は現在メンテナンスまたは到達不可（全 %d 場の開催情報取得に失敗）"
+            % len(venues)
+        )
+
+    for jcd, rnos in results:
+        for r in rnos:
+            out.append((jcd, r))
     return out
 
 
@@ -575,7 +618,16 @@ def main() -> None:
     _silence_lightgbm(bundle)  # LightGBM の alias 衝突警告を抑止（高速化＆ログ削減）
 
     # ① 各場の開催レース番号
-    targets = _scan_targets(target, venues, args.workers)
+    try:
+        targets = _scan_targets(target, venues, args.workers)
+    except MaintenanceMode as e:
+        print()
+        print("=" * 60)
+        print("⚠ boatrace.jp はシステムメンテナンス中です")
+        print("=" * 60)
+        print("公式の定例メンテは概ね 22:00〜翌朝6:30。再開後に再実行してください。")
+        print(f"詳細: {e}")
+        return
     print(f"開催レース総数: {len(targets)} → 各レースで racelist+odds の2リクエスト")
     if not targets:
         print("(本日は対象レースなし)")
