@@ -117,7 +117,7 @@ def _predict_with_bundle(features_df: pd.DataFrame, bundle: dict) -> pd.DataFram
 
 
 def _fetch_odds_robust(jcd: str, race_no: int, target: date,
-                       max_attempts: int = 6) -> tuple[Optional[dict], Optional[str]]:
+                       max_attempts: int = 3) -> tuple[Optional[dict], Optional[str]]:
     """単勝オッズを最大 max_attempts 回まで指数バックオフでリトライ取得。
 
     戻り値: ({lane: odds} dict, reason_when_none)
@@ -130,7 +130,7 @@ def _fetch_odds_robust(jcd: str, race_no: int, target: date,
     for attempt in range(1, max_attempts + 1):
         try:
             wo = od.fetch_win_odds(jcd, race_no, target,
-                                   max_retries=1, read_timeout=8.0)
+                                   max_retries=1, read_timeout=10.0)
         except Exception as e:
             last_err = f"{type(e).__name__}"
         else:
@@ -141,8 +141,7 @@ def _fetch_odds_robust(jcd: str, race_no: int, target: date,
                 return wo.odds, None
             last_err = f"partial_{len(wo.odds)}"
         if attempt < max_attempts:
-            backoff = min(2 ** (attempt - 1), 8)
-            time.sleep(backoff)
+            time.sleep(min(2 ** (attempt - 1), 4))
     logger.warning("odds FINAL FAIL jcd=%s rno=%s d=%s after %d attempts (last: %s)",
                    jcd, race_no, target, max_attempts, last_err)
     return None, f"failed_{last_err}"
@@ -153,11 +152,18 @@ def _process_race(
     blend_alpha: float, takeout: float,
     max_odds: Optional[float] = None,
 ) -> Optional[dict]:
+    # 同じ場で連続失敗が閾値を超えていたら、無駄なリトライを避けて即スキップ。
+    if _VENUE_FAILS.get(jcd, 0) >= _VENUE_FAIL_THRESHOLD:
+        return None
     br, _ = _scrapers()
     # 先に odds を取得：max_odds で弾くレースは racecard を取らずに早期スキップ。
-    odds_map, _reason = _fetch_odds_robust(jcd, race_no, target)
+    odds_map, reason = _fetch_odds_robust(jcd, race_no, target)
     if odds_map is None:
+        if reason and reason.startswith("failed_"):
+            _VENUE_FAILS[jcd] = _VENUE_FAILS.get(jcd, 0) + 1
         return None
+    # 成功 → このベニューのカウンタをリセット
+    _VENUE_FAILS[jcd] = 0
     if max_odds is not None:
         lane1_odds = odds_map.get(1)
         if lane1_odds is None or lane1_odds > max_odds:
@@ -292,6 +298,10 @@ class MaintenanceMode(RuntimeError):
 
 # プロセスで一度メンテ検出したら全スレッドの再試行を即座に止めるためのフラグ
 _MAINTENANCE_DETECTED = False
+
+# 場ごとの連続失敗カウンタ。閾値超過したら以降のレースは即スキップ（無駄な待機を避ける）
+_VENUE_FAILS: dict[str, int] = {}
+_VENUE_FAIL_THRESHOLD = 3  # 連続でこの数失敗したら、その場は諦める
 
 
 def _check_maintenance(html: str) -> bool:
