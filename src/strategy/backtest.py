@@ -212,35 +212,44 @@ def run_backtest(
     # --- 結果突合 ---
     winners = _winner_lane_from_payouts(payouts_df)
     bets = bets.merge(winners, on="race_id", how="left")
+    # 未開催 or 結果未公開: winner_lane NaN → race_finished=False（レポートで「未確定」表示）
+    bets["race_finished"] = bets["winner_lane"].notna()
     bets["hit"] = (bets["lane"] == bets["winner_lane"]).fillna(False)
     bets["payout_per_100"] = np.where(bets["hit"], bets["win_payout_yen"], 0.0)
     bets["return_yen"] = bets["stake"] * bets["payout_per_100"] / 100.0
     bets["pnl"] = bets["return_yen"] - bets["stake"]
 
-    # equity curve（race_date があれば日付・なければ race_id 順）
-    sort_cols = [c for c in ["race_date", "race_id"] if c in bets.columns]
-    bets_sorted = bets.sort_values(sort_cols).reset_index(drop=True)
-    equity = config.initial_bankroll + bets_sorted["pnl"].cumsum()
-    equity_curve = pd.Series(equity.values, index=bets_sorted["race_id"])
+    # 確定済みベットだけで equity curve と集計（未確定ベットは未着地として除外）
+    finished = bets[bets["race_finished"]]
+    n_pending = int((~bets["race_finished"]).sum())
 
-    stake_total = float(bets["stake"].sum())
-    return_total = float(bets["return_yen"].sum())
+    sort_cols = [c for c in ["race_date", "race_id"] if c in finished.columns]
+    finished_sorted = finished.sort_values(sort_cols).reset_index(drop=True)
+    equity = config.initial_bankroll + finished_sorted["pnl"].cumsum()
+    equity_curve = pd.Series(equity.values, index=finished_sorted["race_id"])
+
+    stake_total = float(finished["stake"].sum())
+    return_total = float(finished["return_yen"].sum())
     pnl = return_total - stake_total
     roi = pnl / stake_total if stake_total > 0 else 0.0
 
     # 最大ドローダウン
-    peak = equity.cummax()
-    drawdown = (equity - peak) / peak
-    max_dd = float(drawdown.min()) if len(drawdown) else 0.0
+    if len(equity):
+        peak = equity.cummax()
+        drawdown = (equity - peak) / peak
+        max_dd = float(drawdown.min())
+    else:
+        max_dd = 0.0
 
     summary = {
         "strategy": config.strategy,
         "n_bets": int(len(bets)),
+        "n_pending": n_pending,
         "stake_total": stake_total,
         "return_total": return_total,
         "pnl": float(pnl),
         "roi": float(roi),
-        "hit_rate": float(bets["hit"].mean()),
+        "hit_rate": float(finished["hit"].mean()) if len(finished) else 0.0,
         "max_drawdown": max_dd,
         "ending_bankroll": float(equity.iloc[-1]) if len(equity) else config.initial_bankroll,
     }

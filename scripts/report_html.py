@@ -32,15 +32,24 @@ def _summary(bets: pd.DataFrame) -> dict:
     n = len(bets)
     if n == 0:
         return {}
-    wins = int(bets["hit"].sum())
-    stake = float(bets["stake"].sum())
-    ret = float(bets["return_yen"].sum())
+    # race_finished 列があれば未確定を集計から除外（過去日付なら全レース確定なので全部使う）
+    if "race_finished" in bets.columns:
+        finished = bets[bets["race_finished"]]
+    else:
+        finished = bets
+    n_finished = len(finished)
+    n_pending = n - n_finished
+    wins = int(finished["hit"].sum()) if n_finished else 0
+    stake = float(finished["stake"].sum())
+    ret = float(finished["return_yen"].sum())
     pnl = ret - stake
     avg_odds = float(bets["odds_win"].mean()) if "odds_win" in bets.columns else float("nan")
     return {
         "n_bets": n,
+        "n_finished": n_finished,
+        "n_pending": n_pending,
         "wins": wins,
-        "hit_rate": wins / n,
+        "hit_rate": wins / n_finished if n_finished else 0.0,
         "stake": stake,
         "return": ret,
         "pnl": pnl,
@@ -50,6 +59,9 @@ def _summary(bets: pd.DataFrame) -> dict:
 
 
 def _cumulative_pnl(bets: pd.DataFrame) -> tuple[list[str], list[float]]:
+    # 未確定ベットは累積PnLには加算しない
+    if "race_finished" in bets.columns:
+        bets = bets[bets["race_finished"]]
     bets = bets.sort_values("race_date").reset_index(drop=True)
     cum = (bets["return_yen"] - bets["stake"]).cumsum()
     return bets["race_date"].astype(str).tolist(), cum.round(0).tolist()
@@ -58,6 +70,9 @@ def _cumulative_pnl(bets: pd.DataFrame) -> tuple[list[str], list[float]]:
 def _by_odds_bucket(bets: pd.DataFrame) -> list[dict]:
     if "odds_win" not in bets.columns or bets["odds_win"].isna().all():
         return []
+    # 集計は確定済みのみ
+    if "race_finished" in bets.columns:
+        bets = bets[bets["race_finished"]]
     bins = [1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 100.0]
     labels = ["1-2", "2-3", "3-5", "5-7", "7-10", "10+"]
     bets = bets.copy()
@@ -81,6 +96,9 @@ def _by_odds_bucket(bets: pd.DataFrame) -> list[dict]:
 
 def _by_venue(bets: pd.DataFrame) -> list[dict]:
     bets = bets.copy()
+    # 集計は確定済みのみ
+    if "race_finished" in bets.columns:
+        bets = bets[bets["race_finished"]]
     bets["venue"] = bets["race_id"].astype(str).str.split("-").str[1]
     out = []
     for venue, sub in bets.groupby("venue"):
@@ -133,10 +151,11 @@ HTML_TEMPLATE = """<!doctype html>
 <h2>サマリ</h2>
 <div class="kpi">
   <div class="card"><div class="label">n_bets</div><div class="value">{n_bets}</div></div>
-  <div class="card"><div class="label">勝率</div><div class="value">{hit_rate}</div></div>
-  <div class="card"><div class="label">ROI</div><div class="value {roi_cls}">{roi}</div></div>
-  <div class="card"><div class="label">PnL</div><div class="value {pnl_cls}">¥{pnl}</div></div>
-  <div class="card"><div class="label">投入額</div><div class="value">¥{stake}</div></div>
+  <div class="card"><div class="label">確定/未確定</div><div class="value">{n_finished}/{n_pending}</div></div>
+  <div class="card"><div class="label">勝率（確定分）</div><div class="value">{hit_rate}</div></div>
+  <div class="card"><div class="label">ROI（確定分）</div><div class="value {roi_cls}">{roi}</div></div>
+  <div class="card"><div class="label">PnL（確定分）</div><div class="value {pnl_cls}">¥{pnl}</div></div>
+  <div class="card"><div class="label">投入額（確定分）</div><div class="value">¥{stake}</div></div>
   <div class="card"><div class="label">平均オッズ</div><div class="value">{avg_odds}</div></div>
 </div>
 
@@ -233,9 +252,16 @@ def _cell(value, fmt: str = "{}") -> str:
 
 
 def _row_recent(r: pd.Series) -> str:
-    cls = "pos" if r["pnl"] >= 0 else "neg"
     venue = str(r["race_id"]).split("-")[1] if "-" in str(r["race_id"]) else "?"
-    result = "🟢 的中" if r["hit"] else "✕ 不的中"
+    # 未確定（race_finished=False）は的中/不的中を表示しない
+    is_pending = ("race_finished" in r.index) and (not bool(r["race_finished"]))
+    if is_pending:
+        result = "⏳ 未確定"
+        pnl_cell = "<td>-</td>"
+    else:
+        result = "🟢 的中" if r["hit"] else "✕ 不的中"
+        cls = "pos" if r["pnl"] >= 0 else "neg"
+        pnl_cell = f"<td class='{cls}'>¥{_fmt_yen(r['pnl'])}</td>"
     odds = r.get("odds_win") if "odds_win" in r else None
     p_blend = r.get("blended_win_prob") if "blended_win_prob" in r else r.get("pred_win_prob")
     ev = r.get("ev") if "ev" in r else None
@@ -246,7 +272,7 @@ def _row_recent(r: pd.Series) -> str:
             f"{_cell(ev, '{:.3f}')}"
             f"<td>¥{_fmt_yen(r['stake'])}</td>"
             f"<td>{result}</td>"
-            f"<td class='{cls}'>¥{_fmt_yen(r['pnl'])}</td></tr>")
+            f"{pnl_cell}</tr>")
 
 
 def main() -> None:
@@ -275,6 +301,8 @@ def main() -> None:
         source=Path(args.bets).name,
         generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
         n_bets=summ["n_bets"],
+        n_finished=summ.get("n_finished", summ["n_bets"]),
+        n_pending=summ.get("n_pending", 0),
         date_min=bets["race_date"].min(),
         date_max=bets["race_date"].max(),
         hit_rate=f"{summ['hit_rate']*100:.1f}%",
