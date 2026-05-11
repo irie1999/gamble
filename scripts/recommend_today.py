@@ -52,11 +52,38 @@ _TLS = local()
 
 def _scrapers() -> tuple[BoatraceScraper, OddsScraper]:
     if not hasattr(_TLS, "br"):
-        client_a = HttpClient(interval_sec=0.3)
-        client_b = HttpClient(interval_sec=0.3)
+        # read timeout は短め（5s）にし、遅延ベース hang を避ける。
+        # boatrace.jp は正常時 1〜2 秒で返るので、5s を超えるなら混雑とみなしてリトライへ。
+        client_a = HttpClient(interval_sec=0.3, timeout_sec=5)
+        client_b = HttpClient(interval_sec=0.3, timeout_sec=5)
         _TLS.br = BoatraceScraper(client=client_a)
         _TLS.od = OddsScraper(client=client_b)
     return _TLS.br, _TLS.od
+
+
+def _silence_lightgbm(bundle: dict) -> None:
+    """sklearn alias と LightGBM native 名のパラメータ衝突を解消し、
+
+    predict 毎の C++ 由来の "X will be ignored" 警告を消す。
+    （学習時の native 名: feature_fraction / bagging_fraction / bagging_freq）
+    """
+    model = bundle.get("model")
+    if model is None or not hasattr(model, "set_params"):
+        return
+    try:
+        booster_params = getattr(model, "booster_", None)
+        native = booster_params.params if booster_params is not None else {}
+        updates: dict = {}
+        if "feature_fraction" in native:
+            updates["colsample_bytree"] = float(native["feature_fraction"])
+        if "bagging_fraction" in native:
+            updates["subsample"] = float(native["bagging_fraction"])
+        if "bagging_freq" in native:
+            updates["subsample_freq"] = int(native["bagging_freq"])
+        if updates:
+            model.set_params(**updates)
+    except Exception as e:
+        logger.debug("could not silence lightgbm warnings: %s", e)
 
 
 def _predict_with_bundle(features_df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
@@ -79,8 +106,23 @@ def _predict_with_bundle(features_df: pd.DataFrame, bundle: dict) -> pd.DataFram
 def _process_race(
     jcd: str, race_no: int, target: date, bundle: dict,
     blend_alpha: float, takeout: float,
+    max_odds: Optional[float] = None,
 ) -> Optional[dict]:
     br, od = _scrapers()
+    # 先に odds を取得：max_odds で弾くレースは racecard を取らずに早期スキップ。
+    # 1号艇のオッズが max_odds 超 = 構造的に1号艇が弱いレースなので、特徴量計算する価値も無い。
+    try:
+        wo = od.fetch_win_odds(jcd, race_no, target)
+    except Exception as e:
+        logger.debug("odds failed jcd=%s rno=%s: %s", jcd, race_no, e)
+        return None
+    if not wo.odds or len(wo.odds) < 6:
+        return None
+    if max_odds is not None:
+        lane1_odds = wo.odds.get(1)
+        if lane1_odds is None or lane1_odds > max_odds:
+            return None
+
     try:
         card = br.fetch_race_card(jcd, race_no, target)
     except Exception as e:
@@ -91,13 +133,6 @@ def _process_race(
     feats = build_features(df)
     pred = _predict_with_bundle(feats, bundle)
 
-    try:
-        wo = od.fetch_win_odds(jcd, race_no, target)
-    except Exception as e:
-        logger.debug("odds failed jcd=%s rno=%s: %s", jcd, race_no, e)
-        return None
-    if not wo.odds or len(wo.odds) < 6:
-        return None
     pred = pred.copy()
     pred["odds_win"] = pred["lane"].map(wo.odds).astype(float)
     if pred["odds_win"].isna().any():
@@ -467,6 +502,7 @@ def main() -> None:
     print(f"対象日={target} 対象場={','.join(venues)} workers={args.workers}")
 
     bundle = joblib.load(MODELS_DIR / "lgb_win_model.joblib")
+    _silence_lightgbm(bundle)  # LightGBM の alias 衝突警告を抑止（高速化＆ログ削減）
 
     # ① 各場の開催レース番号
     targets = _scan_targets(target, venues, args.workers)
@@ -481,7 +517,7 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futures = {
             ex.submit(_process_race, jcd, rno, target, bundle,
-                      args.blend_alpha, args.takeout): (jcd, rno)
+                      args.blend_alpha, args.takeout, args.max_odds): (jcd, rno)
             for jcd, rno in targets
         }
         for fut in as_completed(futures):
