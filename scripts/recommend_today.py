@@ -53,10 +53,10 @@ _TLS = local()
 
 def _scrapers() -> tuple[BoatraceScraper, OddsScraper]:
     if not hasattr(_TLS, "br"):
-        # read timeout は短め（5s）にし、遅延ベース hang を避ける。
-        # boatrace.jp は正常時 1〜2 秒で返るので、5s を超えるなら混雑とみなしてリトライへ。
-        client_a = HttpClient(interval_sec=0.3, timeout_sec=5)
-        client_b = HttpClient(interval_sec=0.3, timeout_sec=5)
+        # read timeout=15s: boatrace.jp は正常時1〜2秒で返るが、メンテ明けや
+        # ピーク時は5〜10秒かかることがある。短すぎると正常応答も切ってしまう。
+        client_a = HttpClient(interval_sec=0.3, timeout_sec=15)
+        client_b = HttpClient(interval_sec=0.3, timeout_sec=15)
         _TLS.br = BoatraceScraper(client=client_a)
         _TLS.od = OddsScraper(client=client_b)
     return _TLS.br, _TLS.od
@@ -339,12 +339,15 @@ def _scan_targets(target: date, venues: list[str], workers: int,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         results = list(ex.map(task, venues))
 
-    # 全場が初回試行で失敗（rnos が空かつ メンテ検出済み）なら、メンテ確定
-    failed_count = sum(1 for _, rnos in results if not rnos)
-    if _MAINTENANCE_DETECTED or (len(venues) >= 3 and failed_count == len(venues)):
+    # メンテ確定はレスポンス本文で「システムメンテナンス」を検出した時のみ。
+    # 全タイムアウトの場合はサーバー過負荷 or ネットワーク問題なので、別メッセージ。
+    if _MAINTENANCE_DETECTED:
+        raise MaintenanceMode("boatrace.jp 公式がシステムメンテナンス中")
+    failed = [jcd for jcd, rnos in results if not rnos]
+    if len(failed) == len(venues) and len(venues) >= 3:
         raise MaintenanceMode(
-            "boatrace.jp は現在メンテナンスまたは到達不可（全 %d 場の開催情報取得に失敗）"
-            % len(venues)
+            f"boatrace.jp 全 {len(venues)} 場の応答無し（タイムアウト連発）。"
+            "サイト応答が遅いか、ネットワーク不安定の可能性。--workers を下げるか時間を空けて再試行。"
         )
 
     for jcd, rnos in results:
