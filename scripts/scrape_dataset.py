@@ -77,6 +77,24 @@ def _crawl_html(dates, venue_codes):
     yield from scraper.crawl(dates, venue_codes=venue_codes)
 
 
+def _merge_with_existing(new_df: pd.DataFrame, out_path: Path,
+                         key_cols: list[str]) -> pd.DataFrame:
+    """既存ファイルがあれば読み込み、key_cols で重複排除した上で結合。
+
+    new_df 側を優先（同じ key の行は新しいもので上書き）する。
+    """
+    if not out_path.exists():
+        return new_df
+    if out_path.suffix == ".parquet":
+        old = pd.read_parquet(out_path)
+    else:
+        old = pd.read_csv(out_path)
+    combined = pd.concat([old, new_df], ignore_index=True)
+    # 後勝ち: new_df 側を keep="last" で残す
+    combined = combined.drop_duplicates(subset=key_cols, keep="last")
+    return combined
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--from", dest="date_from", required=True, help="YYYY-MM-DD")
@@ -84,6 +102,11 @@ def main() -> None:
     parser.add_argument("--venues", nargs="*", default=None, help="場コード (例: 01 12 22)")
     parser.add_argument("--source", choices=["official", "html"], default="official")
     parser.add_argument("--out", default=str(RAW_DIR / "races.parquet"))
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="既存ファイルを破棄して新規作成（デフォルトは差分追記）",
+    )
     args = parser.parse_args()
 
     start = date.fromisoformat(args.date_from)
@@ -102,6 +125,18 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     payouts_path = out_path.with_name(out_path.stem + "_payouts" + out_path.suffix)
+
+    # 既存と統合（明示的に --overwrite された時のみ全置換）
+    if not args.overwrite:
+        before_main = len(df)
+        before_pay = len(payouts_df)
+        df = _merge_with_existing(df, out_path, key_cols=["race_id", "lane"])
+        payouts_df = _merge_with_existing(
+            payouts_df, payouts_path, key_cols=["race_id", "bet_type", "combo"]
+        )
+        logger.info("差分マージ: races %d→%d / payouts %d→%d",
+                    before_main, len(df), before_pay, len(payouts_df))
+
     if out_path.suffix == ".parquet":
         df.to_parquet(out_path, index=False)
         payouts_df.to_parquet(payouts_path, index=False)
