@@ -106,17 +106,86 @@ def _process_race(
     pred["blended_win_prob"] = blended["blended_win_prob"].values
 
     lane1 = pred[pred["lane"] == 1].iloc[0]
+    # racer name フォールバック: name が空なら racer_id を表示用に使う
+    racer_name = str(lane1.get("name", "") or "").strip()
+    if not racer_name:
+        rid = str(lane1.get("racer_id", "") or "").strip()
+        racer_name = f"#{rid}" if rid else ""
     return {
         "venue": jcd,
         "venue_name": VENUE_CODES.get(jcd, "?"),
         "race_no": race_no,
         "lane": 1,
-        "racer": lane1.get("name", ""),
+        "racer": racer_name,
         "p_model": float(lane1["pred_win_prob"]),
         "p_blend": float(lane1["blended_win_prob"]),
         "odds_win": float(lane1["odds_win"]),
         "ev": float(lane1["blended_win_prob"]) * float(lane1["odds_win"]),
     }
+
+
+def _fetch_result(jcd: str, race_no: int, target: date) -> Optional[dict]:
+    """レース結果を取得。未確定（未開催 or 走行中）なら None。
+
+    戻り値: {"winner_lane": int, "win_payout_yen": int} or None
+    """
+    br, _ = _scrapers()
+    try:
+        result = br.fetch_race_result(jcd, race_no, target)
+    except Exception as e:
+        logger.debug("result fetch failed jcd=%s rno=%s: %s", jcd, race_no, e)
+        return None
+    if not result.rows:
+        return None
+    # 1着の艇番を抽出
+    winner = next((r for r in result.rows if r.rank == 1), None)
+    if winner is None:
+        return None
+    win_payout = None
+    for combo, amt in result.payouts.get("win", []):
+        try:
+            if int(combo) == winner.lane:
+                win_payout = amt
+                break
+        except (ValueError, TypeError):
+            continue
+    return {"winner_lane": int(winner.lane), "win_payout_yen": win_payout}
+
+
+def _attach_results(rows: list[dict], target: date, workers: int) -> None:
+    """各シグナル行にレース結果（あれば）を in-place で付与。"""
+    def task(idx_row: tuple[int, dict]) -> tuple[int, Optional[dict]]:
+        idx, r = idx_row
+        return idx, _fetch_result(r["venue"], r["race_no"], target)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for idx, res in ex.map(task, list(enumerate(rows))):
+            r = rows[idx]
+            if res is None:
+                r["result_status"] = "未確定"
+                r["actual_pnl"] = None
+                r["actual_return"] = None
+                r["winner_lane"] = None
+                continue
+            wl = res["winner_lane"]
+            payout = res["win_payout_yen"]
+            stake = r["stake_yen"]
+            hit = (wl == 1)
+            if hit and payout is not None:
+                ret = stake * payout // 100
+                r["result_status"] = "hit"
+                r["actual_return"] = int(ret)
+                r["actual_pnl"] = int(ret - stake)
+            elif hit and payout is None:
+                # 1号艇1着だが payout 取れず（パース失敗等）
+                r["result_status"] = "hit_no_payout"
+                r["actual_return"] = None
+                r["actual_pnl"] = None
+            else:
+                r["result_status"] = "miss"
+                r["actual_return"] = 0
+                r["actual_pnl"] = -stake
+            r["winner_lane"] = wl
 
 
 def _scan_targets(target: date, venues: list[str], workers: int) -> list[tuple[str, int]]:
@@ -142,30 +211,60 @@ SIGNAL_HTML_TEMPLATE = """<!doctype html>
 <meta charset="utf-8">
 <title>Signals {date}</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }}
-  h1 {{ font-size: 22px; margin-bottom: 4px; }}
-  .meta {{ color: #666; font-size: 13px; }}
-  .kpi {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0 24px; }}
-  .kpi .card {{ background: #f7f7f9; border-radius: 8px; padding: 12px; }}
-  .kpi .label {{ color: #666; font-size: 12px; }}
-  .kpi .value {{ font-size: 22px; font-weight: 600; margin-top: 4px; }}
-  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  th, td {{ text-align: right; padding: 6px 10px; border-bottom: 1px solid #eee; }}
+  :root {{
+    --bg: #0f1117;
+    --bg-card: #1a1d27;
+    --bg-header: #1f2330;
+    --bg-hover: #252937;
+    --border: #2a2f3d;
+    --text: #e4e6eb;
+    --text-dim: #9aa0b0;
+    --pos: #4ade80;
+    --neg: #f87171;
+    --warn: #fbbf24;
+    --link: #60a5fa;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", "Hiragino Sans", "Yu Gothic", sans-serif;
+    max-width: 1200px; margin: 0 auto; padding: 24px 16px 60px;
+    background: var(--bg); color: var(--text); font-size: 14px;
+  }}
+  h1 {{ font-size: 24px; margin: 0 0 6px; font-weight: 700; }}
+  h2 {{ font-size: 17px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); color: var(--text-dim); font-weight: 600; }}
+  .meta {{ color: var(--text-dim); font-size: 12px; }}
+  .meta code {{ background: var(--bg-card); padding: 2px 6px; border-radius: 4px; }}
+  .kpi {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 20px 0 8px; }}
+  .kpi .card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }}
+  .kpi .label {{ color: var(--text-dim); font-size: 12px; letter-spacing: 0.02em; }}
+  .kpi .value {{ font-size: 24px; font-weight: 700; margin-top: 6px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 8px; background: var(--bg-card); border-radius: 10px; overflow: hidden; }}
+  th, td {{ text-align: right; padding: 10px 12px; border-bottom: 1px solid var(--border); }}
   th:nth-child(-n+3), td:nth-child(-n+3) {{ text-align: left; }}
-  th {{ background: #f7f7f9; cursor: pointer; user-select: none; }}
-  th:hover {{ background: #eef; }}
-  tr:hover td {{ background: #fafafa; }}
-  .ev-high {{ color: #1f883d; font-weight: 600; }}
-  .ev-mid {{ color: #b3870e; }}
-  a {{ color: #1f6feb; text-decoration: none; }}
+  th:last-child, td:last-child {{ text-align: center; }}
+  th {{ background: var(--bg-header); cursor: pointer; user-select: none; font-size: 12px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.03em; }}
+  th:hover {{ background: var(--bg-hover); color: var(--text); }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  tbody tr:hover td {{ background: var(--bg-hover); }}
+  .pos {{ color: var(--pos); font-weight: 600; }}
+  .neg {{ color: var(--neg); font-weight: 600; }}
+  .ev-high {{ color: var(--pos); font-weight: 700; }}
+  .ev-mid {{ color: var(--warn); font-weight: 600; }}
+  .pending {{ color: var(--text-dim); }}
+  a {{ color: var(--link); text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
+  .badge {{ display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }}
+  .badge-hit {{ background: rgba(74,222,128,0.15); color: var(--pos); }}
+  .badge-miss {{ background: rgba(248,113,113,0.15); color: var(--neg); }}
+  .badge-pending {{ background: rgba(154,160,176,0.12); color: var(--text-dim); }}
+  .totals-row td {{ background: var(--bg-header); font-weight: 700; border-top: 2px solid var(--border); }}
 </style>
 </head>
 <body>
 
 <h1>当日シグナル: {date}</h1>
 <div class="meta">
-  generated: {generated} &nbsp;|&nbsp; strategy: lane1_kelly &nbsp;|&nbsp; ev_threshold: {ev_threshold} &nbsp;|&nbsp; kelly_fraction: {kelly_fraction}
+  generated: {generated} &nbsp;|&nbsp; strategy: <code>lane1_kelly</code> &nbsp;|&nbsp; ev_threshold: <code>{ev_threshold}</code> &nbsp;|&nbsp; kelly_fraction: <code>{kelly_fraction}</code>
 </div>
 
 <div class="kpi">
@@ -173,23 +272,28 @@ SIGNAL_HTML_TEMPLATE = """<!doctype html>
   <div class="card"><div class="label">合計ステーク</div><div class="value">¥{total_stake}</div></div>
   <div class="card"><div class="label">最高EV</div><div class="value">{max_ev}</div></div>
   <div class="card"><div class="label">平均オッズ</div><div class="value">{avg_odds}</div></div>
+  {result_kpis}
 </div>
 
+<h2>推奨ベット一覧（列ヘッダクリックで並べ替え）</h2>
 <table id="signals">
   <thead><tr>
-    <th>場</th><th>R</th><th>選手</th>
-    <th>p_model</th><th>p_blend</th><th>オッズ</th><th>EV</th><th>ステーク</th><th>リンク</th>
+    <th>場</th><th>R</th><th>選手(1号艇)</th>
+    <th>p_model</th><th>p_blend</th><th>オッズ</th><th>EV</th><th>ステーク</th>
+    <th>結果</th><th>PnL</th><th>リンク</th>
   </tr></thead>
-  <tbody>{rows}</tbody>
+  <tbody>{rows}{totals_row}</tbody>
 </table>
 
 <script>
-// 列ヘッダクリックで並べ替え（数値列は数値、文字列列は文字列としてソート）
 document.querySelectorAll('#signals th').forEach((th, idx) => {{
   let asc = false;
   th.addEventListener('click', () => {{
     const tbody = th.closest('table').querySelector('tbody');
-    const rows = Array.from(tbody.querySelectorAll('tr'));
+    const allRows = Array.from(tbody.querySelectorAll('tr'));
+    // totals 行（class=totals-row）は固定で末尾に残す
+    const totals = allRows.filter(r => r.classList.contains('totals-row'));
+    const rows = allRows.filter(r => !r.classList.contains('totals-row'));
     rows.sort((a, b) => {{
       const av = a.children[idx].dataset.sort ?? a.children[idx].textContent;
       const bv = b.children[idx].dataset.sort ?? b.children[idx].textContent;
@@ -199,6 +303,7 @@ document.querySelectorAll('#signals th').forEach((th, idx) => {{
     }});
     asc = !asc;
     rows.forEach(r => tbody.appendChild(r));
+    totals.forEach(r => tbody.appendChild(r));
   }});
 }});
 </script>
@@ -216,6 +321,32 @@ def _ev_class(ev: float) -> str:
     return ""
 
 
+def _result_cell(r: dict) -> str:
+    """結果セル（バッジ表記）。"""
+    status = r.get("result_status")
+    if status == "hit":
+        wl = r.get("winner_lane", 1)
+        return f"<td data-sort='2'><span class='badge badge-hit'>🟢 1着 (1号艇)</span></td>"
+    if status == "hit_no_payout":
+        return f"<td data-sort='2'><span class='badge badge-hit'>🟢 1着</span></td>"
+    if status == "miss":
+        wl = r.get("winner_lane")
+        wl_txt = f"{wl}号艇1着" if wl else "不的中"
+        return f"<td data-sort='0'><span class='badge badge-miss'>✕ {wl_txt}</span></td>"
+    return f"<td data-sort='1'><span class='badge badge-pending'>未確定</span></td>"
+
+
+def _pnl_cell(r: dict) -> str:
+    pnl = r.get("actual_pnl")
+    if pnl is None:
+        return f"<td class='pending' data-sort='0'>-</td>"
+    cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "")
+    sign = "+" if pnl > 0 else ""
+    ret = r.get("actual_return")
+    ret_txt = f" (返¥{ret:,})" if ret is not None and pnl > 0 else ""
+    return f"<td class='{cls}' data-sort='{pnl}'>{sign}¥{pnl:,}{ret_txt}</td>"
+
+
 def _signal_row(r: dict, date_str: str) -> str:
     url = f"{BASE_URL}/oddstf?rno={r['race_no']}&jcd={r['venue']}&hd={date_str}"
     racer = str(r.get("racer", "")).strip() or "-"
@@ -230,8 +361,55 @@ def _signal_row(r: dict, date_str: str) -> str:
         f"<td>{r['odds_win']:.2f}</td>"
         f"<td class='{ev_cls}'>{r['ev']:.3f}</td>"
         f"<td>¥{r['stake_yen']:,}</td>"
-        f"<td><a href='{url}' target='_blank'>オッズ</a></td>"
+        f"{_result_cell(r)}"
+        f"{_pnl_cell(r)}"
+        f"<td><a href='{url}' target='_blank'>公式</a></td>"
         f"</tr>"
+    )
+
+
+def _totals_row(rows: list[dict]) -> str:
+    """確定済みベットの集計行（全件未確定なら空文字）。"""
+    decided = [r for r in rows if r.get("actual_pnl") is not None]
+    if not decided:
+        return ""
+    total_stake = sum(r["stake_yen"] for r in decided)
+    total_pnl = sum(r["actual_pnl"] for r in decided)
+    total_ret = total_stake + total_pnl
+    n_hit = sum(1 for r in decided if r["result_status"] in ("hit", "hit_no_payout"))
+    cls = "pos" if total_pnl > 0 else ("neg" if total_pnl < 0 else "")
+    sign = "+" if total_pnl > 0 else ""
+    return (
+        f"<tr class='totals-row'>"
+        f"<td colspan='7'>確定済み合計（{len(decided)}件 / 的中 {n_hit}件・勝率 {n_hit/len(decided)*100:.0f}%）</td>"
+        f"<td>¥{total_stake:,}</td>"
+        f"<td></td>"
+        f"<td class='{cls}'>{sign}¥{total_pnl:,} (返¥{total_ret:,})</td>"
+        f"<td></td>"
+        f"</tr>"
+    )
+
+
+def _result_kpis(rows: list[dict]) -> str:
+    """確定済みベットがあれば、勝率・実PnLの KPI カードを追加。"""
+    decided = [r for r in rows if r.get("actual_pnl") is not None]
+    if not decided:
+        return ""
+    n_hit = sum(1 for r in decided if r["result_status"] in ("hit", "hit_no_payout"))
+    total_pnl = sum(r["actual_pnl"] for r in decided)
+    total_stake = sum(r["stake_yen"] for r in decided)
+    roi = (total_pnl / total_stake * 100) if total_stake else 0.0
+    pnl_cls = "pos" if total_pnl > 0 else ("neg" if total_pnl < 0 else "")
+    sign = "+" if total_pnl > 0 else ""
+    return (
+        f"<div class='card'><div class='label'>確定済み</div>"
+        f"<div class='value'>{len(decided)}/{len(rows)}件</div></div>"
+        f"<div class='card'><div class='label'>実勝率</div>"
+        f"<div class='value'>{n_hit/len(decided)*100:.1f}%</div></div>"
+        f"<div class='card'><div class='label'>実PnL</div>"
+        f"<div class='value {pnl_cls}'>{sign}¥{total_pnl:,}</div></div>"
+        f"<div class='card'><div class='label'>実ROI</div>"
+        f"<div class='value {pnl_cls}'>{sign}{roi:.1f}%</div></div>"
     )
 
 
@@ -251,7 +429,9 @@ def _write_html(rows: list[dict], target: date, out_path: Path,
         total_stake=f"{total_stake:,}",
         max_ev=f"{max_ev:.3f}" if rows else "-",
         avg_odds=f"{avg_odds:.2f}" if rows else "-",
+        result_kpis=_result_kpis(rows),
         rows="".join(_signal_row(r, date_str) for r in rows),
+        totals_row=_totals_row(rows),
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")
@@ -277,6 +457,10 @@ def main() -> None:
     p.add_argument("--out", default=None, help="CSV 出力先（任意）")
     p.add_argument("--html", default=None,
                    help="HTMLレポート出力先（任意）。例: data/processed/signals_today.html")
+    p.add_argument("--with-results", action="store_true",
+                   help="既に終わったレースの結果＆PnL を併記する。過去日付なら自動有効。")
+    p.add_argument("--no-results", action="store_true",
+                   help="結果取得を完全に無効化（--date が過去でも）")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -327,6 +511,19 @@ def main() -> None:
     if not rows:
         print(f"\n(EV>{args.ev_threshold} を満たすレースなし)")
         return
+
+    # 結果取得: 過去日 or --with-results 指定時。--no-results で抑止可能。
+    want_results = (target < date.today()) or args.with_results
+    if want_results and not args.no_results:
+        print(f"\n推奨ベット {len(rows)}件のレース結果を取得中...")
+        _attach_results(rows, target, args.workers)
+        decided = [r for r in rows if r.get("actual_pnl") is not None]
+        if decided:
+            n_hit = sum(1 for r in decided if r["result_status"] in ("hit", "hit_no_payout"))
+            total_pnl = sum(r["actual_pnl"] for r in decided)
+            total_stake = sum(r["stake_yen"] for r in decided)
+            print(f"確定済み: {len(decided)}/{len(rows)}件 | 的中 {n_hit}件 "
+                  f"| 実PnL ¥{total_pnl:+,} (ステーク ¥{total_stake:,})")
 
     out = pd.DataFrame(rows).sort_values("ev", ascending=False)
     print(f"\n=== {target} 推奨ベット ({len(out)}件) ===")
