@@ -61,6 +61,18 @@ def _scrapers() -> tuple[BoatraceScraper, OddsScraper]:
     return _TLS.br, _TLS.od
 
 
+def _result_scraper() -> BoatraceScraper:
+    """結果取得用の別スクレイパー（タイムアウトは長め10s）。
+
+    結果ページはレース直後（数分以内）は生成中で遅いことがあるため、odds 用クライアントとは
+    別に保持する。スレッドローカルで HttpClient のスロットリングを独立させる目的もある。
+    """
+    if not hasattr(_TLS, "br_result"):
+        client = HttpClient(interval_sec=0.3, timeout_sec=10)
+        _TLS.br_result = BoatraceScraper(client=client)
+    return _TLS.br_result
+
+
 def _silence_lightgbm(bundle: dict) -> None:
     """sklearn alias と LightGBM native 名のパラメータ衝突を解消し、
 
@@ -159,23 +171,24 @@ def _process_race(
     }
 
 
-def _fetch_result(jcd: str, race_no: int, target: date) -> Optional[dict]:
-    """レース結果を取得。未確定（未開催 or 走行中）なら None。
+def _fetch_result(jcd: str, race_no: int, target: date) -> tuple[Optional[dict], Optional[str]]:
+    """レース結果を取得。
 
-    戻り値: {"winner_lane": int, "win_payout_yen": int} or None
+    戻り値: (result_dict or None, reason_when_none)
+      reason: "fetch_failed" / "no_rows" / "no_winner" など。デバッグ用。
     """
-    br, _ = _scrapers()
+    br = _result_scraper()
     try:
         result = br.fetch_race_result(jcd, race_no, target)
     except Exception as e:
-        logger.debug("result fetch failed jcd=%s rno=%s: %s", jcd, race_no, e)
-        return None
+        logger.warning("result fetch failed jcd=%s rno=%s d=%s err=%s",
+                       jcd, race_no, target, type(e).__name__)
+        return None, "fetch_failed"
     if not result.rows:
-        return None
-    # 1着の艇番を抽出
+        return None, "no_rows"  # 未開催 or 結果未公開
     winner = next((r for r in result.rows if r.rank == 1), None)
     if winner is None:
-        return None
+        return None, "no_winner"  # 全艇失格 等のレアケース
     win_payout = None
     for combo, amt in result.payouts.get("win", []):
         try:
@@ -184,23 +197,30 @@ def _fetch_result(jcd: str, race_no: int, target: date) -> Optional[dict]:
                 break
         except (ValueError, TypeError):
             continue
-    return {"winner_lane": int(winner.lane), "win_payout_yen": win_payout}
+    return {"winner_lane": int(winner.lane), "win_payout_yen": win_payout}, None
 
 
-def _attach_results(rows: list[dict], target: date, workers: int) -> None:
-    """各シグナル行にレース結果（あれば）を in-place で付与。"""
-    def task(idx_row: tuple[int, dict]) -> tuple[int, Optional[dict]]:
+def _attach_results(rows: list[dict], target: date, workers: int) -> dict:
+    """各シグナル行にレース結果（あれば）を in-place で付与。
+
+    戻り値: 失敗内訳のカウント {fetch_failed: N, no_rows: N, ...}
+    """
+    def task(idx_row: tuple[int, dict]) -> tuple[int, Optional[dict], Optional[str]]:
         idx, r = idx_row
-        return idx, _fetch_result(r["venue"], r["race_no"], target)
+        res, reason = _fetch_result(r["venue"], r["race_no"], target)
+        return idx, res, reason
 
+    failures: dict[str, int] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for idx, res in ex.map(task, list(enumerate(rows))):
+        for idx, res, reason in ex.map(task, list(enumerate(rows))):
             r = rows[idx]
             if res is None:
                 r["result_status"] = "未確定"
+                r["result_reason"] = reason
                 r["actual_pnl"] = None
                 r["actual_return"] = None
                 r["winner_lane"] = None
+                failures[reason or "unknown"] = failures.get(reason or "unknown", 0) + 1
                 continue
             wl = res["winner_lane"]
             payout = res["win_payout_yen"]
@@ -212,7 +232,6 @@ def _attach_results(rows: list[dict], target: date, workers: int) -> None:
                 r["actual_return"] = int(ret)
                 r["actual_pnl"] = int(ret - stake)
             elif hit and payout is None:
-                # 1号艇1着だが payout 取れず（パース失敗等）
                 r["result_status"] = "hit_no_payout"
                 r["actual_return"] = None
                 r["actual_pnl"] = None
@@ -221,6 +240,7 @@ def _attach_results(rows: list[dict], target: date, workers: int) -> None:
                 r["actual_return"] = 0
                 r["actual_pnl"] = -stake
             r["winner_lane"] = wl
+    return failures
 
 
 def _scan_targets(target: date, venues: list[str], workers: int) -> list[tuple[str, int]]:
@@ -549,7 +569,7 @@ def main() -> None:
     # 結果取得: デフォルト ON（未開催レースは自動で「未確定」表示）。--no-results で抑止。
     if not args.no_results:
         print(f"\n推奨ベット {len(rows)}件のレース結果を取得中（未開催分は『未確定』）...")
-        _attach_results(rows, target, args.workers)
+        failures = _attach_results(rows, target, args.workers)
         decided = [r for r in rows if r.get("actual_pnl") is not None]
         if decided:
             n_hit = sum(1 for r in decided if r["result_status"] in ("hit", "hit_no_payout"))
@@ -559,6 +579,8 @@ def main() -> None:
                   f"| 実PnL ¥{total_pnl:+,} (ステーク ¥{total_stake:,})")
         else:
             print(f"確定済み: 0/{len(rows)}件（全て未開催/未確定）")
+        if failures:
+            print(f"結果取得失敗内訳: {failures}（fetch_failed=HTTP/timeout, no_rows=未公開/未開催）")
 
     out = pd.DataFrame(rows).sort_values("ev", ascending=False)
     print(f"\n=== {target} 推奨ベット ({len(out)}件) ===")
