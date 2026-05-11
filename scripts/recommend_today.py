@@ -10,6 +10,9 @@
     python -m scripts.recommend_today --venues 04 12     # 特定場のみ
     python -m scripts.recommend_today --flat 1000 --kelly-fraction 0
 
+    # HTMLレポートを併せて出力（ブラウザで一覧確認・列ソート可・各行から公式オッズへ）
+    python -m scripts.recommend_today --html data/processed/signals_today.html
+
 各レースについて、現在オッズで評価する。締切直前にもう一度回すのが理想。
 """
 from __future__ import annotations
@@ -35,7 +38,7 @@ from src.scraper.http_client import HttpClient
 from src.scraper.odds_scraper import OddsScraper
 from src.strategy.blending import add_blended_probability
 from src.strategy.kelly import kelly_stake
-from src.utils.config import MODELS_DIR, VENUE_CODES
+from src.utils.config import BASE_URL, MODELS_DIR, VENUE_CODES
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -133,6 +136,127 @@ def _scan_targets(target: date, venues: list[str], workers: int) -> list[tuple[s
     return out
 
 
+SIGNAL_HTML_TEMPLATE = """<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Signals {date}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }}
+  h1 {{ font-size: 22px; margin-bottom: 4px; }}
+  .meta {{ color: #666; font-size: 13px; }}
+  .kpi {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin: 16px 0 24px; }}
+  .kpi .card {{ background: #f7f7f9; border-radius: 8px; padding: 12px; }}
+  .kpi .label {{ color: #666; font-size: 12px; }}
+  .kpi .value {{ font-size: 22px; font-weight: 600; margin-top: 4px; }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+  th, td {{ text-align: right; padding: 6px 10px; border-bottom: 1px solid #eee; }}
+  th:nth-child(-n+3), td:nth-child(-n+3) {{ text-align: left; }}
+  th {{ background: #f7f7f9; cursor: pointer; user-select: none; }}
+  th:hover {{ background: #eef; }}
+  tr:hover td {{ background: #fafafa; }}
+  .ev-high {{ color: #1f883d; font-weight: 600; }}
+  .ev-mid {{ color: #b3870e; }}
+  a {{ color: #1f6feb; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+</style>
+</head>
+<body>
+
+<h1>当日シグナル: {date}</h1>
+<div class="meta">
+  generated: {generated} &nbsp;|&nbsp; strategy: lane1_kelly &nbsp;|&nbsp; ev_threshold: {ev_threshold} &nbsp;|&nbsp; kelly_fraction: {kelly_fraction}
+</div>
+
+<div class="kpi">
+  <div class="card"><div class="label">推奨ベット</div><div class="value">{n_bets}件</div></div>
+  <div class="card"><div class="label">合計ステーク</div><div class="value">¥{total_stake}</div></div>
+  <div class="card"><div class="label">最高EV</div><div class="value">{max_ev}</div></div>
+  <div class="card"><div class="label">平均オッズ</div><div class="value">{avg_odds}</div></div>
+</div>
+
+<table id="signals">
+  <thead><tr>
+    <th>場</th><th>R</th><th>選手</th>
+    <th>p_model</th><th>p_blend</th><th>オッズ</th><th>EV</th><th>ステーク</th><th>リンク</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+
+<script>
+// 列ヘッダクリックで並べ替え（数値列は数値、文字列列は文字列としてソート）
+document.querySelectorAll('#signals th').forEach((th, idx) => {{
+  let asc = false;
+  th.addEventListener('click', () => {{
+    const tbody = th.closest('table').querySelector('tbody');
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    rows.sort((a, b) => {{
+      const av = a.children[idx].dataset.sort ?? a.children[idx].textContent;
+      const bv = b.children[idx].dataset.sort ?? b.children[idx].textContent;
+      const an = parseFloat(av), bn = parseFloat(bv);
+      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv), 'ja');
+      return asc ? cmp : -cmp;
+    }});
+    asc = !asc;
+    rows.forEach(r => tbody.appendChild(r));
+  }});
+}});
+</script>
+
+</body>
+</html>
+"""
+
+
+def _ev_class(ev: float) -> str:
+    if ev >= 1.20:
+        return "ev-high"
+    if ev >= 1.10:
+        return "ev-mid"
+    return ""
+
+
+def _signal_row(r: dict, date_str: str) -> str:
+    url = f"{BASE_URL}/oddstf?rno={r['race_no']}&jcd={r['venue']}&hd={date_str}"
+    racer = str(r.get("racer", "")).strip() or "-"
+    ev_cls = _ev_class(r["ev"])
+    return (
+        f"<tr>"
+        f"<td>{r['venue_name']}({r['venue']})</td>"
+        f"<td data-sort='{r['race_no']}'>{r['race_no']}R</td>"
+        f"<td>{racer}</td>"
+        f"<td>{r['p_model']:.3f}</td>"
+        f"<td>{r['p_blend']:.3f}</td>"
+        f"<td>{r['odds_win']:.2f}</td>"
+        f"<td class='{ev_cls}'>{r['ev']:.3f}</td>"
+        f"<td>¥{r['stake_yen']:,}</td>"
+        f"<td><a href='{url}' target='_blank'>オッズ</a></td>"
+        f"</tr>"
+    )
+
+
+def _write_html(rows: list[dict], target: date, out_path: Path,
+                ev_threshold: float, kelly_fraction: float) -> None:
+    from datetime import datetime
+    date_str = target.strftime("%Y%m%d")
+    total_stake = sum(r["stake_yen"] for r in rows)
+    max_ev = max((r["ev"] for r in rows), default=0.0)
+    avg_odds = sum(r["odds_win"] for r in rows) / len(rows) if rows else 0.0
+    html = SIGNAL_HTML_TEMPLATE.format(
+        date=target.isoformat(),
+        generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        ev_threshold=f"{ev_threshold:.2f}",
+        kelly_fraction=f"{kelly_fraction:.2f}",
+        n_bets=len(rows),
+        total_stake=f"{total_stake:,}",
+        max_ev=f"{max_ev:.3f}" if rows else "-",
+        avg_odds=f"{avg_odds:.2f}" if rows else "-",
+        rows="".join(_signal_row(r, date_str) for r in rows),
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--date", default=None, help="YYYY-MM-DD（デフォルト今日）")
@@ -151,6 +275,8 @@ def main() -> None:
                    help="kelly_fraction=0 の時のステーク額")
     p.add_argument("--workers", type=int, default=6, help="並列度（HTTP同時接続数）")
     p.add_argument("--out", default=None, help="CSV 出力先（任意）")
+    p.add_argument("--html", default=None,
+                   help="HTMLレポート出力先（任意）。例: data/processed/signals_today.html")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -214,6 +340,14 @@ def main() -> None:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         out.to_csv(args.out, index=False)
         print(f"\nsaved: {args.out}")
+
+    if args.html:
+        html_path = Path(args.html)
+        _write_html(rows, target, html_path,
+                    ev_threshold=args.ev_threshold,
+                    kelly_fraction=args.kelly_fraction)
+        print(f"\nHTML saved: {html_path.resolve()}")
+        print(f"open in browser: file://{html_path.resolve()}")
 
 
 if __name__ == "__main__":
