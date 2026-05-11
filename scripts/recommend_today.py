@@ -457,10 +457,8 @@ def main() -> None:
     p.add_argument("--out", default=None, help="CSV 出力先（任意）")
     p.add_argument("--html", default=None,
                    help="HTMLレポート出力先（任意）。例: data/processed/signals_today.html")
-    p.add_argument("--with-results", action="store_true",
-                   help="既に終わったレースの結果＆PnL を併記する。過去日付なら自動有効。")
     p.add_argument("--no-results", action="store_true",
-                   help="結果取得を完全に無効化（--date が過去でも）")
+                   help="結果取得を無効化（デフォルトはON。終わったレースは結果とPnL、未開催は『未確定』）")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -512,10 +510,9 @@ def main() -> None:
         print(f"\n(EV>{args.ev_threshold} を満たすレースなし)")
         return
 
-    # 結果取得: 過去日 or --with-results 指定時。--no-results で抑止可能。
-    want_results = (target < date.today()) or args.with_results
-    if want_results and not args.no_results:
-        print(f"\n推奨ベット {len(rows)}件のレース結果を取得中...")
+    # 結果取得: デフォルト ON（未開催レースは自動で「未確定」表示）。--no-results で抑止。
+    if not args.no_results:
+        print(f"\n推奨ベット {len(rows)}件のレース結果を取得中（未開催分は『未確定』）...")
         _attach_results(rows, target, args.workers)
         decided = [r for r in rows if r.get("actual_pnl") is not None]
         if decided:
@@ -524,6 +521,8 @@ def main() -> None:
             total_stake = sum(r["stake_yen"] for r in decided)
             print(f"確定済み: {len(decided)}/{len(rows)}件 | 的中 {n_hit}件 "
                   f"| 実PnL ¥{total_pnl:+,} (ステーク ¥{total_stake:,})")
+        else:
+            print(f"確定済み: 0/{len(rows)}件（全て未開催/未確定）")
 
     out = pd.DataFrame(rows).sort_values("ev", ascending=False)
     print(f"\n=== {target} 推奨ベット ({len(out)}件) ===")
