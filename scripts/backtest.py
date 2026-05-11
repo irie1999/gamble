@@ -43,6 +43,7 @@ def main() -> None:
         choices=["flat", "kelly", "always_top1", "model_top1", "lane1_value", "lane1_kelly"],
     )
     parser.add_argument("--since", default=None, help="この日付以降のレースのみ評価 (YYYY-MM-DD)")
+    parser.add_argument("--until", default=None, help="この日付以前のレースのみ評価 (YYYY-MM-DD)")
     parser.add_argument("--initial-bankroll", type=float, default=100_000.0)
     parser.add_argument("--flat-stake", type=float, default=1_000.0)
     parser.add_argument("--kelly-fraction", type=float, default=0.25)
@@ -70,6 +71,9 @@ def main() -> None:
     if args.since and "race_date" in features.columns:
         features = features[pd.to_datetime(features["race_date"]) >= pd.Timestamp(args.since)]
         logger.info("since=%s で絞り込み: %d rows", args.since, len(features))
+    if args.until and "race_date" in features.columns:
+        features = features[pd.to_datetime(features["race_date"]) <= pd.Timestamp(args.until)]
+        logger.info("until=%s で絞り込み: %d rows", args.until, len(features))
 
     pred = predict_win_probability(features)
     keep_cols = ["race_id", "lane", "race_date", "pred_win_prob"]
