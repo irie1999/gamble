@@ -109,7 +109,7 @@ HTML = """<!doctype html>
 <div class="section-title">▼ 賭けるレース一覧 — 全て 1号艇 単勝</div>
 <table id="bets">
   <thead><tr>
-    <th>場</th><th>R</th><th>1号艇</th>
+    <th>場</th><th>R</th><th>締切</th><th>1号艇</th>
     <th>p_blend</th><th>オッズ</th><th>EV</th><th>推奨ステーク</th>
     <th>結果</th><th>PnL</th><th>公式</th>
   </tr></thead>
@@ -158,13 +158,26 @@ def _parse_race_id(rid: str) -> tuple[str, str, str]:
     return parts[0], parts[1], parts[2]
 
 
-def _row(r: pd.Series) -> str:
+def _row(r: pd.Series, schedule: dict) -> str:
     date_str, jcd, rno = _parse_race_id(r["race_id"])
     venue_name = VENUE_CODES.get(jcd, "?")
-    odds = float(r.get("odds_win", 0)) if pd.notna(r.get("odds_win")) else 0.0
+    odds_pre = float(r.get("odds_win", 0)) if pd.notna(r.get("odds_win")) else 0.0
     p_blend = float(r["blended_win_prob"]) if "blended_win_prob" in r and pd.notna(r["blended_win_prob"]) else float(r.get("pred_win_prob", 0))
-    ev = float(r.get("ev", odds * p_blend))
+    ev = float(r.get("ev", odds_pre * p_blend))
     stake = int(r["stake"])
+
+    deadline = schedule.get(r["race_id"], "")
+    deadline_html = f"<td class='deadline'>{deadline}</td>" if deadline else "<td class='deadline'>-</td>"
+
+    # オッズ表示: 確定オッズがあれば併記（ライブ朝→締切時の動きを見える化）
+    settled = r.get("settled_odds")
+    has_settled = pd.notna(settled) if settled is not None else False
+    if has_settled and abs(float(settled) - odds_pre) > 0.05:
+        # 朝のオッズと確定で違いあり → 併記
+        odds_html = (f"<td>{odds_pre:.2f}<br>"
+                     f"<span style='color:var(--text-dim);font-size:11px'>確定 {float(settled):.2f}</span></td>")
+    else:
+        odds_html = f"<td>{odds_pre:.2f}</td>"
 
     is_pending = ("race_finished" in r.index) and (not bool(r["race_finished"]))
     if is_pending:
@@ -174,7 +187,6 @@ def _row(r: pd.Series) -> str:
     else:
         hit = bool(r["hit"])
         if hit:
-            wl = int(r.get("winner_lane", 1)) if pd.notna(r.get("winner_lane")) else 1
             result_html = f"<span class='badge badge-hit'>🟢 1着</span>"
             pnl = int(r["pnl"])
             ret = int(r["return_yen"])
@@ -195,9 +207,10 @@ def _row(r: pd.Series) -> str:
         f"<tr>"
         f"<td class='venue'>{venue_name}({jcd})</td>"
         f"<td class='race' data-sort='{int(rno)}'>{int(rno)}R</td>"
+        f"{deadline_html}"
         f"<td class='lane'>1</td>"
         f"<td>{p_blend:.3f}</td>"
-        f"<td>{odds:.2f}</td>"
+        f"{odds_html}"
         f"<td class='{ev_cls}'>{ev:.3f}</td>"
         f"<td class='stake'>¥{stake:,}</td>"
         f"<td>{result_html}</td>"
@@ -222,8 +235,9 @@ def _totals_row(bets: pd.DataFrame) -> str:
     cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "")
     sign = "+" if pnl > 0 else ""
     return (
+        # colspan は 11列の左7列を埋める（場/R/締切/1号艇/p_blend/オッズ/EV）
         f"<tr class='totals'>"
-        f"<td colspan='6'>確定済み合計（{n}件・的中{n_hit}件・勝率{n_hit/n*100:.0f}%）</td>"
+        f"<td colspan='7'>確定済み合計（{n}件・的中{n_hit}件・勝率{n_hit/n*100:.0f}%）</td>"
         f"<td>¥{stake:,}</td>"
         f"<td></td>"
         f"<td class='{cls}'>{sign}¥{pnl:,}<br><span style='color:var(--text-dim);font-size:11px;font-weight:400'>返¥{ret:,}</span></td>"
@@ -274,6 +288,14 @@ def _summary(bets: pd.DataFrame) -> dict:
     }
 
 
+def _load_schedule(schedule_path: Path) -> dict:
+    """race_schedule.csv → {race_id: deadline_time}"""
+    if not schedule_path.exists():
+        return {}
+    df = pd.read_csv(schedule_path)
+    return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bets", required=True)
@@ -282,10 +304,13 @@ def main() -> None:
                    help="表示用のEV閾値ラベル（描画のみ。実際の閾値はbacktestで決まる）")
     p.add_argument("--date-label", default=None,
                    help="ヘッダの日付ラベル。未指定なら CSV から自動抽出")
+    p.add_argument("--schedule", default="data/raw/race_schedule.csv",
+                   help="締切時刻 CSV のパス（あれば締切時刻列に表示）")
     args = p.parse_args()
 
     bets = pd.read_csv(args.bets)
     bets["race_date"] = pd.to_datetime(bets["race_date"]).dt.strftime("%Y-%m-%d")
+    schedule = _load_schedule(Path(args.schedule))
 
     # 日付ラベル
     if args.date_label:
@@ -314,7 +339,7 @@ def main() -> None:
         max_ev=f"{summ['max_ev']:.3f}" if summ["max_ev"] else "-",
         avg_odds=f"{summ['avg_odds']:.2f}" if summ["avg_odds"] else "-",
         result_kpis=_result_kpis(bets),
-        rows="".join(_row(r) for _, r in bets.iterrows()),
+        rows="".join(_row(r, schedule) for _, r in bets.iterrows()),
         totals_row=_totals_row(bets),
     )
 

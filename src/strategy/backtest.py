@@ -218,6 +218,10 @@ def run_backtest(
     bets["payout_per_100"] = np.where(bets["hit"], bets["win_payout_yen"], 0.0)
     bets["return_yen"] = bets["stake"] * bets["payout_per_100"] / 100.0
     bets["pnl"] = bets["return_yen"] - bets["stake"]
+    # 確定オッズ: 的中レースは payout/100、それ以外（未確定 or 不的中）は NaN
+    bets["settled_odds"] = np.where(
+        bets["hit"], bets["win_payout_yen"] / 100.0, np.nan
+    )
 
     # 確定済みベットだけで equity curve と集計（未確定ベットは未着地として除外）
     finished = bets[bets["race_finished"]]

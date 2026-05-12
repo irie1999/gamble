@@ -102,6 +102,17 @@ def _refresh_results_html(target: date, workers: int,
     _run(cmd)
 
 
+def _refresh_schedule(target: date, workers: int,
+                      only_bets: Optional[Path] = None) -> None:
+    """ベット候補の場の締切時刻を取得して race_schedule.csv に保存。"""
+    cmd = [sys.executable, "-m", "scripts.scrape_schedule",
+           "--date", target.isoformat(),
+           "--workers", str(workers)]
+    if only_bets is not None:
+        cmd += ["--only-bets", str(only_bets)]
+    _run(cmd)
+
+
 def _rebuild_features() -> None:
     """features.parquet を再生成（モデル学習はスキップ）。"""
     _run([sys.executable, "-m", "scripts.train_model",
@@ -213,12 +224,13 @@ def main() -> None:
         excluded_venues=args.exclude_venues,
     )
 
-    # 5. ベット候補だけ結果取得 → backtest 再実行
+    # 5. ベット候補だけ結果取得 + 締切時刻取得 → backtest 再実行
     if not args.no_refresh_results and bets_csv.exists():
         bets_count = len(pd.read_csv(bets_csv))
         if bets_count:
-            print(f"  [5/6] ベット候補 {bets_count}件 の結果を HTML 取得中...")
+            print(f"  [5/6] ベット候補 {bets_count}件 の結果＋締切時刻を取得中...")
             _refresh_results_html(target, args.workers, only_bets=bets_csv)
+            _refresh_schedule(target, args.workers, only_bets=bets_csv)
             # payouts が更新されたので backtest を再実行して hit/PnL を反映
             print(f"        → 結果取得後にバックテスト再実行（PnL反映）")
             bets_csv = _run_backtest(

@@ -149,6 +149,45 @@ class BoatraceScraper:
                 race_nos.add(int(m.group(1)))
         return sorted(race_nos)
 
+    def fetch_race_schedule(self, jcd: str, race_date: date | str) -> dict[int, str]:
+        """指定日・指定場の各レースの締切予定時刻を {race_no: "HH:MM"} で返す。
+
+        raceindex ページの「締切予定時刻」表から抽出。失敗したら空 dict。
+        """
+        hd = self._ymd(race_date)
+        url = self._url("raceindex", rno=None, jcd=jcd, hd=hd)
+        try:
+            html = self.client.get(url, max_retries=2, read_timeout=10.0)
+        except Exception as e:
+            logger.warning("raceindex 取得失敗 jcd=%s d=%s: %s", jcd, hd, e)
+            return {}
+        soup = BeautifulSoup(html, "lxml")
+
+        # 戦略: 「締切予定時刻」を含む行/見出しを探し、同じテーブルのデータ行から
+        # HH:MM パターン12個を順に1R〜12Rに対応付ける。
+        time_re = re.compile(r"(\d{1,2}):(\d{2})")
+        result: dict[int, str] = {}
+
+        for table in soup.find_all("table"):
+            text = table.get_text(" ")
+            if "締切" not in text:
+                continue
+            times: list[str] = []
+            for tr in table.select("tr"):
+                row_text = tr.get_text(" ")
+                if "締切" in row_text:
+                    # この行の HH:MM をすべて拾う
+                    times = [f"{int(m.group(1)):02d}:{m.group(2)}"
+                             for m in time_re.finditer(row_text)]
+                    break
+            if times:
+                # 1R から順に対応付け（最大12R）
+                for i, t in enumerate(times[:12], start=1):
+                    result[i] = t
+                break
+
+        return result
+
     # ----- 出走表 -----
 
     def fetch_race_card(
