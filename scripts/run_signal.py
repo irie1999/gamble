@@ -86,6 +86,17 @@ def _autofill_odds(target: date, workers: int) -> None:
           "--workers", str(workers)])
 
 
+def _refresh_results_html(target: date, workers: int) -> None:
+    """既に終わったレースの結果を HTML から取得して payouts に追加。
+
+    公式LZH の K-file は当日夜遅く公開なので、日中の確定済みレースは
+    HTML から個別に取って payouts.parquet に追記する。
+    """
+    _run([sys.executable, "-m", "scripts.scrape_results_html",
+          "--date", target.isoformat(),
+          "--workers", str(workers)])
+
+
 def _rebuild_features() -> None:
     """features.parquet を再生成（モデル学習はスキップ）。"""
     _run([sys.executable, "-m", "scripts.train_model",
@@ -145,6 +156,8 @@ def main() -> None:
                    help="スクレイプの並列数（autofill 時のみ使う）")
     p.add_argument("--no-open", action="store_true",
                    help="生成後にブラウザを自動で開かない（デフォルトは開く）")
+    p.add_argument("--no-refresh-results", action="store_true",
+                   help="HTMLから日中の確定済みレース結果を取得しない（デフォルトは取得）")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date)
@@ -178,15 +191,22 @@ def main() -> None:
         else:
             print(f"       ⚠ {target} のオッズが不足。--autofill 推奨")
 
-    # 3. features
-    if args.skip_features:
-        print("  [3/5] features 再生成: スキップ")
+    # 3a. HTML結果取得（日中に終わったレースの結果を payouts に追加）
+    if not args.no_refresh_results:
+        print("  [3/6] HTML結果取得中（既終了レースの payout を更新）...")
+        _refresh_results_html(target, args.workers)
     else:
-        print("  [3/5] features 再生成中...")
+        print("  [3/6] HTML結果取得: スキップ")
+
+    # 3b. features
+    if args.skip_features:
+        print("  [4/6] features 再生成: スキップ")
+    else:
+        print("  [4/6] features 再生成中...")
         _rebuild_features()
 
     # 4. backtest
-    print("  [4/5] バックテスト実行中...")
+    print("  [5/6] バックテスト実行中...")
     bets_csv = _run_backtest(
         target,
         ev_threshold=args.ev_threshold,
@@ -196,7 +216,7 @@ def main() -> None:
     )
 
     # 5. HTML レポート
-    print("  [5/5] HTML レポート生成中...")
+    print("  [6/6] HTML レポート生成中...")
     html_path = _make_report(bets_csv, target, args.ev_threshold)
 
     print()
