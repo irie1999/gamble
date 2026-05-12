@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import webbrowser
 from datetime import date
 from pathlib import Path
 
@@ -140,6 +141,8 @@ def main() -> None:
                    help="除外場コード（デフォルト: 平和島/江戸川/戸田/鳴門/桐生/大村）")
     p.add_argument("--workers", type=int, default=4,
                    help="スクレイプの並列数（autofill 時のみ使う）")
+    p.add_argument("--no-open", action="store_true",
+                   help="生成後にブラウザを自動で開かない（デフォルトは開く）")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date)
@@ -199,6 +202,13 @@ def main() -> None:
     print(f"✓ 完了: {html_path}")
     print(f"  open in browser: file://{html_path.resolve()}")
     print("=" * 60)
+
+    if not args.no_open:
+        url = html_path.resolve().as_uri()
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            logger.warning("ブラウザ自動起動に失敗: %s (手動で開いてください)", e)
 
 
 if __name__ == "__main__":
