@@ -115,11 +115,13 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
     return MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 
 
-def _make_report(bets_csv: Path, target: date) -> Path:
+def _make_report(bets_csv: Path, target: date, ev_threshold: float) -> Path:
     out = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
-    _run([sys.executable, "-m", "scripts.report_html",
+    _run([sys.executable, "-m", "scripts.signal_report",
           "--bets", str(bets_csv),
-          "--out", str(out)])
+          "--out", str(out),
+          "--ev-threshold", str(ev_threshold),
+          "--date-label", target.isoformat()])
     return out
 
 
@@ -195,7 +197,7 @@ def main() -> None:
 
     # 5. HTML レポート
     print("  [5/5] HTML レポート生成中...")
-    html_path = _make_report(bets_csv, target)
+    html_path = _make_report(bets_csv, target, args.ev_threshold)
 
     print()
     print("=" * 60)
