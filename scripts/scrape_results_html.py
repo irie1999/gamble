@@ -75,6 +75,11 @@ def main() -> None:
     p.add_argument("--payouts-parquet", default=str(RAW_DIR / "races_payouts.parquet"))
     p.add_argument("--force", action="store_true",
                    help="既に payouts に登録済みのレースも再取得して上書き")
+    p.add_argument("--only-bets", default=None,
+                   help="bets CSV のパス。指定すると、その CSV にある race_id だけ取得"
+                        "（ベット候補のみ取得＝高速・成功率高）")
+    p.add_argument("--abort-on-failure-rate", type=float, default=0.7,
+                   help="失敗率が閾値超になったら早期 abort（サイト障害時の救済）")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date)
@@ -100,6 +105,18 @@ def main() -> None:
                 rno=lambda d: d["race_id"].str.split("-").str[2].astype(int))
     )
 
+    # --only-bets: ベット候補の race_id だけに絞る
+    if args.only_bets:
+        bets_path = Path(args.only_bets)
+        if bets_path.exists():
+            bets = pd.read_csv(bets_path, usecols=["race_id"])
+            wanted = set(bets["race_id"].astype(str).unique())
+            before = len(targets)
+            targets = targets[targets["race_id"].isin(wanted)]
+            logger.info("--only-bets フィルタ: %d → %d レース", before, len(targets))
+        else:
+            logger.warning("--only-bets で指定された CSV が無い: %s", bets_path)
+
     # 既存 payouts の race_id を取得
     existing: set[str] = set()
     if payouts_path.exists() and not args.force:
@@ -119,9 +136,12 @@ def main() -> None:
     success = 0
     failed = 0
     counter_lock = Lock()
+    aborted = False
 
     def task(row) -> None:
-        nonlocal success, failed
+        nonlocal success, failed, aborted
+        if aborted:
+            return
         rows = _fetch_one(row.jcd, row.rno, target)
         with counter_lock:
             if rows:
@@ -129,6 +149,12 @@ def main() -> None:
             else:
                 failed += 1
             done = success + failed
+            # 失敗率による早期 abort（一定数試行した後のみ判定）
+            if done >= 10 and failed / done > args.abort_on_failure_rate:
+                if not aborted:
+                    logger.warning("失敗率 %d/%d 超過。残りの取得を中止します（サイト遅延と判断）",
+                                   failed, done)
+                    aborted = True
         if rows:
             with rows_lock:
                 new_rows.extend(rows)
@@ -139,7 +165,7 @@ def main() -> None:
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         list(ex.map(task, todo.itertuples()))
 
-    logger.info("完了: success=%d failed=%d", success, failed)
+    logger.info("完了: success=%d failed=%d (aborted=%s)", success, failed, aborted)
 
     if not new_rows:
         logger.info("追加 payout なし。書き込みスキップ")

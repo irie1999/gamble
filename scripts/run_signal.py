@@ -17,13 +17,12 @@ HTML（recommend_today.py のような）は使わず、安定した LZH + odds 
 
 挙動:
     1. races.parquet に該当日のデータがあるか確認
-       - 無ければ --autofill 指定時に scrape_dataset を自動実行
     2. odds_win.csv に該当日のオッズが揃っているか確認
-       - 不足分があれば --autofill 指定時に scrape_odds を自動実行
     3. features.parquet を最新化（モデル学習はスキップ）
-    4. backtest を該当日に絞って実行
-    5. HTML レポートを生成
-    6. レポートのパスを表示
+    4. backtest を該当日に絞って実行（候補抽出）
+    5. ベット候補のみ HTML 結果取得 → payouts に追加（候補だけなので高速）
+    6. backtest 再実行（結果が反映される）
+    7. signal_report で HTML 出力
 """
 from __future__ import annotations
 
@@ -33,6 +32,7 @@ import sys
 import webbrowser
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -86,15 +86,20 @@ def _autofill_odds(target: date, workers: int) -> None:
           "--workers", str(workers)])
 
 
-def _refresh_results_html(target: date, workers: int) -> None:
+def _refresh_results_html(target: date, workers: int,
+                          only_bets: Optional[Path] = None) -> None:
     """既に終わったレースの結果を HTML から取得して payouts に追加。
 
-    公式LZH の K-file は当日夜遅く公開なので、日中の確定済みレースは
-    HTML から個別に取って payouts.parquet に追記する。
+    only_bets が指定されると、その bets CSV にある race_id だけを取得する
+    （= 4-6レースに絞れて高速・成功率高）。
+    指定しないと当日の全レースを試行する。
     """
-    _run([sys.executable, "-m", "scripts.scrape_results_html",
-          "--date", target.isoformat(),
-          "--workers", str(workers)])
+    cmd = [sys.executable, "-m", "scripts.scrape_results_html",
+           "--date", target.isoformat(),
+           "--workers", str(workers)]
+    if only_bets is not None:
+        cmd += ["--only-bets", str(only_bets)]
+    _run(cmd)
 
 
 def _rebuild_features() -> None:
@@ -191,22 +196,15 @@ def main() -> None:
         else:
             print(f"       ⚠ {target} のオッズが不足。--autofill 推奨")
 
-    # 3a. HTML結果取得（日中に終わったレースの結果を payouts に追加）
-    if not args.no_refresh_results:
-        print("  [3/6] HTML結果取得中（既終了レースの payout を更新）...")
-        _refresh_results_html(target, args.workers)
-    else:
-        print("  [3/6] HTML結果取得: スキップ")
-
-    # 3b. features
+    # 3. features
     if args.skip_features:
-        print("  [4/6] features 再生成: スキップ")
+        print("  [3/6] features 再生成: スキップ")
     else:
-        print("  [4/6] features 再生成中...")
+        print("  [3/6] features 再生成中...")
         _rebuild_features()
 
-    # 4. backtest
-    print("  [5/6] バックテスト実行中...")
+    # 4. backtest（一回目: ベット候補を抽出する目的）
+    print("  [4/6] バックテスト実行中（候補抽出）...")
     bets_csv = _run_backtest(
         target,
         ev_threshold=args.ev_threshold,
@@ -215,7 +213,27 @@ def main() -> None:
         excluded_venues=args.exclude_venues,
     )
 
-    # 5. HTML レポート
+    # 5. ベット候補だけ結果取得 → backtest 再実行
+    if not args.no_refresh_results and bets_csv.exists():
+        bets_count = len(pd.read_csv(bets_csv))
+        if bets_count:
+            print(f"  [5/6] ベット候補 {bets_count}件 の結果を HTML 取得中...")
+            _refresh_results_html(target, args.workers, only_bets=bets_csv)
+            # payouts が更新されたので backtest を再実行して hit/PnL を反映
+            print(f"        → 結果取得後にバックテスト再実行（PnL反映）")
+            bets_csv = _run_backtest(
+                target,
+                ev_threshold=args.ev_threshold,
+                max_odds=args.max_odds,
+                kelly_fraction=args.kelly_fraction,
+                excluded_venues=args.exclude_venues,
+            )
+        else:
+            print(f"  [5/6] ベット候補なし → 結果取得スキップ")
+    else:
+        print("  [5/6] HTML結果取得: スキップ")
+
+    # 6. HTML レポート
     print("  [6/6] HTML レポート生成中...")
     html_path = _make_report(bets_csv, target, args.ev_threshold)
 
