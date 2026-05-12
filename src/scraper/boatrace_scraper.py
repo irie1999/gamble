@@ -152,7 +152,8 @@ class BoatraceScraper:
     def fetch_race_schedule(self, jcd: str, race_date: date | str) -> dict[int, str]:
         """指定日・指定場の各レースの締切予定時刻を {race_no: "HH:MM"} で返す。
 
-        raceindex ページの「締切予定時刻」表から抽出。失敗したら空 dict。
+        raceindex ページから抽出。失敗したら空 dict。複数の HTML 構造に対応する
+        ように戦略を3つ試行する。
         """
         hd = self._ymd(race_date)
         url = self._url("raceindex", rno=None, jcd=jcd, hd=hd)
@@ -162,29 +163,51 @@ class BoatraceScraper:
             logger.warning("raceindex 取得失敗 jcd=%s d=%s: %s", jcd, hd, e)
             return {}
         soup = BeautifulSoup(html, "lxml")
-
-        # 戦略: 「締切予定時刻」を含む行/見出しを探し、同じテーブルのデータ行から
-        # HH:MM パターン12個を順に1R〜12Rに対応付ける。
         time_re = re.compile(r"(\d{1,2}):(\d{2})")
         result: dict[int, str] = {}
 
+        # 戦略1: 「締切」を含む行から HH:MM を順に拾う（同じ行に時刻が並ぶ場合）
         for table in soup.find_all("table"):
-            text = table.get_text(" ")
-            if "締切" not in text:
-                continue
-            times: list[str] = []
             for tr in table.select("tr"):
-                row_text = tr.get_text(" ")
-                if "締切" in row_text:
-                    # この行の HH:MM をすべて拾う
-                    times = [f"{int(m.group(1)):02d}:{m.group(2)}"
-                             for m in time_re.finditer(row_text)]
+                row_text = tr.get_text(" ", strip=True)
+                if "締切" not in row_text:
+                    continue
+                times = [f"{int(m.group(1)):02d}:{m.group(2)}"
+                         for m in time_re.finditer(row_text)]
+                if len(times) >= 6:  # ある程度の件数があれば採用
+                    for i, t in enumerate(times[:12], start=1):
+                        result[i] = t
+                    return result
+
+        # 戦略2: racelist へのリンクを持つセルの近傍から HH:MM を拾う
+        # （締切時刻セルがレース番号セルと隣接するレイアウト）
+        race_to_time: dict[int, str] = {}
+        for a in soup.find_all("a", href=re.compile(r"racelist.*rno=")):
+            m = re.search(r"rno=(\d+)", a.get("href", ""))
+            if not m:
+                continue
+            rno = int(m.group(1))
+            # 同じ tr/td 配下にある HH:MM を探す（見つからなければ親の親まで遡る）
+            for ancestor in [a.parent, a.find_parent("td"), a.find_parent("tr")]:
+                if ancestor is None:
+                    continue
+                tm = time_re.search(ancestor.get_text(" "))
+                if tm:
+                    race_to_time[rno] = f"{int(tm.group(1)):02d}:{tm.group(2)}"
                     break
-            if times:
-                # 1R から順に対応付け（最大12R）
-                for i, t in enumerate(times[:12], start=1):
-                    result[i] = t
-                break
+        if len(race_to_time) >= 6:
+            return race_to_time
+
+        # 戦略3: ページ全体から HH:MM を時系列で拾い、最初の12個を 1R〜12R に対応付ける
+        # （他の時刻情報が混じる可能性があるが最後の手段）
+        all_times = sorted({f"{int(m.group(1)):02d}:{m.group(2)}"
+                            for m in time_re.finditer(soup.get_text(" "))})
+        # 朝〜夜にかけてレースが行われるので、5時〜23時に絞る
+        plausible = [t for t in all_times if 5 <= int(t.split(":")[0]) <= 23]
+        if len(plausible) >= 6:
+            for i, t in enumerate(plausible[:12], start=1):
+                result[i] = t
+            return result
 
         return result
 

@@ -76,14 +76,20 @@ def main() -> None:
         return
 
     new_rows: list[dict] = []
+    venues_list = sorted(venues)
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        for jcd, sched in zip(venues, ex.map(lambda v: _fetch_one(v, target), venues)):
+        for jcd, sched in zip(venues_list, ex.map(lambda v: _fetch_one(v, target), venues_list)):
+            n = len(sched)
+            if n == 0:
+                logger.warning("⚠ %s: 締切時刻取得失敗（パーサが時刻を抽出できず）", jcd)
+            else:
+                logger.info("✓ %s: %d レース分取得", jcd, n)
             for rno, t in sched.items():
                 rid = f"{target.strftime('%Y%m%d')}-{jcd}-{int(rno):02d}"
                 new_rows.append({"race_id": rid, "deadline_time": t})
 
     if not new_rows:
-        logger.info("取得できた時刻なし")
+        logger.warning("取得できた時刻なし。fetch_race_schedule のパーサ要調整")
         return
 
     new_df = pd.DataFrame(new_rows)
