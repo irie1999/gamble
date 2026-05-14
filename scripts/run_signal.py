@@ -4,7 +4,10 @@
 HTML（recommend_today.py のような）は使わず、安定した LZH + odds CSV ベース。
 
 使い方:
-    # 昨日のシグナルを1コマンドで（既にキャッシュ済みなら数秒で終わる）
+    # 今日のシグナル（--date 省略で today）
+    python -m scripts.run_signal --autofill
+
+    # 特定日（昨日や過去日）
     python -m scripts.run_signal --date 2026-05-11
 
     # 不足データを自動取得（races.parquet に該当日が無ければ scrape）
@@ -157,7 +160,8 @@ def _make_report(bets_csv: Path, target: date, ev_threshold: float) -> Path:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--date", required=True, help="シグナル対象日 (YYYY-MM-DD)")
+    p.add_argument("--date", default=None,
+                   help="シグナル対象日 (YYYY-MM-DD)。省略時は今日")
     p.add_argument("--autofill", action="store_true",
                    help="races.parquet / odds_win.csv に該当日が無ければ自動でスクレイプ")
     p.add_argument("--skip-features", action="store_true",
@@ -176,7 +180,7 @@ def main() -> None:
                    help="HTMLから日中の確定済みレース結果を取得しない（デフォルトは取得）")
     args = p.parse_args()
 
-    target = date.fromisoformat(args.date)
+    target = date.fromisoformat(args.date) if args.date else date.today()
     print(f"=== シグナル生成: {target} ===")
 
     races_path = RAW_DIR / "races.parquet"
