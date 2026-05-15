@@ -172,13 +172,13 @@ def main() -> None:
     p.add_argument("--ev-threshold", type=float, default=1.05)
     p.add_argument("--min-odds", type=float, default=3.0,
                    help="1号艇オッズ下限。本命過ぎ（市場が正しく評価済）を除外。"
-                        "4/1〜5/15 バックテストで 2-3倍帯は -32% ROI と確認済み")
+                        "4/1〜5/15 バックテストで 2-3倍帯は -32%% ROI と確認済み")
     p.add_argument("--max-odds", type=float, default=10.0)
     p.add_argument("--kelly-fraction", type=float, default=0.25)
     p.add_argument("--exclude-venues", nargs="*",
                    default=["04", "03", "02", "14", "01", "24", "10"],
                    help="除外場コード（デフォルト: 平和島/江戸川/戸田/鳴門/桐生/大村/三国）"
-                        "三国は 4/1〜5/15 バックテストで 10件 20%勝率と判明したため追加")
+                        "三国は 4/1〜5/15 バックテストで 10件 20%%勝率と判明したため追加")
     p.add_argument("--workers", type=int, default=4,
                    help="スクレイプの並列数（autofill 時のみ使う）")
     p.add_argument("--no-open", action="store_true",
