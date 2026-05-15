@@ -221,6 +221,8 @@ def _row(r: pd.Series, schedule: dict) -> str:
 
 
 def _totals_row(bets: pd.DataFrame) -> str:
+    if bets.empty or "hit" not in bets.columns:
+        return ""
     if "race_finished" not in bets.columns:
         decided = bets[bets["hit"].notna()]
     else:
@@ -248,6 +250,8 @@ def _totals_row(bets: pd.DataFrame) -> str:
 
 def _result_kpis(bets: pd.DataFrame) -> str:
     """確定済み分の集計KPIカード。全件未確定なら空文字。"""
+    if bets.empty or "hit" not in bets.columns:
+        return ""
     if "race_finished" not in bets.columns:
         decided = bets
     else:
@@ -274,6 +278,9 @@ def _result_kpis(bets: pd.DataFrame) -> str:
 
 
 def _summary(bets: pd.DataFrame) -> dict:
+    if bets.empty:
+        return {"n_bets": 0, "n_pending": 0, "total_stake": 0,
+                "max_ev": 0.0, "avg_odds": 0.0}
     total_stake = int(bets["stake"].sum())
     max_ev = float(bets.get("ev", pd.Series([0])).max()) if "ev" in bets.columns else 0.0
     if max_ev == 0 and "blended_win_prob" in bets.columns and "odds_win" in bets.columns:
@@ -309,7 +316,8 @@ def main() -> None:
     args = p.parse_args()
 
     bets = pd.read_csv(args.bets)
-    bets["race_date"] = pd.to_datetime(bets["race_date"]).dt.strftime("%Y-%m-%d")
+    if "race_date" in bets.columns and len(bets):
+        bets["race_date"] = pd.to_datetime(bets["race_date"]).dt.strftime("%Y-%m-%d")
     schedule = _load_schedule(Path(args.schedule))
 
     # 日付ラベル
@@ -326,7 +334,8 @@ def main() -> None:
         bets["ev"] = bets["blended_win_prob"] * bets["odds_win"]
 
     # EV 降順で並べる（妙味の大きい順 = 優先したいレース）
-    bets = bets.sort_values(["ev" if "ev" in bets.columns else "stake"], ascending=False)
+    if len(bets):
+        bets = bets.sort_values(["ev" if "ev" in bets.columns else "stake"], ascending=False)
 
     summ = _summary(bets)
     html = HTML.format(
