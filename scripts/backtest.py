@@ -61,6 +61,12 @@ def main() -> None:
         default=None,
         help="1号艇オッズの上限。これ超のレースは除外（高オッズ1号艇=構造的弱）",
     )
+    parser.add_argument(
+        "--min-odds",
+        type=float,
+        default=None,
+        help="1号艇オッズの下限。これ未満は除外（本命過ぎは妙味薄）",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -88,6 +94,7 @@ def main() -> None:
         blend_alpha=args.blend_alpha,
         excluded_venues=tuple(args.exclude_venues),
         max_odds=args.max_odds,
+        min_odds=args.min_odds,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 

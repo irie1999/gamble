@@ -50,6 +50,8 @@ class BacktestConfig:
     excluded_venues: tuple[str, ...] = ()
     # 1号艇のオッズがこの値超だと「構造的に1号艇が弱いレース」とみなして除外。None で無効。
     max_odds: Optional[float] = None
+    # 1号艇のオッズがこの値未満なら除外。本命過ぎ（市場が正しく評価済み）を回避。
+    min_odds: Optional[float] = None
 
 
 @dataclass
@@ -146,6 +148,10 @@ def run_backtest(
             before = len(eligible)
             eligible = eligible[eligible["odds_win"] <= config.max_odds]
             logger.info("max_odds=%s 適用後 %d候補（%d→）", config.max_odds, len(eligible), before)
+        if config.min_odds is not None:
+            before = len(eligible)
+            eligible = eligible[eligible["odds_win"] >= config.min_odds]
+            logger.info("min_odds=%s 適用後 %d候補（%d→）", config.min_odds, len(eligible), before)
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
         if config.strategy == "lane1_kelly":
