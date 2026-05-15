@@ -23,14 +23,30 @@ VENUE_CODES = {
 }
 
 
-def _format_race_id(race_id: str) -> str:
-    """20260416_31_1 → 松戸 2026-04-16 R1"""
-    parts = race_id.split("_")
-    if len(parts) == 3:
-        date, venue_code, race_no = parts
+def _parse_race_id(race_id: str) -> tuple[str, str, str]:
+    """race_id から (venue_name, date_str, race_no) を抽出"""
+    rid = str(race_id).replace("_", "")
+    if len(rid) >= 16:
+        venue_code = rid[:2]
+        date_str = rid[2:10]   # YYYYMMDD
+        race_no  = str(int(rid[12:]))  # 末尾4桁
         venue = VENUE_CODES.get(venue_code, venue_code)
-        d = f"{date[:4]}-{date[4:6]}-{date[6:]}" if len(date) == 8 else date
-        return f"{venue} {d} R{race_no}"
+        date_fmt = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+        return venue, date_fmt, race_no
+    # 旧形式 YYYYMMDD_VV_R
+    parts = rid.split("_") if "_" in race_id else []
+    if len(parts) == 3:
+        date_str, venue_code, race_no = parts
+        venue = VENUE_CODES.get(venue_code, venue_code)
+        date_fmt = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}" if len(date_str)==8 else date_str
+        return venue, date_fmt, race_no
+    return "", race_id, ""
+
+
+def _format_race_id(race_id: str) -> str:
+    venue, date_fmt, race_no = _parse_race_id(race_id)
+    if venue and race_no:
+        return f"{venue} R{race_no}"
     return race_id
 
 
@@ -92,10 +108,13 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
 
         pnl_color = "#4ade80" if pnl > 0 else ("#94a3b8" if pnl == 0 else "#f87171")
         cum_color = "#4ade80" if cumulative > 0 else ("#94a3b8" if cumulative == 0 else "#f87171")
+        venue, date_fmt, race_no = _parse_race_id(b['race_id'])
+        race_label = f"{venue} R{race_no}" if venue and race_no else b['race_id']
         bet_rows += f"""
         <tr class="{row_class}">
           <td>{i+1}</td>
-          <td>{_format_race_id(b['race_id'])}</td>
+          <td style="color:#94a3b8;font-size:0.8rem">{date_fmt}</td>
+          <td>{race_label}</td>
           <td>{b['bet_type']}</td>
           <td>{b['selections']}</td>
           <td>{b['predicted_prob']:.3f}</td>
@@ -224,7 +243,7 @@ def generate_html(session_data: dict, title: str = "バックテスト結果") -
       <table>
         <thead>
           <tr>
-            <th>#</th><th>レースID</th><th>種別</th><th>選択</th>
+            <th>#</th><th>日付</th><th>レース</th><th>種別</th><th>選択</th>
             <th>予測P</th><th>賭け金</th><th>結果</th><th>損益</th><th>累積損益</th>
           </tr>
         </thead>
