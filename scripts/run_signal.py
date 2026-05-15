@@ -247,6 +247,7 @@ def main() -> None:
                 target,
                 ev_threshold=args.ev_threshold,
                 max_odds=args.max_odds,
+                min_odds=args.min_odds,
                 kelly_fraction=args.kelly_fraction,
                 excluded_venues=args.exclude_venues,
             )
