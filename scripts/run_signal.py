@@ -125,7 +125,8 @@ def _rebuild_features() -> None:
 
 
 def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
-                  kelly_fraction: float, excluded_venues: list[str]) -> Path:
+                  min_odds: Optional[float], kelly_fraction: float,
+                  excluded_venues: list[str]) -> Path:
     """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。"""
     cmd = [
         sys.executable, "-m", "scripts.backtest",
@@ -139,6 +140,8 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
         "--ev-threshold", str(ev_threshold),
         "--max-odds", str(max_odds),
     ]
+    if min_odds is not None:
+        cmd += ["--min-odds", str(min_odds)]
     if excluded_venues:
         cmd += ["--exclude-venues", *excluded_venues]
     _run(cmd)
@@ -167,11 +170,15 @@ def main() -> None:
     p.add_argument("--skip-features", action="store_true",
                    help="features.parquet の再生成をスキップ（既に最新の場合）")
     p.add_argument("--ev-threshold", type=float, default=1.05)
+    p.add_argument("--min-odds", type=float, default=3.0,
+                   help="1号艇オッズ下限。本命過ぎ（市場が正しく評価済）を除外。"
+                        "4/1〜5/15 バックテストで 2-3倍帯は -32% ROI と確認済み")
     p.add_argument("--max-odds", type=float, default=10.0)
     p.add_argument("--kelly-fraction", type=float, default=0.25)
     p.add_argument("--exclude-venues", nargs="*",
-                   default=["04", "03", "02", "14", "01", "24"],
-                   help="除外場コード（デフォルト: 平和島/江戸川/戸田/鳴門/桐生/大村）")
+                   default=["04", "03", "02", "14", "01", "24", "10"],
+                   help="除外場コード（デフォルト: 平和島/江戸川/戸田/鳴門/桐生/大村/三国）"
+                        "三国は 4/1〜5/15 バックテストで 10件 20%勝率と判明したため追加")
     p.add_argument("--workers", type=int, default=4,
                    help="スクレイプの並列数（autofill 時のみ使う）")
     p.add_argument("--no-open", action="store_true",
@@ -224,6 +231,7 @@ def main() -> None:
         target,
         ev_threshold=args.ev_threshold,
         max_odds=args.max_odds,
+        min_odds=args.min_odds,
         kelly_fraction=args.kelly_fraction,
         excluded_venues=args.exclude_venues,
     )
