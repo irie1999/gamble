@@ -214,8 +214,13 @@ def main() -> None:
         if not wo.odds:
             return None, []
         rid = _race_id(d.strftime("%Y%m%d"), jcd, rno)
-        return rid, [{"race_id": rid, "lane": lane, "odds_win": odds}
-                     for lane, odds in wo.odds.items()]
+        # 1.0 未満（=0 含む）は無効値として CSV に保存しない。
+        # （発売前/中止のページが 0.0 を返した場合の保険）
+        rows = [{"race_id": rid, "lane": lane, "odds_win": odds}
+                for lane, odds in wo.odds.items() if odds >= 1.0]
+        if not rows:
+            return None, []
+        return rid, rows
 
     try:
         if args.workers <= 1:

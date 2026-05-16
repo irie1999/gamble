@@ -100,7 +100,8 @@ class OddsScraper:
                                    f"[id*='tan_{lane}']")
             if cell:
                 v = _to_float(cell.get_text())
-                if v is not None and v > 0:
+                # 発売前の 0 や仮表示 0.x を除外（実オッズは必ず 1.0 以上）
+                if v is not None and v >= 1.0:
                     result[lane] = v
 
         if len(result) == 6:
@@ -124,7 +125,8 @@ class OddsScraper:
                     if lane not in LANES:
                         continue
                     odds_val = _to_float(tds[-1].get_text())
-                    if odds_val is not None:
+                    # 0 や 1.0 未満は「発売前」「無効値」なので除外（後段で実オッズと混ざらないように）
+                    if odds_val is not None and odds_val >= 1.0:
                         result[lane] = odds_val
                 if result:
                     break
