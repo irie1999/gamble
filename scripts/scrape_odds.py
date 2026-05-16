@@ -109,12 +109,20 @@ def _build_target_set(
 
 
 def _load_existing_race_ids(out_path: Path) -> set[str]:
+    """既存 CSV から「有効なオッズが少なくとも1件ある race_id」を返す。
+
+    全レーンが無効値（0 や NaN）の race_id は「未取得相当」とみなし、
+    --resume 時にも再取得対象とする。これにより発売前で 0 を引いてしまった
+    レースが永久にスキップされる問題を防ぐ。
+    """
     if not out_path.exists():
         return set()
     df = _read_table(out_path)
-    if "race_id" not in df.columns:
+    if "race_id" not in df.columns or "odds_win" not in df.columns:
         return set()
-    return set(df["race_id"].astype(str).unique())
+    df["odds_win"] = pd.to_numeric(df["odds_win"], errors="coerce")
+    valid = df[df["odds_win"] >= 1.0]
+    return set(valid["race_id"].astype(str).unique())
 
 
 def main() -> None:

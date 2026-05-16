@@ -57,11 +57,18 @@ def _races_has_date(races_path: Path, target: date) -> int:
 
 
 def _odds_has_date(odds_path: Path, target: date) -> int:
-    """odds_win.csv に該当日の race_id 数を返す。"""
+    """odds_win.csv に該当日の「有効オッズあり」 race_id 数を返す。
+
+    0.00 等の無効値しか持たない race_id はカウントしない。--autofill 時に
+    自動再取得されるようにするため。
+    """
     if not odds_path.exists():
         return 0
-    df = pd.read_csv(odds_path, usecols=["race_id"])
-    return int(df[df["race_id"].astype(str).str.startswith(target.strftime("%Y%m%d"))]["race_id"].nunique())
+    df = pd.read_csv(odds_path, usecols=["race_id", "odds_win"])
+    df = df[df["race_id"].astype(str).str.startswith(target.strftime("%Y%m%d"))]
+    df["odds_win"] = pd.to_numeric(df["odds_win"], errors="coerce")
+    valid = df[df["odds_win"] >= 1.0]
+    return int(valid["race_id"].nunique())
 
 
 # ---- サブプロセス起動 ----
@@ -167,6 +174,8 @@ def main() -> None:
                    help="シグナル対象日 (YYYY-MM-DD)。省略時は今日")
     p.add_argument("--autofill", action="store_true",
                    help="races.parquet / odds_win.csv に該当日が無ければ自動でスクレイプ")
+    p.add_argument("--refresh-odds", action="store_true",
+                   help="当日のオッズを強制再取得（締切直前にオッズが動いた時用）")
     p.add_argument("--skip-features", action="store_true",
                    help="features.parquet の再生成をスキップ（既に最新の場合）")
     p.add_argument("--ev-threshold", type=float, default=1.05)
@@ -207,7 +216,13 @@ def main() -> None:
     # 2. odds チェック
     n_odds = _odds_has_date(odds_path, target)
     print(f"  [2/5] odds_win.csv: {n_odds} 件")
-    if n_odds < n_races * 0.8:  # 80%未満なら不足とみなす（一部レース欠損は許容）
+    # --refresh-odds 指定時は強制再取得
+    if args.refresh_odds and args.autofill:
+        print("       → --refresh-odds 指定のため強制再取得")
+        _autofill_odds(target, args.workers)
+        n_odds = _odds_has_date(odds_path, target)
+        print(f"       再取得後: {n_odds} 件")
+    elif n_odds < n_races * 0.8:  # 80%未満なら不足とみなす（一部レース欠損は許容）
         if args.autofill:
             print("       → 不足のため scrape_odds を実行")
             _autofill_odds(target, args.workers)
