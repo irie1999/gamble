@@ -248,14 +248,62 @@ def _run_historical_backtest(
     return out_dir, since, until
 
 
+def _append_signal_snapshot(target: date, bets_csv: Path) -> Optional[Path]:
+    """各 iteration の bets を long-form snapshot CSV に追記。
+
+    Schema: race_id, snapshot_at, ev, odds_win, stake, blended_win_prob,
+            race_finished, hit, pnl, winner_lane
+
+    候補から外れた race_id は追記されない（CSV 側で「最後に出現した時刻」を
+    last_seen として扱える）。signal_report で集計 → HTML レンダリング。
+    """
+    log_dir = PROCESSED_DIR / "signal_log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"signal_snapshots_{target.strftime('%Y%m%d')}.csv"
+
+    if not bets_csv.exists():
+        return log_path if log_path.exists() else None
+
+    try:
+        cur = pd.read_csv(bets_csv)
+    except Exception as e:
+        logger.warning("bets CSV 読込失敗: %s", e)
+        return log_path if log_path.exists() else None
+
+    if cur.empty:
+        return log_path if log_path.exists() else None
+
+    from datetime import datetime as _dt
+    now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    cols = ["race_id"]
+    snap = cur[["race_id"]].copy()
+    snap["snapshot_at"] = now
+    for col in ["ev", "odds_win", "stake", "blended_win_prob",
+                "race_finished", "hit", "pnl", "winner_lane"]:
+        if col in cur.columns:
+            snap[col] = cur[col]
+            cols.append(col)
+
+    if log_path.exists():
+        snap.to_csv(log_path, mode="a", header=False, index=False)
+    else:
+        snap.to_csv(log_path, index=False)
+
+    return log_path
+
+
 def _make_report(bets_csv: Path, target: date, ev_threshold: float,
-                 history: Optional[tuple[Path, str, str]] = None) -> Path:
+                 history: Optional[tuple[Path, str, str]] = None,
+                 signal_log: Optional[Path] = None) -> Path:
     out = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
     cmd = [sys.executable, "-m", "scripts.signal_report",
            "--bets", str(bets_csv),
            "--out", str(out),
            "--ev-threshold", str(ev_threshold),
            "--date-label", target.isoformat()]
+    if signal_log is not None and signal_log.exists():
+        cmd += ["--signal-log", str(signal_log)]
     if history is not None:
         hist_dir, since, until = history
         summary_file = hist_dir / "summary_lane1_kelly.json"
@@ -404,10 +452,14 @@ def main() -> None:
             excluded_venues=args.exclude_venues,
         )
 
+    # 6.5. 今日のシグナル履歴に現在の bets を追記（候補から外れたものも追跡できるように）
+    signal_log = _append_signal_snapshot(target, bets_csv)
+
     # 7. HTML レポート
     step = "7/7" if not args.no_backtest_summary else "6/6"
     print(f"  [{step}] HTML レポート生成中...")
-    html_path = _make_report(bets_csv, target, args.ev_threshold, history=history)
+    html_path = _make_report(bets_csv, target, args.ev_threshold,
+                              history=history, signal_log=signal_log)
 
     print()
     print("=" * 60)

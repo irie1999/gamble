@@ -83,6 +83,8 @@ HTML = """<!doctype html>
   .badge-hit {{ background: rgba(74,222,128,0.15); color: var(--pos); }}
   .badge-miss {{ background: rgba(248,113,113,0.15); color: var(--neg); }}
   .badge-pending {{ background: rgba(154,160,176,0.12); color: var(--text-dim); }}
+  .badge-active {{ background: rgba(96,165,250,0.15); color: var(--link); }}
+  .badge-dropped {{ background: rgba(154,160,176,0.10); color: var(--text-dim); }}
 
   a {{ color: var(--link); text-decoration: none; font-weight: 600; }}
   a:hover {{ text-decoration: underline; }}
@@ -111,6 +113,8 @@ HTML = """<!doctype html>
   <div class="card"><div class="label">平均オッズ</div><div class="value">{avg_odds}</div></div>
   {result_kpis}
 </div>
+
+{signal_log_section}
 
 {history_section}
 
@@ -547,6 +551,149 @@ def _render_history_bets_section(bets_path: Path) -> str:
     )
 
 
+def _render_signal_log_section(log_path: Path, current_ids: set[str],
+                               schedule: dict[str, str]) -> str:
+    """今日のシグナル履歴セクション。
+
+    snapshot CSV を race_id ごとに集計し、初回出現〜最終出現、最高EV、最新EV、
+    結果、現状（候補中/外れた）を表示する。
+    """
+    if not log_path.exists():
+        return ""
+    try:
+        df = pd.read_csv(log_path)
+    except Exception:
+        return ""
+    if df.empty or "race_id" not in df.columns:
+        return ""
+
+    # 集計: race_id ごとに first/last/max
+    df["snapshot_at"] = pd.to_datetime(df["snapshot_at"], errors="coerce")
+    if "ev" not in df.columns:
+        return ""
+
+    # 各 race_id の「最高EV を観測したスナップ」を抽出
+    idx_max_ev = df.groupby("race_id")["ev"].idxmax()
+    max_rows = df.loc[idx_max_ev].set_index("race_id")[["ev", "odds_win", "snapshot_at"]]
+    max_rows = max_rows.rename(columns={
+        "ev": "max_ev", "odds_win": "max_ev_odds", "snapshot_at": "max_ev_at"
+    })
+
+    # 各 race_id の「最後のスナップ」
+    idx_last = df.groupby("race_id")["snapshot_at"].idxmax()
+    last_rows = df.loc[idx_last].set_index("race_id")
+    last_rows = last_rows.rename(columns={
+        "ev": "latest_ev", "odds_win": "latest_odds",
+        "stake": "latest_stake", "snapshot_at": "last_seen",
+    })
+
+    # 各 race_id の「最初のスナップ」
+    first_at = df.groupby("race_id")["snapshot_at"].min().rename("first_seen")
+
+    # n_iterations
+    n_iter = df.groupby("race_id").size().rename("n_iterations")
+
+    agg = pd.concat([max_rows, last_rows[["latest_ev", "latest_odds", "latest_stake",
+                                          "race_finished", "hit", "pnl", "winner_lane",
+                                          "last_seen"]],
+                     first_at, n_iter], axis=1).reset_index()
+
+    # 並び替え: 候補中→最高EV降順、候補外→最終出現の新しい順
+    agg["currently_active"] = agg["race_id"].astype(str).isin(current_ids)
+    agg = agg.sort_values(
+        ["currently_active", "max_ev", "last_seen"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+
+    if agg.empty:
+        return ""
+
+    rows_html: list[str] = []
+    for _, r in agg.iterrows():
+        rid = str(r["race_id"])
+        date_str, jcd, rno = _parse_race_id(rid)
+        venue = VENUE_CODES.get(jcd, "?")
+        rno_int = int(rno) if rno.isdigit() else 0
+        deadline = schedule.get(rid, "")
+        active = bool(r["currently_active"])
+        finished = bool(r.get("race_finished", False)) if pd.notna(r.get("race_finished")) else False
+
+        # 状態セル
+        if active and not finished:
+            status = "<span class='badge badge-active'>🟢 候補中</span>"
+        elif finished:
+            hit = bool(r.get("hit", False))
+            if hit:
+                status = "<span class='badge badge-hit'>🟢 1着</span>"
+            else:
+                wl = r.get("winner_lane")
+                wl_text = f"{int(wl)}号艇1着" if pd.notna(wl) else "外れ"
+                status = f"<span class='badge badge-miss'>✕ {wl_text}</span>"
+        else:
+            status = "<span class='badge badge-dropped'>⚪ 候補外</span>"
+
+        max_ev = float(r["max_ev"])
+        latest_ev = float(r["latest_ev"])
+        max_odds = float(r["max_ev_odds"]) if pd.notna(r.get("max_ev_odds")) else 0
+        latest_odds = float(r["latest_odds"]) if pd.notna(r.get("latest_odds")) else 0
+        max_at = pd.to_datetime(r["max_ev_at"]).strftime("%H:%M") if pd.notna(r["max_ev_at"]) else ""
+        first_seen = pd.to_datetime(r["first_seen"]).strftime("%H:%M") if pd.notna(r["first_seen"]) else ""
+        last_seen = pd.to_datetime(r["last_seen"]).strftime("%H:%M") if pd.notna(r["last_seen"]) else ""
+        n_iter_v = int(r.get("n_iterations", 0))
+        latest_stake = int(r["latest_stake"]) if pd.notna(r.get("latest_stake")) else 0
+
+        # 結果セル: 確定済みなら PnL、未確定なら -
+        if finished:
+            pnl = int(r.get("pnl", 0) or 0)
+            pnl_cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "")
+            pnl_sign = "+" if pnl > 0 else ""
+            pnl_cell = f"<span class='{pnl_cls}'>{pnl_sign}¥{pnl:,}</span>"
+        else:
+            pnl_cell = "-"
+
+        deadline_disp = deadline if deadline else "-"
+
+        rows_html.append(
+            "<tr>"
+            f"<td class='venue'>{venue}({jcd})</td>"
+            f"<td class='race' data-sort='{rno_int}'>{rno_int}R</td>"
+            f"<td>{deadline_disp}</td>"
+            f"<td>{status}</td>"
+            f"<td data-sort='{max_ev:.3f}'>"
+            f"<span class='{_ev_class(max_ev)}'>{max_ev:.3f}</span>"
+            f"<br><span style='color:var(--text-dim);font-size:11px'>"
+            f"{max_at} (オッズ{max_odds:.2f})</span></td>"
+            f"<td data-sort='{latest_ev:.3f}'>"
+            f"<span class='{_ev_class(latest_ev)}'>{latest_ev:.3f}</span>"
+            f"<br><span style='color:var(--text-dim);font-size:11px'>"
+            f"オッズ{latest_odds:.2f}</span></td>"
+            f"<td class='stake'>¥{latest_stake:,}</td>"
+            f"<td>{first_seen}〜{last_seen}<br>"
+            f"<span style='color:var(--text-dim);font-size:11px'>{n_iter_v}回観測</span></td>"
+            f"<td data-sort='{int(r.get('pnl', 0) or 0)}'>{pnl_cell}</td>"
+            "</tr>"
+        )
+
+    n_total = len(agg)
+    n_active = int(agg["currently_active"].sum())
+    n_dropped = n_total - n_active
+    return (
+        f'<details class="signal-log" open style="margin-bottom:24px">'
+        f'<summary style="cursor:pointer;font-size:14px;color:var(--text-dim);'
+        f'text-transform:uppercase;letter-spacing:0.08em;margin:28px 0 10px;font-weight:600">'
+        f'▼ 本日のシグナル履歴（全{n_total}件 / 候補中{n_active}件 / 外れた{n_dropped}件）</summary>'
+        '<table id="signal-log-table">'
+        '<thead><tr>'
+        '<th>場</th><th>R</th><th>締切</th><th>状態</th>'
+        '<th>最高 EV</th><th>最新 EV</th><th>推奨ステーク</th>'
+        '<th>観測時刻</th><th>PnL</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(rows_html)}</tbody>'
+        '</table>'
+        '</details>'
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bets", required=True)
@@ -567,6 +714,9 @@ def main() -> None:
                    help="過去バックテストの開始日（表示用）")
     p.add_argument("--history-until", default="",
                    help="過去バックテストの終了日（表示用）")
+    p.add_argument("--signal-log", default=None,
+                   help="本日のシグナル履歴 snapshot CSV のパス。"
+                        "watch_signal の各 iteration で追記されたものを集計")
     args = p.parse_args()
 
     bets = pd.read_csv(args.bets)
@@ -622,6 +772,13 @@ def main() -> None:
             history_section += _render_history_bets_section(Path(args.history_bets))
 
     summ = _summary(bets)
+    signal_log_section = ""
+    if args.signal_log:
+        current_ids = set(bets["race_id"].astype(str)) if len(bets) else set()
+        signal_log_section = _render_signal_log_section(
+            Path(args.signal_log), current_ids, schedule,
+        )
+
     html = HTML.format(
         date_label=date_label,
         generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -632,6 +789,7 @@ def main() -> None:
         max_ev=f"{summ['max_ev']:.3f}" if summ["max_ev"] else "-",
         avg_odds=f"{summ['avg_odds']:.2f}" if summ["avg_odds"] else "-",
         result_kpis=_result_kpis(bets),
+        signal_log_section=signal_log_section,
         history_section=history_section,
         rows="".join(_row(r, schedule) for _, r in bets.iterrows()),
         totals_row=_totals_row(bets),
