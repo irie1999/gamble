@@ -277,11 +277,16 @@ def _run_signal_once(variant: str, extra_args: list[str], *,
     res = subprocess.run(cmd, capture_output=True, text=True,
                          encoding="utf-8", errors="replace")
     if res.returncode != 0:
-        # 失敗時のみ捕捉した出力を吐く（デバッグ用）
-        if res.stdout:
-            sys.stdout.write(res.stdout)
-        if res.stderr:
-            sys.stderr.write(res.stderr)
+        # 失敗時のみ捕捉した出力の末尾30行だけ吐く（デバッグ用・全文は --verbose で）
+        combined = (res.stdout or "") + (res.stderr or "")
+        tail = combined.splitlines()[-30:]
+        if tail:
+            sys.stderr.write(
+                f"⚠ subprocess failed (rc={res.returncode}). 末尾30行:\n"
+                + "\n".join(tail) + "\n"
+            )
+        else:
+            sys.stderr.write(f"⚠ subprocess failed (rc={res.returncode}). 出力なし\n")
     return res.returncode
 
 
