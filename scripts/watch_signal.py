@@ -146,9 +146,14 @@ def _open_browser(target: date) -> None:
 
 def _run_signal_once(variant: str, extra_args: list[str], *,
                      skip_features: bool = False) -> int:
-    """run_signal を1回実行（ブラウザ自動オープンは抑止）。終了コードを返す。"""
+    """run_signal を1回実行（ブラウザ自動オープンは抑止）。終了コードを返す。
+
+    過去バックテスト集計は定期実行では不要なので常に --no-backtest-summary で抑止。
+    手動で集計を見たい時は `python -m scripts.run_signal_v2 --autofill` を別途叩く。
+    """
     module = "scripts.run_signal_v2" if variant == "v2" else "scripts.run_signal"
-    cmd = [sys.executable, "-m", module, "--autofill", "--no-open"]
+    cmd = [sys.executable, "-m", module,
+           "--autofill", "--no-open", "--no-backtest-summary"]
     if skip_features:
         cmd.append("--skip-features")
     cmd += extra_args

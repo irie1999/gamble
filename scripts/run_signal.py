@@ -33,7 +33,7 @@ import argparse
 import subprocess
 import sys
 import webbrowser
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -161,13 +161,64 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
     return MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 
 
-def _make_report(bets_csv: Path, target: date, ev_threshold: float) -> Path:
+def _run_historical_backtest(
+    target: date, *, days: int, ev_threshold: float, max_odds: float,
+    min_odds: Optional[float], kelly_fraction: float,
+    excluded_venues: list[str],
+) -> Optional[tuple[Path, str, str]]:
+    """target 当日を含まない過去 days 日のバックテストを実行。
+
+    成功時は (出力ディレクトリ, since, until) を返す。失敗時は None。
+    出力先は data/processed/backtest_history/ で、当日用 bets と分離する。
+    """
+    since = (target - timedelta(days=days)).isoformat()
+    until = (target - timedelta(days=1)).isoformat()
+    out_dir = PROCESSED_DIR / "backtest_history"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "scripts.backtest",
+        "--features", str(PROCESSED_DIR / "features.parquet"),
+        "--payouts", str(RAW_DIR / "races_payouts.parquet"),
+        "--odds", str(RAW_DIR / "odds_win.csv"),
+        "--strategy", "lane1_kelly",
+        "--since", since,
+        "--until", until,
+        "--kelly-fraction", str(kelly_fraction),
+        "--ev-threshold", str(ev_threshold),
+        "--max-odds", str(max_odds),
+        "--out", str(out_dir),
+    ]
+    if min_odds is not None:
+        cmd += ["--min-odds", str(min_odds)]
+    if excluded_venues:
+        cmd += ["--exclude-venues", *excluded_venues]
+    logger.info("実行: %s", " ".join(cmd))
+    res = subprocess.run(cmd, check=False)
+    if res.returncode != 0:
+        logger.warning("過去バックテスト失敗 rc=%d (HTMLには載せず続行)", res.returncode)
+        return None
+    return out_dir, since, until
+
+
+def _make_report(bets_csv: Path, target: date, ev_threshold: float,
+                 history: Optional[tuple[Path, str, str]] = None) -> Path:
     out = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
-    _run([sys.executable, "-m", "scripts.signal_report",
-          "--bets", str(bets_csv),
-          "--out", str(out),
-          "--ev-threshold", str(ev_threshold),
-          "--date-label", target.isoformat()])
+    cmd = [sys.executable, "-m", "scripts.signal_report",
+           "--bets", str(bets_csv),
+           "--out", str(out),
+           "--ev-threshold", str(ev_threshold),
+           "--date-label", target.isoformat()]
+    if history is not None:
+        hist_dir, since, until = history
+        summary_file = hist_dir / "summary_lane1_kelly.json"
+        equity_file = hist_dir / "equity_lane1_kelly.csv"
+        if summary_file.exists():
+            cmd += ["--history-summary", str(summary_file),
+                    "--history-since", since,
+                    "--history-until", until]
+            if equity_file.exists():
+                cmd += ["--history-equity", str(equity_file)]
+    _run(cmd)
     return out
 
 
@@ -198,6 +249,10 @@ def main() -> None:
                    help="生成後にブラウザを自動で開かない（デフォルトは開く）")
     p.add_argument("--no-refresh-results", action="store_true",
                    help="HTMLから日中の確定済みレース結果を取得しない（デフォルトは取得）")
+    p.add_argument("--no-backtest-summary", action="store_true",
+                   help="HTMLレポートに過去バックテスト集計を含めない（watch_signal の定期実行で時短）")
+    p.add_argument("--backtest-days", type=int, default=365,
+                   help="過去バックテストの期間（日数）。デフォルト365日。データが無い分は自動で短くなる")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -277,9 +332,24 @@ def main() -> None:
     else:
         print("  [5/6] HTML結果取得: スキップ")
 
-    # 6. HTML レポート
-    print("  [6/6] HTML レポート生成中...")
-    html_path = _make_report(bets_csv, target, args.ev_threshold)
+    # 6. 過去バックテスト集計（オプション・通常は手動実行時のみ）
+    history: Optional[tuple[Path, str, str]] = None
+    if not args.no_backtest_summary:
+        print(f"  [6/7] 過去 {args.backtest_days}日のバックテスト集計中...")
+        history = _run_historical_backtest(
+            target,
+            days=args.backtest_days,
+            ev_threshold=args.ev_threshold,
+            max_odds=args.max_odds,
+            min_odds=args.min_odds,
+            kelly_fraction=args.kelly_fraction,
+            excluded_venues=args.exclude_venues,
+        )
+
+    # 7. HTML レポート
+    step = "7/7" if not args.no_backtest_summary else "6/6"
+    print(f"  [{step}] HTML レポート生成中...")
+    html_path = _make_report(bets_csv, target, args.ev_threshold, history=history)
 
     print()
     print("=" * 60)

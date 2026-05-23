@@ -13,6 +13,7 @@ backtest 由来の累積PnLチャート・オッズ帯別ヒストグラム等�
 from __future__ import annotations
 
 import argparse
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -88,6 +89,11 @@ HTML = """<!doctype html>
 
   .totals {{ background: var(--bg-header) !important; font-weight: 700; border-top: 2px solid var(--border); }}
   .totals td {{ padding: 14px; }}
+
+  .history-card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; margin-bottom: 24px; }}
+  .history-card .equity-wrap {{ margin-top: 14px; background: var(--bg); border-radius: 8px; padding: 8px; }}
+  .history-card .equity-wrap svg {{ display: block; width: 100%; height: auto; }}
+  .history-meta {{ color: var(--text-dim); font-size: 12px; margin-top: 4px; }}
 </style>
 </head>
 <body>
@@ -105,6 +111,8 @@ HTML = """<!doctype html>
   <div class="card"><div class="label">平均オッズ</div><div class="value">{avg_odds}</div></div>
   {result_kpis}
 </div>
+
+{history_section}
 
 <div class="section-title">▼ 賭けるレース一覧 — 全て 1号艇 単勝</div>
 <table id="bets">
@@ -303,6 +311,124 @@ def _load_schedule(schedule_path: Path) -> dict:
     return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
 
 
+def _load_equity_points(equity_path: Path) -> list[float]:
+    """backtest が書いた equity_<strategy>.csv を読み、エクイティ値のリストを返す。
+
+    Series.to_csv で出力された CSV はヘッダ行 + (index, value) の2列形式。
+    値カラム名は固定ではない（Series.name が無いと空文字や "0"）ので、最後の列を使う。
+    """
+    if not equity_path.exists():
+        return []
+    try:
+        df = pd.read_csv(equity_path)
+    except Exception:
+        return []
+    if df.empty:
+        return []
+    last_col = df.columns[-1]
+    return pd.to_numeric(df[last_col], errors="coerce").dropna().tolist()
+
+
+def _equity_svg(values: list[float], initial: float) -> str:
+    """エクイティ推移を SVG 折れ線で描画。初期バンクロールを点線で示す。"""
+    if not values:
+        return ""
+    w, h = 720, 200
+    pad_l, pad_r, pad_t, pad_b = 56, 56, 22, 22
+    inner_w = w - pad_l - pad_r
+    inner_h = h - pad_t - pad_b
+
+    n = len(values)
+    y_lo = min(min(values), initial)
+    y_hi = max(max(values), initial)
+    if y_hi == y_lo:
+        y_hi = y_lo + 1
+
+    def sx(i: int) -> float:
+        return pad_l + (inner_w * i / max(1, n - 1))
+
+    def sy(v: float) -> float:
+        return pad_t + inner_h - (inner_h * (v - y_lo) / (y_hi - y_lo))
+
+    points = " ".join(f"{sx(i):.1f},{sy(v):.1f}" for i, v in enumerate(values))
+    final = values[-1]
+    above = final >= initial
+    color = "#4ade80" if above else "#f87171"
+    fill_color = "rgba(74,222,128,0.10)" if above else "rgba(248,113,113,0.10)"
+
+    base_y = sy(initial)
+    final_y = sy(final)
+
+    # 簡易な縦軸ラベル（上端・初期・下端）
+    def _yen(v: float) -> str:
+        return f"¥{int(v):,}"
+
+    polygon = f"{pad_l:.1f},{(pad_t+inner_h):.1f} {points} {(pad_l+inner_w):.1f},{(pad_t+inner_h):.1f}"
+
+    return (
+        f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
+        f'role="img" aria-label="エクイティカーブ">'
+        f'<polygon points="{polygon}" fill="{fill_color}" stroke="none"/>'
+        f'<line x1="{pad_l}" y1="{base_y:.1f}" x2="{pad_l+inner_w}" y2="{base_y:.1f}" '
+        f'stroke="#3a3f4d" stroke-dasharray="4,4"/>'
+        f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="2"/>'
+        f'<circle cx="{sx(n-1):.1f}" cy="{final_y:.1f}" r="3.5" fill="{color}"/>'
+        f'<text x="{pad_l-8}" y="{pad_t+6}" text-anchor="end" fill="#9aa0b0" font-size="10">{_yen(y_hi)}</text>'
+        f'<text x="{pad_l-8}" y="{base_y+3}" text-anchor="end" fill="#9aa0b0" font-size="10">{_yen(initial)}</text>'
+        f'<text x="{pad_l-8}" y="{pad_t+inner_h+4}" text-anchor="end" fill="#9aa0b0" font-size="10">{_yen(y_lo)}</text>'
+        f'<text x="{pad_l+inner_w+6}" y="{final_y+4}" fill="{color}" font-size="11" font-weight="700">{_yen(final)}</text>'
+        f'</svg>'
+    )
+
+
+def _render_history_section(summary_path: Path, equity_path: Path,
+                            since: str, until: str) -> str:
+    """過去バックテスト集計セクションのHTMLを返す。データ不足なら空文字。"""
+    if not summary_path.exists():
+        return ""
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    n_bets = int(summary.get("n_bets", 0) or 0)
+    if n_bets <= 0:
+        return ""
+
+    stake = float(summary.get("stake_total", 0) or 0)
+    pnl = float(summary.get("pnl", 0) or 0)
+    roi = float(summary.get("roi", 0) or 0)
+    hit = float(summary.get("hit_rate", 0) or 0)
+    max_dd = float(summary.get("max_drawdown", 0) or 0)
+    ending = float(summary.get("ending_bankroll", 0) or 0)
+    initial = ending - pnl if pnl != 0 else max(1.0, ending)
+    pnl_cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "")
+    roi_cls = pnl_cls
+    sign = "+" if pnl > 0 else ""
+
+    equity_values = _load_equity_points(equity_path)
+    svg = _equity_svg(equity_values, initial) if equity_values else ""
+
+    return (
+        '<div class="section-title">▼ 過去バックテスト</div>'
+        '<div class="history-card">'
+        f'<div class="history-meta">期間: <code>{since}</code> 〜 <code>{until}</code>'
+        f' &nbsp;｜&nbsp; 戦略: <code>lane1_kelly</code>'
+        f' &nbsp;｜&nbsp; 初期バンクロール ¥{int(initial):,}</div>'
+        '<div class="kpi" style="margin-top:14px">'
+        f'<div class="card"><div class="label">対象ベット数</div><div class="value">{n_bets:,} 件</div></div>'
+        f'<div class="card"><div class="label">合計ステーク</div><div class="value">¥{int(stake):,}</div></div>'
+        f'<div class="card"><div class="label">累積 PnL</div><div class="value {pnl_cls}">{sign}¥{int(pnl):,}</div></div>'
+        f'<div class="card"><div class="label">ROI</div><div class="value {roi_cls}">{sign}{roi*100:.1f}%</div></div>'
+        f'<div class="card"><div class="label">勝率</div><div class="value">{hit*100:.1f}%</div></div>'
+        f'<div class="card"><div class="label">最大DD</div><div class="value neg">{max_dd*100:.1f}%</div></div>'
+        f'<div class="card"><div class="label">最終バンクロール</div><div class="value">¥{int(ending):,}</div></div>'
+        '</div>'
+        + (f'<div class="equity-wrap">{svg}</div>' if svg else "")
+        + '</div>'
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bets", required=True)
@@ -313,6 +439,14 @@ def main() -> None:
                    help="ヘッダの日付ラベル。未指定なら CSV から自動抽出")
     p.add_argument("--schedule", default="data/raw/race_schedule.csv",
                    help="締切時刻 CSV のパス（あれば締切時刻列に表示）")
+    p.add_argument("--history-summary", default=None,
+                   help="過去バックテストの summary JSON。あればレポートに集計セクションを追加")
+    p.add_argument("--history-equity", default=None,
+                   help="過去バックテストの equity CSV（SVG折れ線を描画）")
+    p.add_argument("--history-since", default="",
+                   help="過去バックテストの開始日（表示用）")
+    p.add_argument("--history-until", default="",
+                   help="過去バックテストの終了日（表示用）")
     args = p.parse_args()
 
     bets = pd.read_csv(args.bets)
@@ -337,6 +471,15 @@ def main() -> None:
     if len(bets):
         bets = bets.sort_values(["ev" if "ev" in bets.columns else "stake"], ascending=False)
 
+    history_section = ""
+    if args.history_summary:
+        history_section = _render_history_section(
+            Path(args.history_summary),
+            Path(args.history_equity) if args.history_equity else Path("/dev/null"),
+            args.history_since,
+            args.history_until,
+        )
+
     summ = _summary(bets)
     html = HTML.format(
         date_label=date_label,
@@ -348,6 +491,7 @@ def main() -> None:
         max_ev=f"{summ['max_ev']:.3f}" if summ["max_ev"] else "-",
         avg_odds=f"{summ['avg_odds']:.2f}" if summ["avg_odds"] else "-",
         result_kpis=_result_kpis(bets),
+        history_section=history_section,
         rows="".join(_row(r, schedule) for _, r in bets.iterrows()),
         totals_row=_totals_row(bets),
     )
