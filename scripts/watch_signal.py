@@ -40,6 +40,7 @@ race_id がベット候補に追加された時点で:
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import subprocess
 import sys
@@ -51,15 +52,16 @@ from pathlib import Path
 import pandas as pd
 
 from src.notify.push import push_all
-from src.utils.config import MODELS_DIR, PROCESSED_DIR
+from src.utils.config import MODELS_DIR, PROCESSED_DIR, RAW_DIR
 
 BETS_CSV = MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
+SCHEDULE_CSV = RAW_DIR / "race_schedule.csv"
 
 
 def _current_bets() -> tuple[set[str], dict[str, dict]]:
     """現在の bets CSV から (race_id 集合, race_id → 詳細 dict) を返す。
 
-    詳細 dict は {odds_win, ev, stake} を含む（push 通知の本文用）。
+    詳細 dict は odds / ev / stake / p_blend を含む（push 通知の本文用）。
     """
     if not BETS_CSV.exists():
         return set(), {}
@@ -70,27 +72,61 @@ def _current_bets() -> tuple[set[str], dict[str, dict]]:
     details: dict[str, dict] = {}
     for _, r in df.iterrows():
         rid = str(r["race_id"])
+        p_blend = r.get("blended_win_prob")
+        if p_blend is None or pd.isna(p_blend):
+            p_blend = r.get("pred_win_prob", 0)
         details[rid] = {
             "odds": float(r.get("odds_win", 0) or 0),
             "ev": float(r.get("ev", 0) or 0),
             "stake": int(r.get("stake", 0) or 0),
+            "p_blend": float(p_blend or 0),
         }
     return set(details.keys()), details
 
 
-def _format_push_body(new_ids: set[str], details: dict[str, dict]) -> str:
-    """新規シグナルの本文を整形。"""
+def _load_schedule() -> dict[str, str]:
+    """race_schedule.csv → {race_id: deadline_time}"""
+    if not SCHEDULE_CSV.exists():
+        return {}
+    try:
+        df = pd.read_csv(SCHEDULE_CSV)
+        return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
+    except Exception:
+        return {}
+
+
+def _format_push_body(ids: set[str], details: dict[str, dict],
+                      new_ids: set[str] | None = None,
+                      schedule: dict[str, str] | None = None) -> str:
+    """シグナル本文を整形。HTMLレポートと同じ項目を含む。
+
+    new_ids に含まれる race_id は先頭に 🆕 マーカーを付ける。EV 降順で並べ、
+    複数行構成で 1レース = 2行（識別行 + 数値行）。
+    """
     from src.utils.config import VENUE_CODES
-    lines = []
-    for rid in sorted(new_ids):
+    new_ids = new_ids or set()
+    schedule = schedule or {}
+
+    # EV 降順
+    ordered = sorted(ids, key=lambda r: -float(details.get(r, {}).get("ev", 0)))
+
+    lines: list[str] = []
+    for rid in ordered:
         parts = rid.split("-")
-        venue = VENUE_CODES.get(parts[1], parts[1]) if len(parts) >= 2 else rid
-        rno = int(parts[2]) if len(parts) >= 3 else 0
+        jcd = parts[1] if len(parts) >= 2 else ""
+        venue = VENUE_CODES.get(jcd, jcd) if jcd else rid
+        rno = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
         d = details.get(rid, {})
-        lines.append(
-            f"{venue} {rno}R: オッズ{d.get('odds', 0):.2f} "
-            f"EV{d.get('ev', 0):.2f} ステーク¥{d.get('stake', 0):,}"
-        )
+        deadline = schedule.get(rid, "")
+        deadline_str = f" 締切{deadline}" if deadline else ""
+        marker = "🆕 " if rid in new_ids else "・"
+        head = f"{marker}{venue}({jcd}) {rno}R{deadline_str}"
+        body = (f"  P{d.get('p_blend', 0):.3f} / "
+                f"オッズ{d.get('odds', 0):.2f} / "
+                f"EV{d.get('ev', 0):.2f} / "
+                f"推奨¥{d.get('stake', 0):,}")
+        lines.append(head)
+        lines.append(body)
     return "\n".join(lines)
 
 
@@ -186,6 +222,14 @@ def main() -> None:
     print("=" * 60)
     print(f"シグナル監視開始: {args.variant} を {args.interval}分ごとに実行")
     print(f"対象日: {target}")
+    # LINE 通知の起動時診断（環境変数が無いと sleep 中に黙って失敗するため）
+    if not args.no_push:
+        if os.environ.get("LINE_ACCESS_TOKEN") and os.environ.get("LINE_USER_ID"):
+            print(f"LINE通知: 有効 (user={os.environ['LINE_USER_ID'][:6]}…)")
+        else:
+            print("⚠ LINE通知: 環境変数 LINE_ACCESS_TOKEN / LINE_USER_ID 未設定。"
+                  "この PowerShell ウィンドウからは届きません。新しい PowerShell を開くか、"
+                  "セッション内で $env: にセットしてから再実行してください。")
     print(f"Ctrl+C で停止")
     print("=" * 60)
 
@@ -203,6 +247,7 @@ def main() -> None:
             skip_features = not (iteration == 1 or iteration % args.rebuild_features_every == 0)
             rc = _run_signal_once(args.variant, extra, skip_features=skip_features)
             cur_ids, details = _current_bets()
+            schedule = _load_schedule()
             new_ids = cur_ids - prev_ids
             removed = prev_ids - cur_ids
 
@@ -210,9 +255,9 @@ def main() -> None:
                 print(f"[{now}] 初回: 候補 {len(cur_ids)}件")
                 if cur_ids and not args.no_open_browser:
                     _open_browser(target)
-                # 初回のシグナルもスマホ通知
+                # 初回のシグナルもスマホ通知（全件・新規マーカーなし）
                 if cur_ids and not args.no_push:
-                    body = _format_push_body(cur_ids, details)
+                    body = _format_push_body(cur_ids, details, schedule=schedule)
                     push_all(f"競艇シグナル {len(cur_ids)}件 (初回)", body)
             elif new_ids:
                 msg = f"新規 {len(new_ids)}件 / 計 {len(cur_ids)}件: {', '.join(sorted(new_ids))}"
@@ -227,10 +272,15 @@ def main() -> None:
                     _show_toast(f"競艇シグナル新規 {len(new_ids)}件", short)
                 if not args.no_open_browser:
                     _open_browser(target)
-                # スマホへのプッシュ通知
+                # スマホへ: 新規が出た時は「現在出ている全シグナル」を送る。
+                # new_ids は本文中で 🆕 マーカーで識別できる。
                 if not args.no_push:
-                    body = _format_push_body(new_ids, details)
-                    push_all(f"競艇シグナル新規 {len(new_ids)}件", body)
+                    body = _format_push_body(cur_ids, details,
+                                             new_ids=new_ids, schedule=schedule)
+                    push_all(
+                        f"競艇シグナル 新規{len(new_ids)}件 / 計{len(cur_ids)}件",
+                        body,
+                    )
             elif removed:
                 print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
             else:
