@@ -108,6 +108,50 @@ def _build_target_set(
     return targets
 
 
+def _filter_past_deadline(
+    targets: list[tuple[date, str, int]],
+    schedule_path: Path,
+    now: object = None,
+) -> list[tuple[date, str, int]]:
+    """schedule CSV を元に「現在時刻より過去の締切」を持つレースを除外。
+
+    schedule が無い・パース失敗のレースは安全側で残す（再取得対象にする）。
+    schedule に該当 race_id が無いレースも残す。
+    """
+    from datetime import datetime, time
+    if not schedule_path.exists():
+        logger.debug("schedule not found: %s — フィルタ無し", schedule_path)
+        return targets
+    try:
+        sched_df = pd.read_csv(schedule_path)
+    except Exception as e:
+        logger.warning("schedule 読込失敗: %s — フィルタ無し", e)
+        return targets
+    sched_map = dict(zip(
+        sched_df["race_id"].astype(str),
+        sched_df["deadline_time"].astype(str),
+    ))
+    cur_now = now if isinstance(now, datetime) else datetime.now()
+
+    kept: list[tuple[date, str, int]] = []
+    for (d, jcd, rno) in targets:
+        rid = _race_id(d.strftime("%Y%m%d"), jcd, rno)
+        deadline_str = sched_map.get(rid, "")
+        if not deadline_str or ":" not in deadline_str:
+            kept.append((d, jcd, rno))  # 不明 → 残す
+            continue
+        try:
+            hh, mm = deadline_str.split(":")[:2]
+            deadline = datetime.combine(d, time(int(hh), int(mm)))
+        except (ValueError, AttributeError):
+            kept.append((d, jcd, rno))  # パース失敗 → 残す
+            continue
+        if deadline > cur_now:
+            kept.append((d, jcd, rno))
+        # 締切過ぎたものは除外
+    return kept
+
+
 def _load_existing_race_ids(out_path: Path) -> set[str]:
     """既存 CSV から「有効なオッズが少なくとも1件ある race_id」を返す。
 
@@ -159,6 +203,12 @@ def main() -> None:
         default=1,
         help="並列スクレイパー数。2〜6 推奨。1 で従来のシリアル動作",
     )
+    parser.add_argument(
+        "--skip-past-deadline",
+        default=None,
+        help="race_schedule.csv のパス。指定すると現在時刻より過去の締切レースを除外。"
+             "終了したレースのオッズは固定値なので再取得しても無駄、という最適化用。",
+    )
     parser.add_argument("--out", default=str(RAW_DIR / "odds_win.csv"))
     args = parser.parse_args()
 
@@ -172,6 +222,15 @@ def main() -> None:
         logger.info("resume: 既存 %d レースをスキップ", len(skip_ids))
         targets = [(d, jcd, rno) for (d, jcd, rno) in targets
                    if _race_id(d.strftime("%Y%m%d"), jcd, rno) not in skip_ids]
+
+    # 締切過ぎのレースを除外（オッズは確定済で再取得しても無駄）
+    if args.skip_past_deadline:
+        before = len(targets)
+        targets = _filter_past_deadline(targets, Path(args.skip_past_deadline))
+        skipped = before - len(targets)
+        if skipped:
+            logger.info("skip-past-deadline: 締切過ぎ %d レースをスキップ (残 %d)",
+                        skipped, len(targets))
 
     logger.info("対象レース数: %d (workers=%d)", len(targets), args.workers)
     if not targets:

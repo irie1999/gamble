@@ -87,11 +87,14 @@ def _autofill_races(target: date) -> None:
           "--from", target.isoformat(), "--to", target.isoformat()])
 
 
-def _autofill_odds(target: date, workers: int, *, force: bool = False) -> None:
+def _autofill_odds(target: date, workers: int, *, force: bool = False,
+                   skip_past_deadline: Optional[Path] = None) -> None:
     """odds_win.csv に該当日のオッズを取得。
 
     force=True なら --resume を付けず既存レースも再スクレイプする（オッズは
     締切に向けて動くため、watch_signal の定期実行では force=True が必要）。
+    skip_past_deadline に schedule CSV を渡すと、締切過ぎのレース（オッズは
+    既に確定済み）はスクレイプ対象から除外される。
     """
     cmd = [sys.executable, "-m", "scripts.scrape_odds",
            "--from", target.isoformat(), "--to", target.isoformat(),
@@ -99,7 +102,52 @@ def _autofill_odds(target: date, workers: int, *, force: bool = False) -> None:
            "--workers", str(workers)]
     if not force:
         cmd.append("--resume")
+    if skip_past_deadline is not None and skip_past_deadline.exists():
+        cmd += ["--skip-past-deadline", str(skip_past_deadline)]
     _run(cmd)
+
+
+def _schedule_today_coverage(schedule_path: Path, target: date) -> tuple[int, int]:
+    """schedule_path にある target 日の deadline 数と、races.parquet 上の総レース数を返す。
+
+    (have, expected) のタプル。races.parquet が無ければ (0, 0)。
+    """
+    races_path = RAW_DIR / "races.parquet"
+    if not races_path.exists():
+        return (0, 0)
+    today_str = target.strftime("%Y%m%d")
+    expected = int(
+        pd.read_parquet(races_path, columns=["race_id"])["race_id"]
+        .astype(str).str.startswith(today_str).sum()
+    )
+    if not schedule_path.exists():
+        return (0, expected)
+    try:
+        sched = pd.read_csv(schedule_path, usecols=["race_id"])
+    except Exception:
+        return (0, expected)
+    have = int(sched["race_id"].astype(str).str.startswith(today_str).nunique())
+    return (have, expected)
+
+
+def _autofill_schedule_all(target: date, workers: int) -> Path:
+    """その日の全場スケジュールを取得（既に80%以上揃っていればスキップ）。
+
+    取得済みなら HTTP リクエスト無しで race_schedule.csv のパスを返す。
+    オッズスクレイプの「締切過ぎ除外」フィルタに使う。
+    """
+    schedule_path = RAW_DIR / "race_schedule.csv"
+    have, expected = _schedule_today_coverage(schedule_path, target)
+    if expected > 0 and have >= expected * 0.8:
+        logger.info("schedule キャッシュ有効: %d/%d レース（fetch スキップ）",
+                    have, expected)
+        return schedule_path
+    logger.info("schedule 取得開始: 既存 %d/%d レース（不足のため全場fetch）",
+                have, expected)
+    _run([sys.executable, "-m", "scripts.scrape_schedule",
+          "--date", target.isoformat(),
+          "--workers", str(workers)])
+    return schedule_path
 
 
 def _refresh_results_html(target: date, workers: int,
@@ -277,19 +325,26 @@ def main() -> None:
             print(f"       ⚠ {target} のレースデータがありません。--autofill を付けるか手動で scrape してください")
             sys.exit(1)
 
-    # 2. odds チェック
+    # 2. 当日の全場スケジュール（締切過ぎのレースを odds スクレイプから除外するため）
+    schedule_path: Optional[Path] = None
+    if args.autofill:
+        schedule_path = _autofill_schedule_all(target, args.workers)
+
+    # 3. odds チェック
     n_odds = _odds_has_date(odds_path, target)
     print(f"  [2/5] odds_win.csv: {n_odds} 件")
     # --refresh-odds 指定時は強制再取得
     if args.refresh_odds and args.autofill:
         print("       → --refresh-odds 指定のため強制再取得（--resume 無効化）")
-        _autofill_odds(target, args.workers, force=True)
+        _autofill_odds(target, args.workers, force=True,
+                       skip_past_deadline=schedule_path)
         n_odds = _odds_has_date(odds_path, target)
         print(f"       再取得後: {n_odds} 件")
     elif n_odds < n_races * 0.8:  # 80%未満なら不足とみなす（一部レース欠損は許容）
         if args.autofill:
             print("       → 不足のため scrape_odds を実行")
-            _autofill_odds(target, args.workers)
+            _autofill_odds(target, args.workers,
+                           skip_past_deadline=schedule_path)
             n_odds = _odds_has_date(odds_path, target)
             print(f"       再取得後: {n_odds} 件")
         else:
