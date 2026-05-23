@@ -8,6 +8,17 @@ race_id がベット候補に追加された時点で:
   2. Windows ビープ音
   3. Windows トースト通知（PowerShell 経由）
   4. ブラウザで最新の HTML レポートを自動オープン
+  5. スマホへのプッシュ通知（環境変数で LINE/ntfy/Discord/Slack を設定）
+
+スマホ通知のセットアップ例（PowerShell）:
+    # ntfy.sh（最も簡単、アカウント不要）:
+    $env:NTFY_TOPIC = "kyotei-signal-XXXXXX"  # 推測されにくい文字列
+
+    # LINE Messaging API:
+    $env:LINE_ACCESS_TOKEN = "xxxxx"   # チャンネルアクセストークン
+    $env:LINE_USER_ID      = "Uxxxxx"  # 自分の userId
+
+設定後に watch_signal を起動すれば、新規シグナル時に自動でスマホに届く。
 
 使い方:
     # デフォルト: 30分ごとに v2 を実行
@@ -35,20 +46,48 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.notify.push import push_all
 from src.utils.config import MODELS_DIR, PROCESSED_DIR
 
 BETS_CSV = MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 
 
-def _current_bet_set() -> set[str]:
-    """bets_lane1_kelly.csv に現在含まれている race_id 集合。"""
+def _current_bets() -> tuple[set[str], dict[str, dict]]:
+    """現在の bets CSV から (race_id 集合, race_id → 詳細 dict) を返す。
+
+    詳細 dict は {odds_win, ev, stake} を含む（push 通知の本文用）。
+    """
     if not BETS_CSV.exists():
-        return set()
+        return set(), {}
     try:
-        df = pd.read_csv(BETS_CSV, usecols=["race_id"])
+        df = pd.read_csv(BETS_CSV)
     except Exception:
-        return set()
-    return set(df["race_id"].astype(str).unique())
+        return set(), {}
+    details: dict[str, dict] = {}
+    for _, r in df.iterrows():
+        rid = str(r["race_id"])
+        details[rid] = {
+            "odds": float(r.get("odds_win", 0) or 0),
+            "ev": float(r.get("ev", 0) or 0),
+            "stake": int(r.get("stake", 0) or 0),
+        }
+    return set(details.keys()), details
+
+
+def _format_push_body(new_ids: set[str], details: dict[str, dict]) -> str:
+    """新規シグナルの本文を整形。"""
+    from src.utils.config import VENUE_CODES
+    lines = []
+    for rid in sorted(new_ids):
+        parts = rid.split("-")
+        venue = VENUE_CODES.get(parts[1], parts[1]) if len(parts) >= 2 else rid
+        rno = int(parts[2]) if len(parts) >= 3 else 0
+        d = details.get(rid, {})
+        lines.append(
+            f"{venue} {rno}R: オッズ{d.get('odds', 0):.2f} "
+            f"EV{d.get('ev', 0):.2f} ステーク¥{d.get('stake', 0):,}"
+        )
+    return "\n".join(lines)
 
 
 def _beep() -> None:
@@ -118,6 +157,8 @@ def main() -> None:
     p.add_argument("--no-beep", action="store_true")
     p.add_argument("--no-toast", action="store_true")
     p.add_argument("--no-open-browser", action="store_true")
+    p.add_argument("--no-push", action="store_true",
+                   help="スマホへのプッシュ通知を無効化（環境変数で設定済みの場合のみ動く）")
     p.add_argument("--refresh-odds", action="store_true",
                    help="毎回オッズを強制再取得（v1の場合のみ有効）")
     args = p.parse_args()
@@ -142,7 +183,7 @@ def main() -> None:
             print(f"\n[{now}] === 実行 #{iteration} ===")
 
             rc = _run_signal_once(args.variant, extra)
-            cur_ids = _current_bet_set()
+            cur_ids, details = _current_bets()
             new_ids = cur_ids - prev_ids
             removed = prev_ids - cur_ids
 
@@ -150,6 +191,10 @@ def main() -> None:
                 print(f"[{now}] 初回: 候補 {len(cur_ids)}件")
                 if cur_ids and not args.no_open_browser:
                     _open_browser(target)
+                # 初回のシグナルもスマホ通知
+                if cur_ids and not args.no_push:
+                    body = _format_push_body(cur_ids, details)
+                    push_all(f"競艇シグナル {len(cur_ids)}件 (初回)", body)
             elif new_ids:
                 msg = f"新規 {len(new_ids)}件 / 計 {len(cur_ids)}件: {', '.join(sorted(new_ids))}"
                 print(f"[{now}] 🔔 {msg}")
@@ -163,6 +208,10 @@ def main() -> None:
                     _show_toast(f"競艇シグナル新規 {len(new_ids)}件", short)
                 if not args.no_open_browser:
                     _open_browser(target)
+                # スマホへのプッシュ通知
+                if not args.no_push:
+                    body = _format_push_body(new_ids, details)
+                    push_all(f"競艇シグナル新規 {len(new_ids)}件", body)
             elif removed:
                 print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
             else:
