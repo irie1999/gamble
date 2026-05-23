@@ -58,6 +58,53 @@ BETS_CSV = MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 SCHEDULE_CSV = RAW_DIR / "race_schedule.csv"
 
 
+def _hydrate_env_from_registry() -> list[str]:
+    """Windows: 永続化された User/Machine 環境変数を現プロセスに取り込む。
+
+    Windows の環境変数は親プロセス起動時にコピーされるため、VSCode などを
+    起動した「あと」に SetEnvironmentVariable で設定すると、VSCode 内ターミナル
+    からは値が見えない（VSCode 全体を真に再起動しないと反映されない）という
+    罠が頻発する。レジストリを直接読んで os.environ にマージすれば、PowerShell
+    側に反映されていなくても watch_signal は確実に env を取れる。
+
+    取り込んだキー名のリストを返す（既に os.environ にあるものは上書きしない）。
+    """
+    if platform.system() != "Windows":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    keys_to_check = [
+        "LINE_ACCESS_TOKEN", "LINE_USER_ID",
+        "NTFY_TOPIC", "NTFY_SERVER",
+        "DISCORD_WEBHOOK_URL", "SLACK_WEBHOOK_URL",
+    ]
+    hydrated: list[str] = []
+    sources = [
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+    ]
+    for hive, subkey in sources:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                for name in keys_to_check:
+                    if os.environ.get(name):
+                        continue
+                    try:
+                        value, _ = winreg.QueryValueEx(key, name)
+                    except FileNotFoundError:
+                        continue
+                    if value:
+                        os.environ[name] = str(value)
+                        hydrated.append(name)
+        except OSError:
+            continue
+    return hydrated
+
+
 def _current_bets() -> tuple[set[str], dict[str, dict]]:
     """現在の bets CSV から (race_id 集合, race_id → 詳細 dict) を返す。
 
@@ -219,17 +266,22 @@ def main() -> None:
     target = date.today()
     extra = [] if args.no_refresh_odds else ["--refresh-odds"]
 
+    # Windows: 永続化済みの env をレジストリから取り込み（VSCode 内ターミナル等の救済）
+    hydrated = _hydrate_env_from_registry()
+
     print("=" * 60)
     print(f"シグナル監視開始: {args.variant} を {args.interval}分ごとに実行")
     print(f"対象日: {target}")
+    if hydrated:
+        print(f"環境変数をレジストリから取り込みました: {', '.join(hydrated)}")
     # LINE 通知の起動時診断（環境変数が無いと sleep 中に黙って失敗するため）
     if not args.no_push:
         if os.environ.get("LINE_ACCESS_TOKEN") and os.environ.get("LINE_USER_ID"):
             print(f"LINE通知: 有効 (user={os.environ['LINE_USER_ID'][:6]}…)")
         else:
             print("⚠ LINE通知: 環境変数 LINE_ACCESS_TOKEN / LINE_USER_ID 未設定。"
-                  "この PowerShell ウィンドウからは届きません。新しい PowerShell を開くか、"
-                  "セッション内で $env: にセットしてから再実行してください。")
+                  "Windows のユーザー/システム環境変数に LINE_ACCESS_TOKEN と "
+                  "LINE_USER_ID を設定してから再実行してください。")
     print(f"Ctrl+C で停止")
     print("=" * 60)
 
