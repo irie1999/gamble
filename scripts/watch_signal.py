@@ -46,7 +46,7 @@ import subprocess
 import sys
 import time
 import webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, time as _time, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -140,6 +140,35 @@ def _load_schedule() -> dict[str, str]:
         return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
     except Exception:
         return {}
+
+
+def _races_near_deadline(ids: set[str], schedule: dict[str, str],
+                         already_reminded: set[str],
+                         minutes_threshold: int,
+                         now: datetime | None = None) -> set[str]:
+    """締切まで minutes_threshold 分以内のレースを返す。
+
+    既にリマインド済み・締切が過ぎたもの・schedule に締切時刻が無いものは除外。
+    """
+    if now is None:
+        now = datetime.now()
+    today = now.date()
+    soon: set[str] = set()
+    for rid in ids:
+        if rid in already_reminded:
+            continue
+        deadline_str = schedule.get(rid)
+        if not deadline_str or ":" not in deadline_str:
+            continue
+        try:
+            hh, mm = deadline_str.split(":")[:2]
+            deadline = datetime.combine(today, _time(int(hh), int(mm)))
+        except (ValueError, AttributeError):
+            continue
+        delta = deadline - now
+        if timedelta(0) < delta <= timedelta(minutes=minutes_threshold):
+            soon.add(rid)
+    return soon
 
 
 def _format_push_body(ids: set[str], details: dict[str, dict],
@@ -261,6 +290,9 @@ def main() -> None:
     p.add_argument("--rebuild-features-every", type=int, default=6,
                    help="N回に1回だけ features を再生成（毎回再生成すると重いため）。"
                         "デフォルト6=10分間隔なら1時間に1回")
+    p.add_argument("--deadline-reminder-min", type=int, default=10,
+                   help="締切のN分前に最新オッズで再通知する（既に通知済の候補も対象）。"
+                        "0で無効。実際の発火は iteration タイミング次第で N+α 分前になることもある")
     args = p.parse_args()
 
     target = date.today()
@@ -286,6 +318,7 @@ def main() -> None:
     print("=" * 60)
 
     prev_ids: set[str] = set()
+    reminded_ids: set[str] = set()
     first_run = True
     iteration = 0
 
@@ -337,6 +370,24 @@ def main() -> None:
                 print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
             else:
                 print(f"[{now}] 候補 {len(cur_ids)}件（変化なし）")
+
+            # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知
+            if args.deadline_reminder_min > 0:
+                # iteration の隙間で取りこぼさないよう半周期ぶんマージンを足す
+                effective_threshold = args.deadline_reminder_min + max(args.interval // 2, 2)
+                soon = _races_near_deadline(
+                    cur_ids, schedule, reminded_ids,
+                    minutes_threshold=effective_threshold,
+                )
+                if soon:
+                    title = f"⏰ 締切{args.deadline_reminder_min}分前 {len(soon)}件"
+                    print(f"[{now}] {title}: {', '.join(sorted(soon))}")
+                    if not args.no_beep:
+                        _beep()
+                    if not args.no_push:
+                        body = _format_push_body(soon, details, schedule=schedule)
+                        push_all(title, body)
+                    reminded_ids |= soon
 
             prev_ids = cur_ids
             first_run = False
