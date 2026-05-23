@@ -140,18 +140,22 @@ def _open_browser(target: date) -> None:
             pass
 
 
-def _run_signal_once(variant: str, extra_args: list[str]) -> int:
+def _run_signal_once(variant: str, extra_args: list[str], *,
+                     skip_features: bool = False) -> int:
     """run_signal を1回実行（ブラウザ自動オープンは抑止）。終了コードを返す。"""
     module = "scripts.run_signal_v2" if variant == "v2" else "scripts.run_signal"
-    cmd = [sys.executable, "-m", module, "--autofill", "--no-open"] + extra_args
+    cmd = [sys.executable, "-m", module, "--autofill", "--no-open"]
+    if skip_features:
+        cmd.append("--skip-features")
+    cmd += extra_args
     return subprocess.call(cmd)
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--interval", type=int, default=30,
-                   help="再実行間隔（分）。デフォルト 30")
+    p.add_argument("--interval", type=int, default=10,
+                   help="再実行間隔（分）。デフォルト 10（オッズが揃うのは締切30分前頃）")
     p.add_argument("--variant", choices=["v1", "v2"], default="v2",
                    help="run_signal の系統。v1=旧設定 / v2=B設定（デフォルト）")
     p.add_argument("--no-beep", action="store_true")
@@ -161,6 +165,9 @@ def main() -> None:
                    help="スマホへのプッシュ通知を無効化（環境変数で設定済みの場合のみ動く）")
     p.add_argument("--refresh-odds", action="store_true",
                    help="毎回オッズを強制再取得（v1の場合のみ有効）")
+    p.add_argument("--rebuild-features-every", type=int, default=6,
+                   help="N回に1回だけ features を再生成（毎回再生成すると重いため）。"
+                        "デフォルト6=10分間隔なら1時間に1回")
     args = p.parse_args()
 
     target = date.today()
@@ -182,7 +189,9 @@ def main() -> None:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"\n[{now}] === 実行 #{iteration} ===")
 
-            rc = _run_signal_once(args.variant, extra)
+            # 初回は features を必ず再生成、以降は --rebuild-features-every 毎
+            skip_features = not (iteration == 1 or iteration % args.rebuild_features_every == 0)
+            rc = _run_signal_once(args.variant, extra, skip_features=skip_features)
             cur_ids, details = _current_bets()
             new_ids = cur_ids - prev_ids
             removed = prev_ids - cur_ids
