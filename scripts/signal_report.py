@@ -385,8 +385,13 @@ def _equity_svg(values: list[float], initial: float) -> str:
 
 
 def _render_history_section(summary_path: Path, equity_path: Path,
-                            since: str, until: str) -> str:
-    """過去バックテスト集計セクションのHTMLを返す。データ不足なら空文字。"""
+                            since: str, until: str,
+                            actual_since: str = "", actual_until: str = "") -> str:
+    """過去バックテスト集計セクションのHTMLを返す。データ不足なら空文字。
+
+    since/until は要求された期間。actual_since/actual_until が指定されており、
+    要求より狭ければ「実データ範囲が短い」旨の注釈を出す。
+    """
     if not summary_path.exists():
         return ""
     try:
@@ -412,12 +417,27 @@ def _render_history_section(summary_path: Path, equity_path: Path,
     equity_values = _load_equity_points(equity_path)
     svg = _equity_svg(equity_values, initial) if equity_values else ""
 
+    # 実データ範囲と要求範囲がズレている場合、注釈を出す
+    display_since, display_until = (actual_since or since), (actual_until or until)
+    coverage_note = ""
+    if actual_since and actual_until and since and until:
+        if actual_since > since or actual_until < until:
+            coverage_note = (
+                f'<div class="history-meta" style="color:var(--warn);margin-top:6px">'
+                f'⚠ 要求期間 <code>{since}</code> 〜 <code>{until}</code> のうち、'
+                f'実データが揃っているのは上記範囲のみ。'
+                f'過去データを追加スクレイプすると延長できます'
+                f'（<code>scripts.scrape_dataset / scripts.scrape_odds</code>）。'
+                f'</div>'
+            )
+
     return (
         '<div class="section-title">▼ 過去バックテスト</div>'
         '<div class="history-card">'
-        f'<div class="history-meta">期間: <code>{since}</code> 〜 <code>{until}</code>'
+        f'<div class="history-meta">期間: <code>{display_since}</code> 〜 <code>{display_until}</code>'
         f' &nbsp;｜&nbsp; 戦略: <code>lane1_kelly</code>'
         f' &nbsp;｜&nbsp; 初期バンクロール ¥{int(initial):,}</div>'
+        + coverage_note +
         '<div class="kpi" style="margin-top:14px">'
         f'<div class="card"><div class="label">対象ベット数</div><div class="value">{n_bets:,} 件</div></div>'
         f'<div class="card"><div class="label">合計ステーク</div><div class="value">¥{int(stake):,}</div></div>'
@@ -573,11 +593,30 @@ def main() -> None:
 
     history_section = ""
     if args.history_summary:
+        # 実データ範囲を bets から取得（要求範囲とのギャップを HTML で可視化するため）
+        actual_since, actual_until = "", ""
+        if args.history_bets and Path(args.history_bets).exists():
+            try:
+                hb = pd.read_csv(args.history_bets)
+            except Exception:
+                hb = pd.DataFrame()
+            if not hb.empty:
+                if "race_finished" in hb.columns:
+                    hb = hb[hb["race_finished"].fillna(False).astype(bool)]
+                if "race_date" not in hb.columns or hb["race_date"].isna().all():
+                    hb["race_date"] = hb["race_id"].astype(str).str[:8]
+                d = pd.to_datetime(hb["race_date"], errors="coerce").dropna()
+                if len(d):
+                    actual_since = d.min().strftime("%Y-%m-%d")
+                    actual_until = d.max().strftime("%Y-%m-%d")
+
         history_section = _render_history_section(
             Path(args.history_summary),
             Path(args.history_equity) if args.history_equity else Path("/dev/null"),
             args.history_since,
             args.history_until,
+            actual_since=actual_since,
+            actual_until=actual_until,
         )
         if args.history_bets:
             history_section += _render_history_bets_section(Path(args.history_bets))
