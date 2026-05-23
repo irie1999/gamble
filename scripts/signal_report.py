@@ -125,23 +125,26 @@ HTML = """<!doctype html>
 </table>
 
 <script>
-document.querySelectorAll('#bets th').forEach((th, idx) => {{
-  let asc = false;
-  th.addEventListener('click', () => {{
-    const tbody = th.closest('table').querySelector('tbody');
-    const all = Array.from(tbody.querySelectorAll('tr'));
-    const totals = all.filter(r => r.classList.contains('totals'));
-    const rows = all.filter(r => !r.classList.contains('totals'));
-    rows.sort((a, b) => {{
-      const av = a.children[idx].dataset.sort ?? a.children[idx].textContent;
-      const bv = b.children[idx].dataset.sort ?? b.children[idx].textContent;
-      const an = parseFloat(av), bn = parseFloat(bv);
-      const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv), 'ja');
-      return asc ? cmp : -cmp;
+document.querySelectorAll('table').forEach(table => {{
+  const ths = table.querySelectorAll('thead th');
+  ths.forEach((th, idx) => {{
+    let asc = false;
+    th.addEventListener('click', () => {{
+      const tbody = table.querySelector('tbody');
+      const all = Array.from(tbody.querySelectorAll('tr'));
+      const totals = all.filter(r => r.classList.contains('totals'));
+      const rows = all.filter(r => !r.classList.contains('totals'));
+      rows.sort((a, b) => {{
+        const av = a.children[idx].dataset.sort ?? a.children[idx].textContent;
+        const bv = b.children[idx].dataset.sort ?? b.children[idx].textContent;
+        const an = parseFloat(av), bn = parseFloat(bv);
+        const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv), 'ja');
+        return asc ? cmp : -cmp;
+      }});
+      asc = !asc;
+      rows.forEach(r => tbody.appendChild(r));
+      totals.forEach(r => tbody.appendChild(r));
     }});
-    asc = !asc;
-    rows.forEach(r => tbody.appendChild(r));
-    totals.forEach(r => tbody.appendChild(r));
   }});
 }});
 </script>
@@ -429,6 +432,101 @@ def _render_history_section(summary_path: Path, equity_path: Path,
     )
 
 
+def _render_history_bets_section(bets_path: Path) -> str:
+    """過去バックテストの個別取引テーブル。確定済みのみ・日付降順で表示。"""
+    if not bets_path.exists():
+        return ""
+    try:
+        df = pd.read_csv(bets_path)
+    except Exception:
+        return ""
+    if df.empty:
+        return ""
+
+    if "race_finished" in df.columns:
+        df = df[df["race_finished"].fillna(False).astype(bool)].copy()
+    if df.empty:
+        return ""
+
+    # 並び替え用に race_date を確保（無ければ race_id の先頭8文字から）
+    if "race_date" not in df.columns or df["race_date"].isna().all():
+        df["race_date"] = df["race_id"].astype(str).str[:8]
+    df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
+
+    # 時系列で累計PnLを出すため昇順で累積 → 表示時に降順に並べる
+    sort_cols = ["race_date", "race_id"]
+    df = df.sort_values([c for c in sort_cols if c in df.columns]).reset_index(drop=True)
+    df["cum_pnl"] = df["pnl"].cumsum()
+    df = df.iloc[::-1].reset_index(drop=True)  # 新しい順で表示
+
+    rows_html: list[str] = []
+    for _, r in df.iterrows():
+        rid = str(r["race_id"])
+        date_str, jcd, rno = _parse_race_id(rid)
+        venue = VENUE_CODES.get(jcd, "?")
+        d_disp = (f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}" if len(date_str) == 8 else "-")
+
+        odds_pre = float(r.get("odds_win", 0) or 0)
+        settled_v = r.get("settled_odds")
+        has_settled = pd.notna(settled_v)
+        if has_settled and abs(float(settled_v) - odds_pre) > 0.05:
+            odds_cell = (f"{odds_pre:.2f}"
+                         f"<br><span style='color:var(--text-dim);font-size:11px'>"
+                         f"確定 {float(settled_v):.2f}</span>")
+        else:
+            odds_cell = f"{odds_pre:.2f}"
+
+        ev = float(r.get("ev", 0) or 0)
+        stake = int(r.get("stake", 0) or 0)
+        pnl = int(r.get("pnl", 0) or 0)
+        cum = int(r.get("cum_pnl", 0) or 0)
+
+        hit = bool(r.get("hit", False))
+        if hit:
+            result_html = "<span class='badge badge-hit'>🟢 1着</span>"
+            ret = int(r.get("return_yen", 0) or 0)
+            pnl_html = (f"<span class='pos'>+¥{pnl:,}</span><br>"
+                        f"<span style='color:var(--text-dim);font-size:11px'>返¥{ret:,}</span>")
+        else:
+            wl_v = r.get("winner_lane")
+            wl_text = f"{int(wl_v)}号艇1着" if pd.notna(wl_v) else "外れ"
+            result_html = f"<span class='badge badge-miss'>✕ {wl_text}</span>"
+            pnl_html = f"<span class='neg'>¥{pnl:,}</span>"
+
+        cum_cls = "pos" if cum > 0 else ("neg" if cum < 0 else "")
+        cum_sign = "+" if cum > 0 else ""
+
+        rows_html.append(
+            "<tr>"
+            f"<td data-sort='{date_str}'>{d_disp}</td>"
+            f"<td class='venue'>{venue}({jcd})</td>"
+            f"<td class='race' data-sort='{int(rno) if rno.isdigit() else 0}'>{int(rno) if rno.isdigit() else rno}R</td>"
+            f"<td>{odds_cell}</td>"
+            f"<td class='{_ev_class(ev)}'>{ev:.3f}</td>"
+            f"<td class='stake'>¥{stake:,}</td>"
+            f"<td>{result_html}</td>"
+            f"<td data-sort='{pnl}'>{pnl_html}</td>"
+            f"<td class='{cum_cls}' data-sort='{cum}'>{cum_sign}¥{cum:,}</td>"
+            "</tr>"
+        )
+
+    n = len(df)
+    return (
+        '<details class="history-bets" open style="margin-bottom:32px">'
+        f'<summary style="cursor:pointer;font-size:14px;color:var(--text-dim);'
+        f'text-transform:uppercase;letter-spacing:0.08em;margin:28px 0 10px;font-weight:600">'
+        f'▼ 過去の取引詳細（{n:,}件・新しい順）</summary>'
+        '<table id="history-bets-table">'
+        '<thead><tr>'
+        '<th>日付</th><th>場</th><th>R</th><th>オッズ</th><th>EV</th>'
+        '<th>ステーク</th><th>結果</th><th>PnL</th><th>累計PnL</th>'
+        '</tr></thead>'
+        f'<tbody>{"".join(rows_html)}</tbody>'
+        '</table>'
+        '</details>'
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--bets", required=True)
@@ -443,6 +541,8 @@ def main() -> None:
                    help="過去バックテストの summary JSON。あればレポートに集計セクションを追加")
     p.add_argument("--history-equity", default=None,
                    help="過去バックテストの equity CSV（SVG折れ線を描画）")
+    p.add_argument("--history-bets", default=None,
+                   help="過去バックテストの bets CSV（個別取引テーブルを表示）")
     p.add_argument("--history-since", default="",
                    help="過去バックテストの開始日（表示用）")
     p.add_argument("--history-until", default="",
@@ -479,6 +579,8 @@ def main() -> None:
             args.history_since,
             args.history_until,
         )
+        if args.history_bets:
+            history_section += _render_history_bets_section(Path(args.history_bets))
 
     summ = _summary(bets)
     html = HTML.format(

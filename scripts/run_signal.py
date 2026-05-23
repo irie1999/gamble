@@ -212,12 +212,15 @@ def _make_report(bets_csv: Path, target: date, ev_threshold: float,
         hist_dir, since, until = history
         summary_file = hist_dir / "summary_lane1_kelly.json"
         equity_file = hist_dir / "equity_lane1_kelly.csv"
+        bets_file = hist_dir / "bets_lane1_kelly.csv"
         if summary_file.exists():
             cmd += ["--history-summary", str(summary_file),
                     "--history-since", since,
                     "--history-until", until]
             if equity_file.exists():
                 cmd += ["--history-equity", str(equity_file)]
+            if bets_file.exists():
+                cmd += ["--history-bets", str(bets_file)]
     _run(cmd)
     return out
 
