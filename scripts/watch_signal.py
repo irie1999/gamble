@@ -257,11 +257,14 @@ def _open_browser(target: date) -> None:
 
 
 def _run_signal_once(variant: str, extra_args: list[str], *,
-                     skip_features: bool = False) -> int:
+                     skip_features: bool = False, quiet: bool = True) -> int:
     """run_signal を1回実行（ブラウザ自動オープンは抑止）。終了コードを返す。
 
     過去バックテスト集計は定期実行では不要なので常に --no-backtest-summary で抑止。
     手動で集計を見たい時は `python -m scripts.run_signal_v2 --autofill` を別途叩く。
+
+    quiet=True なら subprocess の stdout/stderr を捕捉してエラー時のみ出力する
+    （LightGBM warning / scrape_odds の progress 等の大量出力を隠す）。
     """
     module = "scripts.run_signal_v2" if variant == "v2" else "scripts.run_signal"
     cmd = [sys.executable, "-m", module,
@@ -269,7 +272,48 @@ def _run_signal_once(variant: str, extra_args: list[str], *,
     if skip_features:
         cmd.append("--skip-features")
     cmd += extra_args
-    return subprocess.call(cmd)
+    if not quiet:
+        return subprocess.call(cmd)
+    res = subprocess.run(cmd, capture_output=True, text=True,
+                         encoding="utf-8", errors="replace")
+    if res.returncode != 0:
+        # 失敗時のみ捕捉した出力を吐く（デバッグ用）
+        if res.stdout:
+            sys.stdout.write(res.stdout)
+        if res.stderr:
+            sys.stderr.write(res.stderr)
+    return res.returncode
+
+
+def _all_races_done(target: date, buffer_min: int = 30,
+                    now: datetime | None = None) -> tuple[bool, str]:
+    """その日の全レースが終了したかを race_schedule.csv から判定。
+
+    最終締切 + buffer_min 分を過ぎていれば True。schedule が無い・パース失敗時は
+    False（誤って早期終了するのを避ける）。
+    """
+    schedule_path = SCHEDULE_CSV
+    if not schedule_path.exists():
+        return False, ""
+    try:
+        df = pd.read_csv(schedule_path)
+    except Exception:
+        return False, ""
+    today_str = target.strftime("%Y%m%d")
+    today_sched = df[df["race_id"].astype(str).str.startswith(today_str)]
+    if today_sched.empty:
+        return False, ""
+    max_deadline_str = sorted(today_sched["deadline_time"].astype(str).tolist())[-1]
+    try:
+        hh, mm = max_deadline_str.split(":")[:2]
+        max_deadline = datetime.combine(target, _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return False, ""
+    cur_now = now if now is not None else datetime.now()
+    cutoff = max_deadline + timedelta(minutes=buffer_min)
+    if cur_now > cutoff:
+        return True, f"最終締切 {max_deadline_str} + {buffer_min}分 経過"
+    return False, ""
 
 
 def main() -> None:
@@ -293,6 +337,13 @@ def main() -> None:
     p.add_argument("--deadline-reminder-min", type=int, default=10,
                    help="締切のN分前に最新オッズで再通知する（既に通知済の候補も対象）。"
                         "0で無効。実際の発火は iteration タイミング次第で N+α 分前になることもある")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="subprocess(run_signal/scrape_odds/backtest) の詳細ログを表示。"
+                        "デフォルトは抑止（quiet モード）で、エラー時のみ全文吐く")
+    p.add_argument("--no-auto-exit", action="store_true",
+                   help="当日の全レース終了後の自動終了を無効化")
+    p.add_argument("--exit-buffer-min", type=int, default=30,
+                   help="最終締切からこの分数経過したら自動終了（デフォルト30分）")
     args = p.parse_args()
 
     target = date.today()
@@ -330,7 +381,8 @@ def main() -> None:
 
             # 初回は features を必ず再生成、以降は --rebuild-features-every 毎
             skip_features = not (iteration == 1 or iteration % args.rebuild_features_every == 0)
-            rc = _run_signal_once(args.variant, extra, skip_features=skip_features)
+            rc = _run_signal_once(args.variant, extra, skip_features=skip_features,
+                                  quiet=not args.verbose)
             cur_ids, details = _current_bets()
             schedule = _load_schedule()
             new_ids = cur_ids - prev_ids
@@ -392,7 +444,14 @@ def main() -> None:
             prev_ids = cur_ids
             first_run = False
 
-            next_t = datetime.now().replace(microsecond=0)
+            # 自動終了: 全レース終了+バッファ経過なら抜ける
+            if not args.no_auto_exit:
+                done, reason = _all_races_done(target, buffer_min=args.exit_buffer_min)
+                if done:
+                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                          f"=== 全レース終了 ({reason}) → watch_signal 自動終了 ===")
+                    break
+
             wait_sec = args.interval * 60
             print(f"[{now}] 次回実行まで {args.interval}分待機...")
             time.sleep(wait_sec)
