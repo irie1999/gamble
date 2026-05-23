@@ -21,7 +21,7 @@ race_id がベット候補に追加された時点で:
 設定後に watch_signal を起動すれば、新規シグナル時に自動でスマホに届く。
 
 使い方:
-    # デフォルト: 30分ごとに v2 を実行
+    # デフォルト: 10分ごとに v2 を実行（毎回オッズも強制再取得）
     python -m scripts.watch_signal
 
     # 15分ごと・通知音なし
@@ -32,6 +32,10 @@ race_id がベット候補に追加された時点で:
 
     # 通知だけ欲しい（ブラウザは開かない）
     python -m scripts.watch_signal --no-open-browser
+
+    # オッズ再取得を止める（サーバー負荷を抑えたい時のみ。EV が古いオッズで
+    # 過大評価される副作用に注意）
+    python -m scripts.watch_signal --no-refresh-odds
 """
 from __future__ import annotations
 
@@ -163,15 +167,16 @@ def main() -> None:
     p.add_argument("--no-open-browser", action="store_true")
     p.add_argument("--no-push", action="store_true",
                    help="スマホへのプッシュ通知を無効化（環境変数で設定済みの場合のみ動く）")
-    p.add_argument("--refresh-odds", action="store_true",
-                   help="毎回オッズを強制再取得（v1の場合のみ有効）")
+    p.add_argument("--no-refresh-odds", action="store_true",
+                   help="毎回のオッズ強制再取得を無効化（デフォルトは毎回再取得）。"
+                        "オッズは締切まで動くため、再取得しないと早期スクレイプの古い値で EV が過大評価される")
     p.add_argument("--rebuild-features-every", type=int, default=6,
                    help="N回に1回だけ features を再生成（毎回再生成すると重いため）。"
                         "デフォルト6=10分間隔なら1時間に1回")
     args = p.parse_args()
 
     target = date.today()
-    extra = ["--refresh-odds"] if args.refresh_odds and args.variant == "v1" else []
+    extra = [] if args.no_refresh_odds else ["--refresh-odds"]
 
     print("=" * 60)
     print(f"シグナル監視開始: {args.variant} を {args.interval}分ごとに実行")

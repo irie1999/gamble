@@ -87,13 +87,19 @@ def _autofill_races(target: date) -> None:
           "--from", target.isoformat(), "--to", target.isoformat()])
 
 
-def _autofill_odds(target: date, workers: int) -> None:
-    """odds_win.csv に該当日のオッズが無ければ取得。"""
-    _run([sys.executable, "-m", "scripts.scrape_odds",
-          "--from", target.isoformat(), "--to", target.isoformat(),
-          "--resume",
-          "--races-from", str(RAW_DIR / "races.parquet"),
-          "--workers", str(workers)])
+def _autofill_odds(target: date, workers: int, *, force: bool = False) -> None:
+    """odds_win.csv に該当日のオッズを取得。
+
+    force=True なら --resume を付けず既存レースも再スクレイプする（オッズは
+    締切に向けて動くため、watch_signal の定期実行では force=True が必要）。
+    """
+    cmd = [sys.executable, "-m", "scripts.scrape_odds",
+           "--from", target.isoformat(), "--to", target.isoformat(),
+           "--races-from", str(RAW_DIR / "races.parquet"),
+           "--workers", str(workers)]
+    if not force:
+        cmd.append("--resume")
+    _run(cmd)
 
 
 def _refresh_results_html(target: date, workers: int,
@@ -218,8 +224,8 @@ def main() -> None:
     print(f"  [2/5] odds_win.csv: {n_odds} 件")
     # --refresh-odds 指定時は強制再取得
     if args.refresh_odds and args.autofill:
-        print("       → --refresh-odds 指定のため強制再取得")
-        _autofill_odds(target, args.workers)
+        print("       → --refresh-odds 指定のため強制再取得（--resume 無効化）")
+        _autofill_odds(target, args.workers, force=True)
         n_odds = _odds_has_date(odds_path, target)
         print(f"       再取得後: {n_odds} 件")
     elif n_odds < n_races * 0.8:  # 80%未満なら不足とみなす（一部レース欠損は許容）
