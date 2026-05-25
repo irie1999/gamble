@@ -247,6 +247,31 @@ def _show_toast(title: str, msg: str) -> None:
         pass
 
 
+def _has_near_deadline_races(schedule: dict[str, str], window_min: int,
+                             now: datetime | None = None) -> bool:
+    """schedule の中に「締切まで 0〜window_min 分以内」のレースが1件でもあるか。
+
+    クイック polling を起動する判断に使う。締切過ぎや未来すぎは無視。
+    """
+    if not schedule:
+        return False
+    cur_now = now if now is not None else datetime.now()
+    today = cur_now.date()
+    thresh = timedelta(minutes=window_min)
+    for rid, dl_str in schedule.items():
+        if not dl_str or ":" not in dl_str:
+            continue
+        try:
+            hh, mm = dl_str.split(":")[:2]
+            deadline = datetime.combine(today, _time(int(hh), int(mm)))
+        except (ValueError, AttributeError):
+            continue
+        delta = deadline - cur_now
+        if timedelta(0) < delta <= thresh:
+            return True
+    return False
+
+
 def _open_browser(target: date) -> None:
     html = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
     if html.exists():
@@ -342,6 +367,13 @@ def main() -> None:
     p.add_argument("--deadline-reminder-min", type=int, default=10,
                    help="締切のN分前に最新オッズで再通知する（既に通知済の候補も対象）。"
                         "0で無効。実際の発火は iteration タイミング次第で N+α 分前になることもある")
+    p.add_argument("--fast-interval", type=int, default=3,
+                   help="締切が近いレースがあるときの「クイック iteration」の分数（デフォルト3分）。"
+                        "通常 --interval (10分) との二重ループで動く。features 再生成はスキップ")
+    p.add_argument("--fast-window-min", type=int, default=30,
+                   help="締切までこの分数以内のレースが存在する間だけクイック polling を発火（デフォルト30分）")
+    p.add_argument("--no-fast-polling", action="store_true",
+                   help="クイック polling を無効化（通常 --interval のみで動作）")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="subprocess(run_signal/scrape_odds/backtest) の詳細ログを表示。"
                         "デフォルトは抑止（quiet モード）で、エラー時のみ全文吐く")
@@ -373,93 +405,149 @@ def main() -> None:
     print(f"Ctrl+C で停止")
     print("=" * 60)
 
-    prev_ids: set[str] = set()
-    reminded_ids: set[str] = set()
-    first_run = True
-    iteration = 0
+    # 状態（フル/クイック iteration 間で共有）
+    state = {
+        "prev_ids": set(),
+        "reminded_ids": set(),
+        "first_run": True,
+        "iteration": 0,
+        "quick_iteration": 0,
+    }
+
+    def _do_iteration(kind: str) -> None:
+        """1回分の iteration を実行。kind は "full" か "quick"。
+
+        full: features 再生成あり（初回 + --rebuild-features-every ごと）
+        quick: features 再生成は常にスキップ（高速・締切近い時用）
+        """
+        if kind == "full":
+            state["iteration"] += 1
+            it_num = state["iteration"]
+            tag = "=== 実行"
+            skip_features = not (
+                it_num == 1 or it_num % args.rebuild_features_every == 0
+            )
+        else:
+            state["quick_iteration"] += 1
+            it_num = state["quick_iteration"]
+            tag = "→→→ クイック"
+            skip_features = True
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n[{now}] {tag} #{it_num} ({kind}) ===")
+
+        _run_signal_once(args.variant, extra, skip_features=skip_features,
+                         quiet=not args.verbose)
+        cur_ids, details = _current_bets()
+        schedule = _load_schedule()
+        new_ids = cur_ids - state["prev_ids"]
+        removed = state["prev_ids"] - cur_ids
+
+        if state["first_run"]:
+            print(f"[{now}] 初回: 候補 {len(cur_ids)}件")
+            if cur_ids and not args.no_open_browser:
+                _open_browser(target)
+            if cur_ids and not args.no_push:
+                body = _format_push_body(cur_ids, details, schedule=schedule)
+                push_all(f"競艇シグナル {len(cur_ids)}件 (初回)", body)
+        elif new_ids:
+            msg = f"新規 {len(new_ids)}件 / 計 {len(cur_ids)}件: {', '.join(sorted(new_ids))}"
+            print(f"[{now}] 🔔 {msg}")
+            if not args.no_beep:
+                _beep()
+            if not args.no_toast:
+                short = f"{len(new_ids)}件: " + ", ".join(
+                    rid.rsplit("-", 1)[0].split("-", 1)[1] + "-" + rid.rsplit("-", 1)[1]
+                    for rid in sorted(new_ids)[:3]
+                )
+                _show_toast(f"競艇シグナル新規 {len(new_ids)}件", short)
+            if not args.no_open_browser:
+                _open_browser(target)
+            if not args.no_push:
+                body = _format_push_body(cur_ids, details,
+                                         new_ids=new_ids, schedule=schedule)
+                push_all(
+                    f"競艇シグナル 新規{len(new_ids)}件 / 計{len(cur_ids)}件",
+                    body,
+                )
+        elif removed:
+            print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
+        else:
+            print(f"[{now}] 候補 {len(cur_ids)}件（変化なし）")
+
+        # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知
+        if args.deadline_reminder_min > 0:
+            # クイック polling 有効時は隙間が小さいのでバッファ最小（2分）。
+            # クイック無効時は半周期ぶん足す（従来動作）
+            if args.no_fast_polling or args.fast_interval <= 0:
+                effective_threshold = args.deadline_reminder_min + max(args.interval // 2, 2)
+            else:
+                effective_threshold = args.deadline_reminder_min + 2
+            soon = _races_near_deadline(
+                cur_ids, schedule, state["reminded_ids"],
+                minutes_threshold=effective_threshold,
+            )
+            if soon:
+                title = f"⏰ 締切{args.deadline_reminder_min}分前 {len(soon)}件"
+                print(f"[{now}] {title}: {', '.join(sorted(soon))}")
+                if not args.no_beep:
+                    _beep()
+                if not args.no_push:
+                    body = _format_push_body(soon, details, schedule=schedule)
+                    push_all(title, body)
+                state["reminded_ids"] |= soon
+
+        state["prev_ids"] = cur_ids
+        state["first_run"] = False
+
+    # ---- アダプティブ polling のメインループ ----
+    # 締切近いレースがある時だけ fast_interval (3分) のクイック iteration を挟む。
+    # フルが走ったときはクイックの基準時刻もリセット（フルがクイックを兼ねるため）。
+    last_full_at = datetime.now() - timedelta(minutes=args.interval)
+    last_quick_at = datetime.now() - timedelta(minutes=args.fast_interval)
 
     try:
         while True:
-            iteration += 1
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            print(f"\n[{now}] === 実行 #{iteration} ===")
+            now_dt = datetime.now()
 
-            # 初回は features を必ず再生成、以降は --rebuild-features-every 毎
-            skip_features = not (iteration == 1 or iteration % args.rebuild_features_every == 0)
-            rc = _run_signal_once(args.variant, extra, skip_features=skip_features,
-                                  quiet=not args.verbose)
-            cur_ids, details = _current_bets()
-            schedule = _load_schedule()
-            new_ids = cur_ids - prev_ids
-            removed = prev_ids - cur_ids
-
-            if first_run:
-                print(f"[{now}] 初回: 候補 {len(cur_ids)}件")
-                if cur_ids and not args.no_open_browser:
-                    _open_browser(target)
-                # 初回のシグナルもスマホ通知（全件・新規マーカーなし）
-                if cur_ids and not args.no_push:
-                    body = _format_push_body(cur_ids, details, schedule=schedule)
-                    push_all(f"競艇シグナル {len(cur_ids)}件 (初回)", body)
-            elif new_ids:
-                msg = f"新規 {len(new_ids)}件 / 計 {len(cur_ids)}件: {', '.join(sorted(new_ids))}"
-                print(f"[{now}] 🔔 {msg}")
-                if not args.no_beep:
-                    _beep()
-                if not args.no_toast:
-                    short = f"{len(new_ids)}件: " + ", ".join(
-                        rid.rsplit("-", 1)[0].split("-", 1)[1] + "-" + rid.rsplit("-", 1)[1]
-                        for rid in sorted(new_ids)[:3]
-                    )
-                    _show_toast(f"競艇シグナル新規 {len(new_ids)}件", short)
-                if not args.no_open_browser:
-                    _open_browser(target)
-                # スマホへ: 新規が出た時は「現在出ている全シグナル」を送る。
-                # new_ids は本文中で 🆕 マーカーで識別できる。
-                if not args.no_push:
-                    body = _format_push_body(cur_ids, details,
-                                             new_ids=new_ids, schedule=schedule)
-                    push_all(
-                        f"競艇シグナル 新規{len(new_ids)}件 / 計{len(cur_ids)}件",
-                        body,
-                    )
-            elif removed:
-                print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
-            else:
-                print(f"[{now}] 候補 {len(cur_ids)}件（変化なし）")
-
-            # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知
-            if args.deadline_reminder_min > 0:
-                # iteration の隙間で取りこぼさないよう半周期ぶんマージンを足す
-                effective_threshold = args.deadline_reminder_min + max(args.interval // 2, 2)
-                soon = _races_near_deadline(
-                    cur_ids, schedule, reminded_ids,
-                    minutes_threshold=effective_threshold,
-                )
-                if soon:
-                    title = f"⏰ 締切{args.deadline_reminder_min}分前 {len(soon)}件"
-                    print(f"[{now}] {title}: {', '.join(sorted(soon))}")
-                    if not args.no_beep:
-                        _beep()
-                    if not args.no_push:
-                        body = _format_push_body(soon, details, schedule=schedule)
-                        push_all(title, body)
-                    reminded_ids |= soon
-
-            prev_ids = cur_ids
-            first_run = False
-
-            # 自動終了: 全レース終了+バッファ経過なら抜ける
+            # 自動終了
             if not args.no_auto_exit:
-                done, reason = _all_races_done(target, buffer_min=args.exit_buffer_min)
+                done, reason = _all_races_done(
+                    target, buffer_min=args.exit_buffer_min, now=now_dt
+                )
                 if done:
-                    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+                    print(f"\n[{now_dt.strftime('%H:%M:%S')}] "
                           f"=== 全レース終了 ({reason}) → watch_signal 自動終了 ===")
                     break
 
-            wait_sec = args.interval * 60
-            print(f"[{now}] 次回実行まで {args.interval}分待機...")
-            time.sleep(wait_sec)
+            # 締切近いレースがあるか判定（schedule が無い初回はとりあえず False）
+            schedule_peek = _load_schedule()
+            fast_enabled = (
+                not args.no_fast_polling
+                and args.fast_interval > 0
+                and _has_near_deadline_races(schedule_peek, args.fast_window_min, now_dt)
+            )
+
+            next_full = last_full_at + timedelta(minutes=args.interval)
+            next_event_at, next_event_kind = next_full, "full"
+            if fast_enabled:
+                next_quick = last_quick_at + timedelta(minutes=args.fast_interval)
+                if next_quick < next_event_at:
+                    next_event_at, next_event_kind = next_quick, "quick"
+
+            wait_sec = (next_event_at - datetime.now()).total_seconds()
+            if wait_sec > 0:
+                # 細切れ sleep で auto-exit / schedule 変化を再評価できるようにする
+                sleep_chunk = min(wait_sec, 60)
+                time.sleep(sleep_chunk)
+                continue
+
+            _do_iteration(next_event_kind)
+            if next_event_kind == "full":
+                last_full_at = datetime.now()
+                last_quick_at = last_full_at  # フルがクイックも兼ねるのでリセット
+            else:
+                last_quick_at = datetime.now()
     except KeyboardInterrupt:
         print("\n\n=== 監視終了 ===")
 
