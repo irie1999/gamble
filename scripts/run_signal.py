@@ -150,6 +150,43 @@ def _autofill_schedule_all(target: date, workers: int) -> Path:
     return schedule_path
 
 
+def _build_results_target_csv(target: date, bets_csv: Path) -> Optional[Path]:
+    """結果スクレイプ対象 race_id を1つのCSVに集約。
+
+    現在のベット候補 (bets_csv) と当日 signal_log に登場した全 race_id を
+    まとめる。これで「シグナル発生したが候補外になったレース」も結果を取得し、
+    HTML レポートの「本日のシグナル履歴」に反映できる。
+
+    出力: data/processed/signal_log/_results_target_<date>.csv
+    対象なし時は None を返す。
+    """
+    race_ids: set[str] = set()
+    if bets_csv.exists():
+        try:
+            df = pd.read_csv(bets_csv, usecols=["race_id"])
+            race_ids.update(df["race_id"].astype(str).dropna().unique())
+        except Exception as e:
+            logger.warning("bets_csv 読込失敗: %s", e)
+
+    log_path = (PROCESSED_DIR / "signal_log"
+                / f"signal_snapshots_{target.strftime('%Y%m%d')}.csv")
+    if log_path.exists():
+        try:
+            df = pd.read_csv(log_path, usecols=["race_id"])
+            race_ids.update(df["race_id"].astype(str).dropna().unique())
+        except Exception as e:
+            logger.warning("signal_log 読込失敗: %s", e)
+
+    if not race_ids:
+        return None
+
+    out_path = (PROCESSED_DIR / "signal_log"
+                / f"_results_target_{target.strftime('%Y%m%d')}.csv")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame({"race_id": sorted(race_ids)}).to_csv(out_path, index=False)
+    return out_path
+
+
 def _refresh_results_html(target: date, workers: int,
                           only_bets: Optional[Path] = None) -> None:
     """既に終わったレースの結果を HTML から取得して payouts に追加。
@@ -416,25 +453,31 @@ def main() -> None:
         excluded_venues=args.exclude_venues,
     )
 
-    # 5. ベット候補だけ結果取得 + 締切時刻取得 → backtest 再実行
-    if not args.no_refresh_results and bets_csv.exists():
-        bets_count = len(pd.read_csv(bets_csv))
-        if bets_count:
-            print(f"  [5/6] ベット候補 {bets_count}件 の結果＋締切時刻を取得中...")
-            _refresh_results_html(target, args.workers, only_bets=bets_csv)
-            _refresh_schedule(target, args.workers, only_bets=bets_csv)
-            # payouts が更新されたので backtest を再実行して hit/PnL を反映
-            print(f"        → 結果取得後にバックテスト再実行（PnL反映）")
-            bets_csv = _run_backtest(
-                target,
-                ev_threshold=args.ev_threshold,
-                max_odds=args.max_odds,
-                min_odds=args.min_odds,
-                kelly_fraction=args.kelly_fraction,
-                excluded_venues=args.exclude_venues,
-            )
+    # 5. 結果取得 + 締切時刻取得 → backtest 再実行
+    # 対象 = 現候補 + 当日 signal_log の race_ids (= 1度でも候補化したレース)。
+    # これにより、候補外になったレースの結果も payouts に追加され、HTML の
+    # 「本日のシグナル履歴」セクションに 1着/外れ/PnL が反映される。
+    bets_count = len(pd.read_csv(bets_csv)) if bets_csv.exists() else 0
+    if not args.no_refresh_results:
+        combined_target = _build_results_target_csv(target, bets_csv)
+        if combined_target is not None:
+            n_target = len(pd.read_csv(combined_target))
+            print(f"  [5/6] 結果取得 + 締切時刻取得中: {n_target}件 (現候補+履歴)...")
+            _refresh_results_html(target, args.workers, only_bets=combined_target)
+            _refresh_schedule(target, args.workers, only_bets=combined_target)
+            # 現候補の hit/PnL を反映するため backtest を再実行（候補ありの場合のみ）
+            if bets_count:
+                print(f"        → 結果取得後にバックテスト再実行（PnL反映）")
+                bets_csv = _run_backtest(
+                    target,
+                    ev_threshold=args.ev_threshold,
+                    max_odds=args.max_odds,
+                    min_odds=args.min_odds,
+                    kelly_fraction=args.kelly_fraction,
+                    excluded_venues=args.exclude_venues,
+                )
         else:
-            print(f"  [5/6] ベット候補なし → 結果取得スキップ")
+            print(f"  [5/6] 結果取得対象なし（現候補ゼロ + 履歴空）")
     else:
         print("  [5/6] HTML結果取得: スキップ")
 
