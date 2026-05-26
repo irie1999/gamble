@@ -608,6 +608,46 @@ def _render_signal_log_section(log_path: Path, current_ids: set[str],
     if agg.empty:
         return ""
 
+    # 結果補完: snapshot 当時に未確定だったレースを races_payouts.parquet で照合
+    # （候補外になったあとでレースが終わった場合、snapshot には反映されない）
+    from src.utils.config import RAW_DIR
+    payouts_path = RAW_DIR / "races_payouts.parquet"
+    if payouts_path.exists():
+        try:
+            payouts = pd.read_parquet(payouts_path,
+                                      columns=["race_id", "bet_type", "combo", "payout_yen"])
+            win_payouts = payouts[payouts["bet_type"] == "win"].copy()
+            win_payouts["winner_lane"] = pd.to_numeric(win_payouts["combo"], errors="coerce")
+            win_payouts["payout_yen"] = pd.to_numeric(win_payouts["payout_yen"], errors="coerce")
+            win_payouts = win_payouts.dropna(subset=["winner_lane"])
+            win_map = win_payouts.set_index("race_id")[["winner_lane", "payout_yen"]].to_dict("index")
+        except Exception:
+            win_map = {}
+    else:
+        win_map = {}
+
+    for idx, r in agg.iterrows():
+        finished_in_log = bool(r.get("race_finished", False)) if pd.notna(r.get("race_finished")) else False
+        if finished_in_log:
+            continue  # snapshot で既に確定済み
+        rid = str(r["race_id"])
+        if rid not in win_map:
+            continue  # まだレース未終了 or 払戻データ無し
+        info = win_map[rid]
+        winner = int(info["winner_lane"])
+        payout_per_100 = float(info["payout_yen"]) if pd.notna(info["payout_yen"]) else 0.0
+        latest_stake = int(r["latest_stake"]) if pd.notna(r.get("latest_stake")) else 0
+        hit = (winner == 1)
+        if hit:
+            return_yen = latest_stake * payout_per_100 / 100.0
+            pnl = int(return_yen - latest_stake)
+        else:
+            pnl = -latest_stake
+        agg.at[idx, "race_finished"] = True
+        agg.at[idx, "hit"] = hit
+        agg.at[idx, "winner_lane"] = winner
+        agg.at[idx, "pnl"] = pnl
+
     rows_html: list[str] = []
     for _, r in agg.iterrows():
         rid = str(r["race_id"])
@@ -676,12 +716,16 @@ def _render_signal_log_section(log_path: Path, current_ids: set[str],
 
     n_total = len(agg)
     n_active = int(agg["currently_active"].sum())
-    n_dropped = n_total - n_active
+    finished_mask = agg["race_finished"].fillna(False).astype(bool)
+    n_finished = int(finished_mask.sum())
+    n_hit = int(finished_mask.sum() and agg.loc[finished_mask, "hit"].fillna(False).astype(bool).sum())
+    n_pending = n_total - n_finished
+    hit_rate_str = f"（的中{n_hit}/{n_finished}）" if n_finished else ""
     return (
         f'<details class="signal-log" open style="margin-bottom:24px">'
         f'<summary style="cursor:pointer;font-size:14px;color:var(--text-dim);'
         f'text-transform:uppercase;letter-spacing:0.08em;margin:28px 0 10px;font-weight:600">'
-        f'▼ 本日のシグナル履歴（全{n_total}件 / 候補中{n_active}件 / 外れた{n_dropped}件）</summary>'
+        f'▼ 本日のシグナル履歴（全{n_total}件 / 候補中{n_active}件 / 確定{n_finished}件{hit_rate_str} / 未確定{n_pending}件）</summary>'
         '<table id="signal-log-table">'
         '<thead><tr>'
         '<th>場</th><th>R</th><th>締切</th><th>状態</th>'
