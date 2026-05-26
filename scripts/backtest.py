@@ -67,6 +67,25 @@ def main() -> None:
         default=None,
         help="1号艇オッズの下限。これ未満は除外（本命過ぎは妙味薄）",
     )
+    parser.add_argument(
+        "--odds-shrinkage-max",
+        type=float,
+        default=0.0,
+        help="時間ベース shrinkage の最大係数。0.3 なら遠い締切は最大30%%オッズが下がると仮定して Kelly を保守化。"
+             "0で無効。lane1_kelly でのみ有効。",
+    )
+    parser.add_argument(
+        "--odds-shrinkage-time-const-min",
+        type=float,
+        default=30.0,
+        help="shrinkage 時定数（分）。デフォルト30 → 30分前で約63%%の最大shrinkageに到達",
+    )
+    parser.add_argument(
+        "--schedule",
+        default=None,
+        help="race_schedule.csv のパス。shrinkage 用に締切時刻を読む。"
+             "未指定時は data/raw/race_schedule.csv を試す",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -85,6 +104,20 @@ def main() -> None:
     keep_cols = ["race_id", "lane", "race_date", "pred_win_prob"]
     pred = pred[[c for c in keep_cols if c in pred.columns]]
 
+    # schedule マップ (race_id → "HH:MM") を読み込み。shrinkage 計算に使う。
+    schedule_map: dict[str, str] = {}
+    if args.odds_shrinkage_max > 0:
+        from src.utils.config import RAW_DIR
+        schedule_path = Path(args.schedule) if args.schedule else (RAW_DIR / "race_schedule.csv")
+        if schedule_path.exists():
+            sched = pd.read_csv(schedule_path)
+            if "race_id" in sched.columns and "deadline_time" in sched.columns:
+                schedule_map = dict(zip(sched["race_id"].astype(str),
+                                        sched["deadline_time"].astype(str)))
+                logger.info("schedule 読込: %d race（shrinkage用）", len(schedule_map))
+        else:
+            logger.warning("schedule が無いので shrinkage は適用されません: %s", schedule_path)
+
     cfg = BacktestConfig(
         strategy=args.strategy,
         initial_bankroll=args.initial_bankroll,
@@ -95,6 +128,9 @@ def main() -> None:
         excluded_venues=tuple(args.exclude_venues),
         max_odds=args.max_odds,
         min_odds=args.min_odds,
+        odds_shrinkage_max=args.odds_shrinkage_max,
+        odds_shrinkage_time_constant_min=args.odds_shrinkage_time_const_min,
+        schedule_map=schedule_map,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 

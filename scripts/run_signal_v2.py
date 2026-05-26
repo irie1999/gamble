@@ -4,6 +4,7 @@ run_signal.py に以下のデフォルトを上書きして呼び出すラッパ
 - --min-odds 3.0       （本命過ぎ 2-3倍帯は -32% ROI で除外）
 - --exclude-venues に 10 (三国) を追加（10件 20% 勝率で構造的に弱い）
 - --kelly-fraction 0.5（ハーフKelly: 過去365日のバックテストで ROI 最大）
+- --odds-shrinkage-max 0.3（時間ベース shrinkage で締切まで遠い場合は保守ステーク）
 
 その他の引数（--date, --autofill, --kelly-fraction 等）はそのまま渡せる。
 ユーザが --min-odds や --exclude-venues を明示すれば、後勝ちで上書きできる。
@@ -15,8 +16,8 @@ run_signal.py に以下のデフォルトを上書きして呼び出すラッパ
     # 過去日
     python -m scripts.run_signal_v2 --date 2026-05-11
 
-    # 上書き例: kelly-fraction を 0.25 に戻す
-    python -m scripts.run_signal_v2 --autofill --kelly-fraction 0.25
+    # 上書き例: shrinkage を無効化
+    python -m scripts.run_signal_v2 --autofill --odds-shrinkage-max 0
 
 バックテスト実績（2025-05-24〜2026-05-23, 49件確定）:
     KF 0.25: ROI +156%, PnL +¥129K, 勝率 55.3%, 最大DD -4.7%
@@ -32,6 +33,7 @@ B_OVERRIDES = [
     "--min-odds", "3.0",
     "--exclude-venues", "04", "03", "02", "14", "01", "24", "10",
     "--kelly-fraction", "0.5",
+    "--odds-shrinkage-max", "0.3",
 ]
 
 

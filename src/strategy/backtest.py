@@ -18,8 +18,10 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from datetime import datetime, time as _time
+from typing import Literal, Mapping, Optional
 
 import numpy as np
 import pandas as pd
@@ -30,6 +32,57 @@ from src.strategy.kelly import kelly_stake
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def expected_close_odds(
+    current_odds: float,
+    minutes_to_deadline: float,
+    max_shrinkage: float,
+    time_constant_min: float = 30.0,
+) -> float:
+    """締切時刻に向けて 1号艇 オッズが下がる現象をモデル化した「予想確定オッズ」。
+
+    factor = 1 - max_shrinkage * (1 - exp(-t/τ))
+    expected = 1 + (current - 1) * factor
+
+      t = 0:   factor = 1.0           → expected = current (収縮なし)
+      t → ∞:   factor = 1 - max_shrinkage  → expected = 最大収縮値
+
+    例: max_shrinkage=0.3, τ=30 のとき
+      t = 5min:  factor = 0.953 (4.7% 収縮)
+      t = 30min: factor = 0.810 (19% 収縮)
+      t = 60min: factor = 0.741 (26% 収縮)
+      t = 120min: factor = 0.711 (29% 収縮)
+
+    Kelly計算で「保守的なオッズ」を仮定する用途。締切近いほど現在オッズに信頼を置く。
+    """
+    if minutes_to_deadline <= 0 or max_shrinkage <= 0 or current_odds <= 1.0:
+        return float(current_odds)
+    factor = 1.0 - max_shrinkage * (1.0 - math.exp(-minutes_to_deadline / time_constant_min))
+    return max(1.0, 1.0 + (current_odds - 1.0) * factor)
+
+
+def _minutes_to_deadline_from_schedule(
+    race_id: str,
+    schedule: Mapping[str, str],
+    now: datetime,
+) -> float:
+    """race_id (YYYYMMDD-VV-RR) と schedule から締切までの分数を返す。
+
+    schedule に該当 race_id が無い or パース失敗時は 0.0（→ shrinkage 適用無し）。
+    既に締切過ぎでも 0.0 を返す。
+    """
+    dl_str = schedule.get(str(race_id))
+    if not dl_str or ":" not in str(dl_str):
+        return 0.0
+    try:
+        d = datetime.strptime(str(race_id)[:8], "%Y%m%d").date()
+        hh, mm = str(dl_str).split(":")[:2]
+        deadline = datetime.combine(d, _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return 0.0
+    delta = (deadline - now).total_seconds() / 60.0
+    return max(0.0, delta)
 
 
 Strategy = Literal["flat", "kelly", "always_top1", "model_top1", "lane1_value", "lane1_kelly"]
@@ -52,6 +105,14 @@ class BacktestConfig:
     max_odds: Optional[float] = None
     # 1号艇のオッズがこの値未満なら除外。本命過ぎ（市場が正しく評価済み）を回避。
     min_odds: Optional[float] = None
+    # オッズ収縮（時間ベース）: 締切までの分数に応じて「予想確定オッズ」を計算し、
+    # Kelly のステーク決定にそれを使う。0で無効。デフォルト 0.3 (Phase 1 推奨)。
+    # filter (EV/min/max) は元の odds を使い続けるので候補数は変わらない。
+    odds_shrinkage_max: float = 0.0
+    odds_shrinkage_time_constant_min: float = 30.0
+    # race_id → "HH:MM" の締切時刻マップ。shrinkage 計算に使う。
+    # 渡されていないレースは shrinkage 適用なし（元 odds でステーク計算）。
+    schedule_map: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -156,13 +217,31 @@ def run_backtest(
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
         if config.strategy == "lane1_kelly":
             stakes = []
+            eff_odds_list = []
+            now_for_shrink = datetime.now()
             for _, r in candidates.iterrows():
+                actual_odds = float(r["odds_win"])
+                # 時間ベース shrinkage: 締切までの分数に応じて「予想確定オッズ」を計算。
+                # schedule に該当レースの締切時刻があり、shrinkage_max>0 のときのみ適用。
+                if config.odds_shrinkage_max > 0:
+                    mins = _minutes_to_deadline_from_schedule(
+                        str(r["race_id"]), config.schedule_map, now_for_shrink,
+                    )
+                    eff_odds = expected_close_odds(
+                        actual_odds, mins,
+                        config.odds_shrinkage_max,
+                        config.odds_shrinkage_time_constant_min,
+                    )
+                else:
+                    eff_odds = actual_odds
+                eff_odds_list.append(eff_odds)
                 stakes.append(kelly_stake(
                     bankroll=config.initial_bankroll,
                     p=float(r["blended_win_prob"]),
-                    odds=float(r["odds_win"]),
+                    odds=eff_odds,
                     fraction=config.kelly_fraction,
                 ))
+            candidates["effective_odds_for_kelly"] = eff_odds_list
             candidates["stake"] = stakes
             candidates = candidates[candidates["stake"] > 0]
         else:

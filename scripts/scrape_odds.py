@@ -112,13 +112,18 @@ def _filter_past_deadline(
     targets: list[tuple[date, str, int]],
     schedule_path: Path,
     now: object = None,
+    grace_min: int = 15,
 ) -> list[tuple[date, str, int]]:
     """schedule CSV を元に「現在時刻より過去の締切」を持つレースを除外。
+
+    grace_min: 締切後 N分以内のレースは残す（締切時オッズ＝実オッズを取得する目的）。
+    デフォルト 15 分。watch_signal の iteration 間隔（3〜10分）を考慮して、
+    各レースが少なくとも 1〜2 回 締切後にスクレイプされるよう設定。
 
     schedule が無い・パース失敗のレースは安全側で残す（再取得対象にする）。
     schedule に該当 race_id が無いレースも残す。
     """
-    from datetime import datetime, time
+    from datetime import datetime, time, timedelta
     if not schedule_path.exists():
         logger.debug("schedule not found: %s — フィルタ無し", schedule_path)
         return targets
@@ -132,6 +137,7 @@ def _filter_past_deadline(
         sched_df["deadline_time"].astype(str),
     ))
     cur_now = now if isinstance(now, datetime) else datetime.now()
+    grace = timedelta(minutes=grace_min)
 
     kept: list[tuple[date, str, int]] = []
     for (d, jcd, rno) in targets:
@@ -146,9 +152,9 @@ def _filter_past_deadline(
         except (ValueError, AttributeError):
             kept.append((d, jcd, rno))  # パース失敗 → 残す
             continue
-        if deadline > cur_now:
+        # 締切 + grace_min がまだ未来なら残す（締切時オッズ取得目的）
+        if deadline + grace > cur_now:
             kept.append((d, jcd, rno))
-        # 締切過ぎたものは除外
     return kept
 
 

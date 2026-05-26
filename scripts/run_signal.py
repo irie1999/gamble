@@ -224,7 +224,8 @@ def _rebuild_features() -> None:
 
 def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
                   min_odds: Optional[float], kelly_fraction: float,
-                  excluded_venues: list[str]) -> Path:
+                  excluded_venues: list[str],
+                  odds_shrinkage_max: float = 0.0) -> Path:
     """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。"""
     cmd = [
         sys.executable, "-m", "scripts.backtest",
@@ -242,6 +243,8 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
         cmd += ["--min-odds", str(min_odds)]
     if excluded_venues:
         cmd += ["--exclude-venues", *excluded_venues]
+    if odds_shrinkage_max > 0:
+        cmd += ["--odds-shrinkage-max", str(odds_shrinkage_max)]
     _run(cmd)
     return MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 
@@ -389,6 +392,10 @@ def main() -> None:
                    help="HTMLレポートに過去バックテスト集計を含めない（watch_signal の定期実行で時短）")
     p.add_argument("--backtest-days", type=int, default=365,
                    help="過去バックテストの期間（日数）。デフォルト365日。データが無い分は自動で短くなる")
+    p.add_argument("--odds-shrinkage-max", type=float, default=0.0,
+                   help="時間ベース shrinkage の最大係数 (0で無効、推奨0.3)。"
+                        "Kelly のステーク計算で「予想確定オッズ」を使い、早めの通知でも保守的に。"
+                        "EVフィルタは元 odds で判定するので候補数は変わらない")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -451,6 +458,7 @@ def main() -> None:
         min_odds=args.min_odds,
         kelly_fraction=args.kelly_fraction,
         excluded_venues=args.exclude_venues,
+        odds_shrinkage_max=args.odds_shrinkage_max,
     )
 
     # 5. 結果取得 + 締切時刻取得 → backtest 再実行
@@ -475,6 +483,7 @@ def main() -> None:
                     min_odds=args.min_odds,
                     kelly_fraction=args.kelly_fraction,
                     excluded_venues=args.exclude_venues,
+                    odds_shrinkage_max=args.odds_shrinkage_max,
                 )
         else:
             print(f"  [5/6] 結果取得対象なし（現候補ゼロ + 履歴空）")
