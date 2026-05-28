@@ -85,10 +85,22 @@ def _merge_with_existing(new_df: pd.DataFrame, out_path: Path,
     """
     if not out_path.exists():
         return new_df
-    if out_path.suffix == ".parquet":
-        old = pd.read_parquet(out_path)
-    else:
-        old = pd.read_csv(out_path)
+    # 空ファイル / 壊れたファイルでも新規取得分を巻き込まないように防御
+    if out_path.stat().st_size == 0:
+        return new_df
+    try:
+        if out_path.suffix == ".parquet":
+            old = pd.read_parquet(out_path)
+        else:
+            old = pd.read_csv(out_path)
+    except (pd.errors.EmptyDataError, pd.errors.ParserError, OSError) as e:
+        # 既存ファイルが壊れていても、新規取得分は失わないようにする
+        import logging
+        logging.getLogger(__name__).warning(
+            "既存ファイル %s の読込に失敗: %s — 新規取得分のみで上書き",
+            out_path, e,
+        )
+        return new_df
     combined = pd.concat([old, new_df], ignore_index=True)
     # 後勝ち: new_df 側を keep="last" で残す
     combined = combined.drop_duplicates(subset=key_cols, keep="last")

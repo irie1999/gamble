@@ -93,13 +93,17 @@ def main() -> None:
         return
 
     new_df = pd.DataFrame(new_rows)
-    if out_path.exists():
-        old = pd.read_csv(out_path)
-        merged = pd.concat([old, new_df], ignore_index=True).drop_duplicates(
-            subset=["race_id"], keep="last"
-        )
-    else:
-        merged = new_df
+    # 既存 CSV が空ファイル / 壊れている場合に新規取得分を巻き込んで失敗するのを防ぐ
+    merged = new_df
+    if out_path.exists() and out_path.stat().st_size > 0:
+        try:
+            old = pd.read_csv(out_path)
+            if not old.empty:
+                merged = pd.concat([old, new_df], ignore_index=True).drop_duplicates(
+                    subset=["race_id"], keep="last"
+                )
+        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+            logger.warning("既存 race_schedule.csv の読込に失敗: %s — 新規取得分のみで上書き", e)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     merged.to_csv(out_path, index=False)
     logger.info("保存: %s rows=%d (+%d)", out_path, len(merged), len(new_df))
