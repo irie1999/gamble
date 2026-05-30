@@ -491,6 +491,10 @@ def main() -> None:
     p.add_argument("--date", default=None, help="単日指定 YYYY-MM-DD")
     p.add_argument("--days", type=int, default=None,
                    help="過去N日（今日含む）の集計。指定時は日別サマリも表示")
+    p.add_argument("--from", dest="date_from", default=None,
+                   help="期間開始 YYYY-MM-DD（--to と組み合わせる）")
+    p.add_argument("--to", dest="date_to", default=None,
+                   help="期間終了 YYYY-MM-DD（--from と組み合わせる）")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="ターミナルモード時に集計だけでなく個別レースも全表示")
     p.add_argument("--html", default=None,
@@ -503,6 +507,10 @@ def main() -> None:
 
     if args.date:
         targets = [date.fromisoformat(args.date)]
+    elif args.date_from and args.date_to:
+        s = date.fromisoformat(args.date_from)
+        e = date.fromisoformat(args.date_to)
+        targets = [s + timedelta(days=i) for i in range((e - s).days + 1)]
     elif args.days:
         end = date.today()
         targets = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
