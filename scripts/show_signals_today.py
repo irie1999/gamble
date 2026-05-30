@@ -1,14 +1,17 @@
-"""シグナル履歴を結果付きで一覧表示。今日 / 任意日 / 過去N日まで対応。
+"""シグナル履歴を結果付きで HTML レポートで表示。今日 / 任意日 / 過去N日まで対応。
 
-signal_snapshots を集計し、payouts と照合して的中/外れ/PnLを表示。
-HTML を開かずにターミナルだけで確認したい時用の軽量ツール。
+signal_snapshots を集計し、payouts と照合して的中/外れ/PnL を計算、
+HTML を生成してブラウザで自動オープン。
 
 使い方:
-    python -m scripts.show_signals_today                  # 今日のみ
+    python -m scripts.show_signals_today               # 今日（HTML自動オープン）
     python -m scripts.show_signals_today --date 2026-05-28
-    python -m scripts.show_signals_today --days 7         # 過去7日（今日含む）の日別サマリ
-    python -m scripts.show_signals_today --days 7 -v      # サマリ + 個別レース全表示
-    python -m scripts.show_signals_today --days 7 --html  # HTMLでブラウザに表示
+    python -m scripts.show_signals_today --days 7      # 過去7日（含今日）
+    python -m scripts.show_signals_today --days 30     # 月間レビュー
+
+    python -m scripts.show_signals_today --terminal    # ブラウザ開かずターミナル表示のみ
+    python -m scripts.show_signals_today --no-open     # HTML生成のみ（ブラウザ開かない）
+    python -m scripts.show_signals_today --html out.html  # 出力先指定
 """
 from __future__ import annotations
 
@@ -326,11 +329,13 @@ def main() -> None:
     p.add_argument("--days", type=int, default=None,
                    help="過去N日（今日含む）の集計。指定時は日別サマリも表示")
     p.add_argument("--verbose", "-v", action="store_true",
-                   help="集計だけでなく個別レースも全表示")
-    p.add_argument("--html", nargs="?", const="auto", default=None,
-                   help="HTML を生成してブラウザで開く。任意で出力パスを指定可")
+                   help="ターミナルモード時に集計だけでなく個別レースも全表示")
+    p.add_argument("--html", default=None,
+                   help="HTML 出力先のパスを明示指定（省略時は data/processed/ 配下に自動命名）")
     p.add_argument("--no-open", action="store_true",
-                   help="--html 時にブラウザを自動で開かない")
+                   help="HTMLは生成するがブラウザを自動で開かない")
+    p.add_argument("--terminal", "-t", action="store_true",
+                   help="HTML を生成せずターミナルだけに表示")
     args = p.parse_args()
 
     if args.date:
@@ -350,27 +355,29 @@ def main() -> None:
     period_label = (f"{targets[0]} 〜 {targets[-1]}"
                     if len(targets) > 1 else str(targets[0]))
 
-    # HTML 出力モード（ターミナル出力もする）
-    if args.html is not None:
-        if args.html == "auto":
+    # HTML がデフォルト動作。--terminal でターミナル出力モードに切り替え可。
+    if not args.terminal:
+        if args.html:
+            html_path = Path(args.html)
+        else:
             if len(targets) > 1:
                 fname = f"signals_history_{targets[0]:%Y%m%d}_{targets[-1]:%Y%m%d}.html"
             else:
                 fname = f"signals_history_{targets[0]:%Y%m%d}.html"
             html_path = PROCESSED_DIR / fname
-        else:
-            html_path = Path(args.html)
         html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(_to_html(df, period_label), encoding="utf-8")
-        print(f"HTML saved: {html_path}")
-        print(f"  open: file://{html_path.resolve()}")
+        print(f"HTML 保存: {html_path}")
         if not args.no_open:
+            uri = html_path.resolve().as_uri()
+            print(f"ブラウザで開く: {uri}")
             try:
-                webbrowser.open(html_path.resolve().as_uri())
-            except Exception:
-                pass
+                webbrowser.open(uri)
+            except Exception as e:
+                print(f"  (ブラウザ自動オープン失敗: {e} — URLを手動でコピーしてください)")
         return
 
+    # --terminal モード
     print(f"=== シグナル履歴 ({period_label}) — {len(df)} レース ===")
     print()
 
