@@ -8,11 +8,13 @@ HTML を開かずにターミナルだけで確認したい時用の軽量ツー
     python -m scripts.show_signals_today --date 2026-05-28
     python -m scripts.show_signals_today --days 7         # 過去7日（今日含む）の日別サマリ
     python -m scripts.show_signals_today --days 7 -v      # サマリ + 個別レース全表示
+    python -m scripts.show_signals_today --days 7 --html  # HTMLでブラウザに表示
 """
 from __future__ import annotations
 
 import argparse
-from datetime import date, timedelta
+import webbrowser
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
 
@@ -166,6 +168,157 @@ def _print_grand_total(df: pd.DataFrame, label: str = "合計") -> None:
             print(f"ROI:      {sign}{pnl / stake * 100:.1f}%")
 
 
+_HTML_TEMPLATE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>シグナル履歴 {period}</title>
+<style>
+:root {{
+  --bg: #0f1117; --bg-card: #1a1d27; --bg-header: #1f2330; --bg-hover: #252937;
+  --border: #2a2f3d; --text: #e4e6eb; --text-dim: #9aa0b0;
+  --pos: #4ade80; --neg: #f87171; --warn: #fbbf24; --link: #60a5fa; --accent: #818cf8;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Yu Gothic", sans-serif;
+  max-width: 1280px; margin: 0 auto; padding: 24px 16px 60px;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}}
+h1 {{ font-size: 28px; margin: 0 0 4px; font-weight: 700; }}
+h1 .accent {{ color: var(--accent); }}
+.meta {{ color: var(--text-dim); font-size: 12px; margin-bottom: 24px; }}
+.kpi {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }}
+.kpi .card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }}
+.kpi .label {{ color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }}
+.kpi .value {{ font-size: 24px; font-weight: 700; margin-top: 4px; }}
+.pos {{ color: var(--pos); }} .neg {{ color: var(--neg); }}
+.section-title {{ font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 28px 0 10px; font-weight: 600; }}
+table {{ width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: 12px; overflow: hidden; }}
+th, td {{ text-align: right; padding: 11px 14px; border-bottom: 1px solid var(--border); }}
+th:nth-child(-n+2), td:nth-child(-n+2) {{ text-align: left; }}
+th:last-child, td:last-child {{ text-align: center; }}
+th {{ background: var(--bg-header); font-size: 11px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }}
+tbody tr:last-child td {{ border-bottom: none; }}
+tbody tr:hover td {{ background: var(--bg-hover); }}
+.totals {{ background: var(--bg-header) !important; font-weight: 700; border-top: 2px solid var(--border); }}
+.badge {{ display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }}
+.badge-hit {{ background: rgba(74,222,128,0.15); color: var(--pos); }}
+.badge-miss {{ background: rgba(248,113,113,0.15); color: var(--neg); }}
+.badge-pending {{ background: rgba(154,160,176,0.12); color: var(--text-dim); }}
+</style></head><body>
+
+<h1>シグナル履歴 <span class="accent">{period}</span></h1>
+<div class="meta">生成: {generated} ｜ 戦略: <code>lane1_kelly</code> ｜ レース数: {n_races}件 (確定 {n_finished} / 未確定 {n_pending})</div>
+
+<div class="kpi">
+  <div class="card"><div class="label">勝率</div><div class="value">{hit_rate}</div></div>
+  <div class="card"><div class="label">合計ステーク</div><div class="value">¥{stake_total}</div></div>
+  <div class="card"><div class="label">合計PnL</div><div class="value {pnl_cls}">{pnl_sign}¥{pnl_total}</div></div>
+  <div class="card"><div class="label">ROI</div><div class="value {pnl_cls}">{pnl_sign}{roi}</div></div>
+</div>
+
+{daily_section}
+
+<div class="section-title">▼ 個別レース</div>
+<table><thead><tr>
+<th>日付</th><th>場</th><th>R</th><th>観測時間</th><th>最高EV</th><th>オッズ</th><th>ステーク</th><th>結果</th><th>PnL</th>
+</tr></thead><tbody>{detail_rows}</tbody></table>
+
+</body></html>
+"""
+
+
+def _to_html(df: pd.DataFrame, period: str) -> str:
+    n = len(df)
+    fin = int(df["finished"].sum())
+    pending = n - fin
+    hit = int(df["hit"].sum())
+    stake_total = int(df[df["finished"]]["latest_stake"].sum())
+    pnl_total = int(df["pnl"].sum())
+    pnl_cls = "pos" if pnl_total > 0 else ("neg" if pnl_total < 0 else "")
+    pnl_sign = "+" if pnl_total > 0 else ""
+    hit_rate = f"{hit / fin * 100:.1f}%" if fin else "-"
+    roi = f"{pnl_total / stake_total * 100:.1f}%" if stake_total else "-"
+
+    # 日別サマリ（複数日の時のみ）
+    daily_section = ""
+    if df["date"].nunique() > 1:
+        rows = []
+        for d, g in df.groupby("date"):
+            n_d = len(g)
+            fin_d = int(g["finished"].sum())
+            hit_d = int(g["hit"].sum())
+            stake_d = int(g[g["finished"]]["latest_stake"].sum())
+            pnl_d = int(g["pnl"].sum())
+            rate_d = f"{hit_d / fin_d * 100:.1f}%" if fin_d else "-"
+            roi_d = f"{pnl_d / stake_d * 100:+.1f}%" if stake_d else "-"
+            cls = "pos" if pnl_d > 0 else ("neg" if pnl_d < 0 else "")
+            sign = "+" if pnl_d > 0 else ""
+            rows.append(
+                f"<tr><td>{d}</td><td>{n_d}</td><td>{fin_d}</td><td>{hit_d}</td>"
+                f"<td>{rate_d}</td><td>¥{stake_d:,}</td>"
+                f"<td class='{cls}'>{sign}¥{pnl_d:,}</td>"
+                f"<td class='{cls}'>{roi_d}</td></tr>"
+            )
+        daily_section = (
+            '<div class="section-title">▼ 日別サマリ</div>'
+            '<table style="margin-bottom:24px"><thead><tr>'
+            '<th>日付</th><th>件数</th><th>確定</th><th>的中</th>'
+            '<th>勝率</th><th>ステーク</th><th>PnL</th><th>ROI</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        )
+
+    # 個別レース行
+    detail_rows: list[str] = []
+    df_sorted = df.sort_values(["date", "max_ev"], ascending=[True, False])
+    for _, r in df_sorted.iterrows():
+        rid = str(r["race_id"])
+        parts = rid.split("-")
+        venue = VENUE_CODES.get(parts[1], "?") if len(parts) > 1 else "?"
+        rno = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        seen = f"{r['first_seen'].strftime('%H:%M')}〜{r['last_seen'].strftime('%H:%M')}"
+        stake = int(r["latest_stake"]) if pd.notna(r["latest_stake"]) else 0
+        odds = float(r["latest_odds"]) if pd.notna(r["latest_odds"]) else 0.0
+        if r["finished"]:
+            if r["hit"]:
+                status = "<span class='badge badge-hit'>🟢 1着</span>"
+                pnl_v = int(r["pnl"])
+                pnl_html = f"<span class='pos'>+¥{pnl_v:,}</span>"
+            else:
+                status = f"<span class='badge badge-miss'>✕ {int(r['winner_lane'])}号艇1着</span>"
+                pnl_html = f"<span class='neg'>-¥{stake:,}</span>"
+        else:
+            status = "<span class='badge badge-pending'>⏳ 未確定</span>"
+            pnl_html = "-"
+        detail_rows.append(
+            "<tr>"
+            f"<td>{r['date']}</td>"
+            f"<td>{venue}({parts[1]})</td>"
+            f"<td>{rno}R</td>"
+            f"<td>{seen}</td>"
+            f"<td>{r['max_ev']:.3f}</td>"
+            f"<td>{odds:.2f}</td>"
+            f"<td>¥{stake:,}</td>"
+            f"<td>{status}</td>"
+            f"<td>{pnl_html}</td>"
+            "</tr>"
+        )
+
+    return _HTML_TEMPLATE.format(
+        period=period,
+        generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        n_races=n,
+        n_finished=fin,
+        n_pending=pending,
+        hit_rate=hit_rate,
+        stake_total=f"{stake_total:,}",
+        pnl_total=f"{abs(pnl_total):,}",
+        pnl_sign=pnl_sign,
+        pnl_cls=pnl_cls,
+        roi=roi,
+        daily_section=daily_section,
+        detail_rows="".join(detail_rows),
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -174,6 +327,10 @@ def main() -> None:
                    help="過去N日（今日含む）の集計。指定時は日別サマリも表示")
     p.add_argument("--verbose", "-v", action="store_true",
                    help="集計だけでなく個別レースも全表示")
+    p.add_argument("--html", nargs="?", const="auto", default=None,
+                   help="HTML を生成してブラウザで開く。任意で出力パスを指定可")
+    p.add_argument("--no-open", action="store_true",
+                   help="--html 時にブラウザを自動で開かない")
     args = p.parse_args()
 
     if args.date:
@@ -192,6 +349,28 @@ def main() -> None:
 
     period_label = (f"{targets[0]} 〜 {targets[-1]}"
                     if len(targets) > 1 else str(targets[0]))
+
+    # HTML 出力モード（ターミナル出力もする）
+    if args.html is not None:
+        if args.html == "auto":
+            if len(targets) > 1:
+                fname = f"signals_history_{targets[0]:%Y%m%d}_{targets[-1]:%Y%m%d}.html"
+            else:
+                fname = f"signals_history_{targets[0]:%Y%m%d}.html"
+            html_path = PROCESSED_DIR / fname
+        else:
+            html_path = Path(args.html)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(_to_html(df, period_label), encoding="utf-8")
+        print(f"HTML saved: {html_path}")
+        print(f"  open: file://{html_path.resolve()}")
+        if not args.no_open:
+            try:
+                webbrowser.open(html_path.resolve().as_uri())
+            except Exception:
+                pass
+        return
+
     print(f"=== シグナル履歴 ({period_label}) — {len(df)} レース ===")
     print()
 
