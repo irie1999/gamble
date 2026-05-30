@@ -62,6 +62,29 @@ def expected_close_odds(
     return max(1.0, 1.0 + (current_odds - 1.0) * factor)
 
 
+def _race_still_open(
+    race_id: str,
+    schedule: Mapping[str, str],
+    now: datetime,
+) -> bool:
+    """締切が now より未来か（=まだ投票可能か）。
+
+    schedule に該当 race_id が無い・パース失敗時は True を返す（安全側で残す）。
+    過去日（race_id の日付が today より過去）は常に True（バックテスト保護）。
+    """
+    if str(race_id)[:8] != now.strftime("%Y%m%d"):
+        return True  # 過去日 backtest はそのまま
+    dl_str = schedule.get(str(race_id), "")
+    if not dl_str or ":" not in str(dl_str):
+        return True
+    try:
+        hh, mm = str(dl_str).split(":")[:2]
+        deadline = datetime.combine(now.date(), _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return True
+    return deadline > now
+
+
 def _minutes_to_deadline_from_schedule(
     race_id: str,
     schedule: Mapping[str, str],
@@ -113,6 +136,10 @@ class BacktestConfig:
     # race_id → "HH:MM" の締切時刻マップ。shrinkage 計算に使う。
     # 渡されていないレースは shrinkage 適用なし（元 odds でステーク計算）。
     schedule_map: Mapping[str, str] = field(default_factory=dict)
+    # ライブ運用フィルタ: 「現在時刻 > 締切」のレースを候補から除外する。
+    # True にすると、watch_signal が午後に起動して朝のレースを再評価 → 候補化、
+    # という「事後のみ」のシグナル誤検知を防げる。run_signal は当日 backtest 時に True。
+    skip_post_deadline_races: bool = False
 
 
 @dataclass
@@ -213,6 +240,17 @@ def run_backtest(
             before = len(eligible)
             eligible = eligible[eligible["odds_win"] >= config.min_odds]
             logger.info("min_odds=%s 適用後 %d候補（%d→）", config.min_odds, len(eligible), before)
+        # ライブ運用フィルタ: 締切過ぎたレース（=もう投票できない）を除外。
+        # watch_signal が午後起動 → 朝のレースを再評価 → 候補化、を防ぐ。
+        if config.skip_post_deadline_races and config.schedule_map:
+            before = len(eligible)
+            now_dt = datetime.now()
+            still_open = eligible["race_id"].astype(str).apply(
+                lambda rid: _race_still_open(rid, config.schedule_map, now_dt)
+            )
+            eligible = eligible[still_open]
+            logger.info("skip_post_deadline 適用後 %d候補（%d→ 締切過ぎ %d件除外）",
+                        len(eligible), before, before - len(eligible))
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
         if config.strategy == "lane1_kelly":

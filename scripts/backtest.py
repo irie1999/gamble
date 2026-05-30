@@ -86,6 +86,13 @@ def main() -> None:
         help="race_schedule.csv のパス。shrinkage 用に締切時刻を読む。"
              "未指定時は data/raw/race_schedule.csv を試す",
     )
+    parser.add_argument(
+        "--skip-post-deadline",
+        action="store_true",
+        help="当日 race_id について「現在時刻 > 締切」のレースを候補から除外。"
+             "ライブ運用時に「事後のみ」誤検知シグナルを防ぐ。"
+             "schedule_map が必要。過去日 backtest には影響しない。",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -104,9 +111,10 @@ def main() -> None:
     keep_cols = ["race_id", "lane", "race_date", "pred_win_prob"]
     pred = pred[[c for c in keep_cols if c in pred.columns]]
 
-    # schedule マップ (race_id → "HH:MM") を読み込み。shrinkage 計算に使う。
+    # schedule マップ (race_id → "HH:MM") を読み込み。shrinkage と
+    # skip-post-deadline の両方に使う。
     schedule_map: dict[str, str] = {}
-    if args.odds_shrinkage_max > 0:
+    if args.odds_shrinkage_max > 0 or args.skip_post_deadline:
         from src.utils.config import RAW_DIR
         schedule_path = Path(args.schedule) if args.schedule else (RAW_DIR / "race_schedule.csv")
         if schedule_path.exists():
@@ -114,9 +122,10 @@ def main() -> None:
             if "race_id" in sched.columns and "deadline_time" in sched.columns:
                 schedule_map = dict(zip(sched["race_id"].astype(str),
                                         sched["deadline_time"].astype(str)))
-                logger.info("schedule 読込: %d race（shrinkage用）", len(schedule_map))
+                logger.info("schedule 読込: %d race", len(schedule_map))
         else:
-            logger.warning("schedule が無いので shrinkage は適用されません: %s", schedule_path)
+            logger.warning("schedule が無いので shrinkage / skip-post-deadline は無効: %s",
+                           schedule_path)
 
     cfg = BacktestConfig(
         strategy=args.strategy,
@@ -131,6 +140,7 @@ def main() -> None:
         odds_shrinkage_max=args.odds_shrinkage_max,
         odds_shrinkage_time_constant_min=args.odds_shrinkage_time_const_min,
         schedule_map=schedule_map,
+        skip_post_deadline_races=args.skip_post_deadline,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 

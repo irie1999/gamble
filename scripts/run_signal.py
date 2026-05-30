@@ -226,7 +226,12 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
                   min_odds: Optional[float], kelly_fraction: float,
                   excluded_venues: list[str],
                   odds_shrinkage_max: float = 0.0) -> Path:
-    """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。"""
+    """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。
+
+    target が当日（今日）の場合は --skip-post-deadline を自動付与し、
+    既に締切過ぎたレースを候補から除外する（事後のみシグナルの誤検知防止）。
+    過去日 backtest には影響しない。
+    """
     cmd = [
         sys.executable, "-m", "scripts.backtest",
         "--features", str(PROCESSED_DIR / "features.parquet"),
@@ -245,6 +250,8 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
         cmd += ["--exclude-venues", *excluded_venues]
     if odds_shrinkage_max > 0:
         cmd += ["--odds-shrinkage-max", str(odds_shrinkage_max)]
+    if target == date.today():
+        cmd += ["--skip-post-deadline"]
     _run(cmd)
     return MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
 
