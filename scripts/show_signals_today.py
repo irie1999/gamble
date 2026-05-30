@@ -16,6 +16,8 @@ HTML を生成してブラウザで自動オープン。
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -24,6 +26,9 @@ from typing import Iterable
 import pandas as pd
 
 from src.utils.config import PROCESSED_DIR, RAW_DIR, VENUE_CODES
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _load_snapshots(target: date) -> pd.DataFrame:
@@ -69,13 +74,43 @@ def _load_winners() -> dict[str, dict]:
 def _load_schedule_map() -> dict[str, str]:
     """race_id → "HH:MM" の締切時刻マップ。持続/消失判定に使う。"""
     sched_path = RAW_DIR / "race_schedule.csv"
-    if not sched_path.exists():
+    if not sched_path.exists() or sched_path.stat().st_size == 0:
         return {}
     try:
         df = pd.read_csv(sched_path)
         return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
     except Exception:
         return {}
+
+
+def _ensure_schedule(targets: Iterable[date]) -> dict[str, str]:
+    """対象日に schedule が無ければ scrape_schedule を呼んで補完してから読む。
+
+    過去日のシグナル履歴を持続/消失判定するには、その日の race_schedule.csv が
+    必要だが、watch_signal は今日の分しか取得しない。対象日のうち schedule が
+    無い日について scrape_schedule を順次起動する。
+    """
+    schedule = _load_schedule_map()
+    target_list = list(targets)
+    missing = []
+    for d in target_list:
+        prefix = d.strftime("%Y%m%d")
+        if not any(rid.startswith(prefix) for rid in schedule):
+            missing.append(d)
+    if not missing:
+        return schedule
+
+    print(f"schedule 不足: {len(missing)}日分を scrape します...")
+    for d in missing:
+        print(f"  → scrape_schedule --date {d}")
+        rc = subprocess.call(
+            [sys.executable, "-m", "scripts.scrape_schedule",
+             "--date", d.isoformat(), "--workers", "4"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if rc != 0:
+            logger.warning("scrape_schedule 失敗 (rc=%d) date=%s", rc, d)
+    return _load_schedule_map()
 
 
 def _classify_persisted(race_id: str, last_seen: datetime,
@@ -451,7 +486,7 @@ def main() -> None:
         targets = [date.today()]
 
     winners = _load_winners()
-    schedule = _load_schedule_map()
+    schedule = _ensure_schedule(targets)
     df = _collect(targets, winners, schedule=schedule)
     if df.empty:
         print(f"対象期間にシグナルログなし: {targets[0]} 〜 {targets[-1]}")
