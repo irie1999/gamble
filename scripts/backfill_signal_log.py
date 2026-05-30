@@ -38,6 +38,25 @@ DEFAULT_MAX_ODDS = 10.0
 DEFAULT_EXCLUDE_VENUES = ["04", "03", "02", "14", "01", "24", "10"]
 
 
+_EMPTY_SNAPSHOT_COLS = [
+    "race_id", "snapshot_at", "ev", "odds_win", "stake",
+    "blended_win_prob", "race_finished", "hit", "pnl", "winner_lane",
+]
+
+
+def _write_empty_marker(target: date) -> None:
+    """候補ゼロ日のマーカーとしてヘッダのみの空 CSV を書き出す。
+
+    これにより show_signals_today の auto-backfill 検出が「ファイル存在=処理済み」
+    と判定でき、毎回ゼロ候補日の再実行を防げる。
+    """
+    snap_path = _snapshot_path(target)
+    if snap_path.exists():
+        return
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(columns=_EMPTY_SNAPSHOT_COLS).to_csv(snap_path, index=False)
+
+
 def _snapshot_path(target: date) -> Path:
     return PROCESSED_DIR / "signal_log" / f"signal_snapshots_{target:%Y%m%d}.csv"
 
@@ -75,45 +94,66 @@ def _run_range_backtest(start: date, end: date) -> Path | None:
     return out_dir / "bets_lane1_kelly.csv"
 
 
-def _split_bets_by_date(bets_csv: Path, force: bool) -> tuple[int, int, int]:
+def _split_bets_by_date(
+    bets_csv: Path, force: bool,
+    all_target_days: set[date] | None = None,
+) -> tuple[int, int, int]:
     """bets CSV を日付ごとに分割し signal_snapshots ファイルに書き出す。
+
+    all_target_days が指定されていれば、bets CSV に出てこなかった日にも
+    空マーカー CSV を書く（次回 backfill スキップ用）。
 
     Returns:
         (succeeded_days, skipped_days, empty_days)
     """
-    if not bets_csv.exists():
-        return (0, 0, 0)
-    df = pd.read_csv(bets_csv)
-    if df.empty or "race_date" not in df.columns:
-        return (0, 0, 0)
-    df["_d"] = pd.to_datetime(df["race_date"]).dt.date
-
+    all_target_days = all_target_days or set()
+    bet_days: set[date] = set()
     succeeded = 0
     skipped = 0
+
+    if bets_csv.exists():
+        df = pd.read_csv(bets_csv)
+        if not df.empty and "race_date" in df.columns:
+            df["_d"] = pd.to_datetime(df["race_date"]).dt.date
+            for d, g in df.groupby("_d"):
+                bet_days.add(d)
+                snap_path = _snapshot_path(d)
+                if snap_path.exists() and not force:
+                    # 既存が空マーカーなら上書き、実データなら skip
+                    try:
+                        existing = pd.read_csv(snap_path)
+                        if not existing.empty:
+                            skipped += 1
+                            continue
+                    except Exception:
+                        pass
+                if g.empty:
+                    continue
+                snap = pd.DataFrame({
+                    "race_id": g["race_id"].astype(str),
+                    "snapshot_at": f"{d.isoformat()} 23:59:00",
+                    "ev": g.get("ev", 0.0),
+                    "odds_win": g.get("odds_win", 0.0),
+                    "stake": g["stake"].astype(int) if "stake" in g.columns else 0,
+                    "blended_win_prob": g.get("blended_win_prob",
+                                              g.get("pred_win_prob", 0.0)),
+                    "race_finished": g.get("race_finished", False),
+                    "hit": g.get("hit", False),
+                    "pnl": g["pnl"].astype(int) if "pnl" in g.columns else 0,
+                    "winner_lane": g.get("winner_lane", ""),
+                })
+                snap_path.parent.mkdir(parents=True, exist_ok=True)
+                snap.to_csv(snap_path, index=False)
+                succeeded += 1
+
+    # 候補ゼロ日に空マーカーを書く（再 backfill 防止）
     empty = 0
-    for d, g in df.groupby("_d"):
+    for d in all_target_days - bet_days:
         snap_path = _snapshot_path(d)
         if snap_path.exists() and not force:
-            skipped += 1
             continue
-        if g.empty:
-            empty += 1
-            continue
-        snap = pd.DataFrame({
-            "race_id": g["race_id"].astype(str),
-            "snapshot_at": f"{d.isoformat()} 23:59:00",
-            "ev": g.get("ev", 0.0),
-            "odds_win": g.get("odds_win", 0.0),
-            "stake": g["stake"].astype(int) if "stake" in g.columns else 0,
-            "blended_win_prob": g.get("blended_win_prob", g.get("pred_win_prob", 0.0)),
-            "race_finished": g.get("race_finished", False),
-            "hit": g.get("hit", False),
-            "pnl": g["pnl"].astype(int) if "pnl" in g.columns else 0,
-            "winner_lane": g.get("winner_lane", ""),
-        })
-        snap_path.parent.mkdir(parents=True, exist_ok=True)
-        snap.to_csv(snap_path, index=False)
-        succeeded += 1
+        _write_empty_marker(d)
+        empty += 1
     return (succeeded, skipped, empty)
 
 
@@ -190,23 +230,18 @@ def main() -> None:
     n_days = (end - start).days + 1
     print(f"backfill 対象: {start} 〜 {end} ({n_days}日)")
 
+    all_target_days = {start + timedelta(days=i) for i in range(n_days)}
+
     # 期間が長い場合は1回の backtest で全部処理（数十倍速い）
     if n_days >= 7:
         bets_csv = _run_range_backtest(start, end)
         if bets_csv is None:
             print("✗ 期間 backtest 失敗")
             return
-        succeeded, skipped, empty = _split_bets_by_date(bets_csv, args.force)
+        succeeded, skipped, empty = _split_bets_by_date(
+            bets_csv, args.force, all_target_days=all_target_days,
+        )
         failed = 0
-        # 候補ゼロ日（bets CSV に出てこない日）を計算
-        all_target_days = {start + timedelta(days=i) for i in range(n_days)}
-        df = pd.read_csv(bets_csv)
-        if not df.empty and "race_date" in df.columns:
-            bet_days = set(pd.to_datetime(df["race_date"]).dt.date)
-        else:
-            bet_days = set()
-        no_bet_days = len(all_target_days - bet_days)
-        empty = max(empty, no_bet_days)
     else:
         # 日数少ない時は個別実行（旧フロー）
         skipped = succeeded = failed = empty = 0
@@ -226,8 +261,10 @@ def main() -> None:
                 continue
             snap = _bets_to_snapshot(bets_csv, cur)
             if snap.empty:
+                # 候補ゼロでも空マーカーを残して再 backfill 防止
+                _write_empty_marker(cur)
                 empty += 1
-                print("候補ゼロ → スキップ")
+                print("候補ゼロ → 空マーカー保存")
             else:
                 snap_path.parent.mkdir(parents=True, exist_ok=True)
                 snap.to_csv(snap_path, index=False)
