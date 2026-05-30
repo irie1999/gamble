@@ -142,6 +142,43 @@ def _load_schedule() -> dict[str, str]:
         return {}
 
 
+def _minutes_to_deadline(race_id: str, schedule: dict[str, str],
+                         now: datetime | None = None) -> float | None:
+    """race_id の締切までの分数。schedule に無い・パース失敗時は None。"""
+    dl_str = schedule.get(str(race_id), "")
+    if not dl_str or ":" not in dl_str:
+        return None
+    cur_now = now if now is not None else datetime.now()
+    try:
+        hh, mm = dl_str.split(":")[:2]
+        deadline = datetime.combine(cur_now.date(), _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return None
+    return (deadline - cur_now).total_seconds() / 60.0
+
+
+def _classify_recommendation(ev: float, minutes_to_deadline: float | None) -> str:
+    """シグナルを「賭けるべき」か「様子見」か判定。
+
+    Returns:
+        "recommended": オッズはほぼ確定 or EVに余裕あり → そのまま賭ける
+        "wait":        まだオッズが動いて消える可能性 → 様子見
+
+    判定基準:
+        ・締切まで 10分以内: 直前なのでオッズ固定 → recommended
+        ・EV > 1.20:        閾値 1.05 から余裕あり → recommended
+        ・EV > 1.10 かつ 締切 20分以内: 中程度の余裕 → recommended
+        ・上記以外: wait
+    """
+    if minutes_to_deadline is not None and minutes_to_deadline <= 10:
+        return "recommended"
+    if ev > 1.20:
+        return "recommended"
+    if minutes_to_deadline is not None and minutes_to_deadline <= 20 and ev > 1.10:
+        return "recommended"
+    return "wait"
+
+
 def _races_near_deadline(ids: set[str], schedule: dict[str, str],
                          already_reminded: set[str],
                          minutes_threshold: int,
@@ -173,11 +210,13 @@ def _races_near_deadline(ids: set[str], schedule: dict[str, str],
 
 def _format_push_body(ids: set[str], details: dict[str, dict],
                       new_ids: set[str] | None = None,
-                      schedule: dict[str, str] | None = None) -> str:
-    """シグナル本文を整形。HTMLレポートと同じ項目を含む。
+                      schedule: dict[str, str] | None = None,
+                      now: datetime | None = None) -> str:
+    """シグナル本文を整形。HTMLレポートと同じ項目 + 賭ける/様子見 判定を含む。
 
     new_ids に含まれる race_id は先頭に 🆕 マーカーを付ける。EV 降順で並べ、
     複数行構成で 1レース = 2行（識別行 + 数値行）。
+    各レースに「✅ 賭ける」「👁 様子見」の判定バッジを付与。
     """
     from src.utils.config import VENUE_CODES
     new_ids = new_ids or set()
@@ -193,13 +232,17 @@ def _format_push_body(ids: set[str], details: dict[str, dict],
         venue = VENUE_CODES.get(jcd, jcd) if jcd else rid
         rno = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
         d = details.get(rid, {})
+        ev = float(d.get("ev", 0))
         deadline = schedule.get(rid, "")
         deadline_str = f" 締切{deadline}" if deadline else ""
-        marker = "🆕 " if rid in new_ids else "・"
-        head = f"{marker}{venue}({jcd}) {rno}R{deadline_str}"
+        new_marker = "🆕 " if rid in new_ids else ""
+        mins_left = _minutes_to_deadline(rid, schedule, now)
+        rec = _classify_recommendation(ev, mins_left)
+        rec_badge = "✅賭ける" if rec == "recommended" else "👁様子見"
+        head = f"{new_marker}{rec_badge} {venue}({jcd}) {rno}R{deadline_str}"
         body = (f"  P{d.get('p_blend', 0):.3f} / "
                 f"オッズ{d.get('odds', 0):.2f} / "
-                f"EV{d.get('ev', 0):.2f} / "
+                f"EV{ev:.2f} / "
                 f"推奨¥{d.get('stake', 0):,}")
         lines.append(head)
         lines.append(body)

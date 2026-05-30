@@ -85,6 +85,8 @@ HTML = """<!doctype html>
   .badge-pending {{ background: rgba(154,160,176,0.12); color: var(--text-dim); }}
   .badge-active {{ background: rgba(96,165,250,0.15); color: var(--link); }}
   .badge-dropped {{ background: rgba(154,160,176,0.10); color: var(--text-dim); }}
+  .badge-rec {{ background: rgba(74,222,128,0.18); color: var(--pos); font-weight: 700; }}
+  .badge-wait {{ background: rgba(251,191,36,0.18); color: var(--warn); }}
 
   a {{ color: var(--link); text-decoration: none; font-weight: 600; }}
   a:hover {{ text-decoration: underline; }}
@@ -122,7 +124,7 @@ HTML = """<!doctype html>
 <table id="bets">
   <thead><tr>
     <th>場</th><th>R</th><th>締切</th><th>1号艇</th>
-    <th>p_blend</th><th>オッズ</th><th>EV</th><th>推奨ステーク</th>
+    <th>p_blend</th><th>オッズ</th><th>EV</th><th>判定</th><th>推奨ステーク</th>
     <th>結果</th><th>PnL</th><th>公式</th>
   </tr></thead>
   <tbody>{rows}{totals_row}</tbody>
@@ -163,6 +165,38 @@ def _ev_class(ev: float) -> str:
     if ev >= 1.10:
         return "ev-mid"
     return ""
+
+
+def _minutes_to_deadline_now(deadline_str: str, date_str: str) -> float | None:
+    """deadline ("HH:MM") と date ("YYYYMMDD") から 今 までの分数を返す。"""
+    if not deadline_str or ":" not in deadline_str or len(date_str) != 8:
+        return None
+    try:
+        hh, mm = deadline_str.split(":")[:2]
+        d = datetime.strptime(date_str, "%Y%m%d").date()
+        deadline = datetime.combine(d, datetime.min.time().replace(hour=int(hh), minute=int(mm)))
+    except (ValueError, AttributeError):
+        return None
+    return (deadline - datetime.now()).total_seconds() / 60.0
+
+
+def _classify_recommendation(ev: float, minutes_to_deadline: float | None) -> str:
+    """シグナルを「賭けるべき」か「様子見」か判定。
+
+    Returns:
+        "recommended": オッズはほぼ確定 or EVに余裕あり → そのまま賭ける
+        "wait":        まだオッズが動いて消える可能性 → 様子見
+        "past":        既に締切過ぎ（賭けられない）
+    """
+    if minutes_to_deadline is not None and minutes_to_deadline < 0:
+        return "past"
+    if minutes_to_deadline is not None and minutes_to_deadline <= 10:
+        return "recommended"
+    if ev > 1.20:
+        return "recommended"
+    if minutes_to_deadline is not None and minutes_to_deadline <= 20 and ev > 1.10:
+        return "recommended"
+    return "wait"
 
 
 def _parse_race_id(rid: str) -> tuple[str, str, str]:
@@ -218,6 +252,19 @@ def _row(r: pd.Series, schedule: dict) -> str:
     url = f"{BASE_URL}/oddstf?rno={int(rno)}&jcd={jcd}&hd={date_str}"
     ev_cls = _ev_class(ev)
 
+    # 判定セル: 賭ける/様子見/締切過ぎ
+    mins_left = _minutes_to_deadline_now(deadline, date_str)
+    rec = _classify_recommendation(ev, mins_left)
+    if is_pending:
+        if rec == "recommended":
+            rec_html = "<td><span class='badge badge-rec'>✅ 賭ける</span></td>"
+        elif rec == "wait":
+            rec_html = "<td><span class='badge badge-wait'>👁 様子見</span></td>"
+        else:
+            rec_html = "<td><span class='badge badge-pending'>締切過ぎ</span></td>"
+    else:
+        rec_html = "<td><span class='badge badge-pending'>確定</span></td>"
+
     return (
         f"<tr>"
         f"<td class='venue'>{venue_name}({jcd})</td>"
@@ -227,6 +274,7 @@ def _row(r: pd.Series, schedule: dict) -> str:
         f"<td>{p_blend:.3f}</td>"
         f"{odds_html}"
         f"<td class='{ev_cls}'>{ev:.3f}</td>"
+        f"{rec_html}"
         f"<td class='stake'>¥{stake:,}</td>"
         f"<td>{result_html}</td>"
         f"<td data-sort='{pnl_sort}'>{pnl_html}</td>"
@@ -252,9 +300,9 @@ def _totals_row(bets: pd.DataFrame) -> str:
     cls = "pos" if pnl > 0 else ("neg" if pnl < 0 else "")
     sign = "+" if pnl > 0 else ""
     return (
-        # colspan は 11列の左7列を埋める（場/R/締切/1号艇/p_blend/オッズ/EV）
+        # colspan は 12列の左8列を埋める（場/R/締切/1号艇/p_blend/オッズ/EV/判定）
         f"<tr class='totals'>"
-        f"<td colspan='7'>確定済み合計（{n}件・的中{n_hit}件・勝率{n_hit/n*100:.0f}%）</td>"
+        f"<td colspan='8'>確定済み合計（{n}件・的中{n_hit}件・勝率{n_hit/n*100:.0f}%）</td>"
         f"<td>¥{stake:,}</td>"
         f"<td></td>"
         f"<td class='{cls}'>{sign}¥{pnl:,}<br><span style='color:var(--text-dim);font-size:11px;font-weight:400'>返¥{ret:,}</span></td>"
