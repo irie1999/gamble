@@ -181,20 +181,18 @@ def _minutes_to_deadline_now(deadline_str: str, date_str: str) -> float | None:
 
 
 def _classify_recommendation(ev: float, minutes_to_deadline: float | None) -> str:
-    """シグナルを「賭けるべき」か「様子見」か判定。
+    """シグナルを「賭ける」か「様子見」か判定。
 
     Returns:
-        "recommended": オッズはほぼ確定 or EVに余裕あり → そのまま賭ける
-        "wait":        まだオッズが動いて消える可能性 → 様子見
-        "past":        既に締切過ぎ（賭けられない）
+        "recommended": 締切10分以内 → 投票推奨
+        "wait":        まだ時間あり、オッズ動く可能性 → 観察のみ
+        "past":        既に締切過ぎ
     """
-    if minutes_to_deadline is not None and minutes_to_deadline < 0:
+    if minutes_to_deadline is None:
+        return "wait"
+    if minutes_to_deadline < 0:
         return "past"
-    if minutes_to_deadline is not None and minutes_to_deadline <= 10:
-        return "recommended"
-    if ev > 1.20:
-        return "recommended"
-    if minutes_to_deadline is not None and minutes_to_deadline <= 20 and ev > 1.10:
+    if minutes_to_deadline <= 10:
         return "recommended"
     return "wait"
 

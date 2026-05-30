@@ -106,6 +106,40 @@ def _load_schedule_map() -> dict[str, str]:
         return {}
 
 
+def _ensure_signal_log(targets: Iterable[date]) -> None:
+    """signal_log が無い過去日について backfill_signal_log を順次実行。
+
+    過去日（today 未満）のみが対象。今日のレースは watch_signal が動いていれば
+    自動的に記録されるので backfill 不要。
+    """
+    today = date.today()
+    missing = []
+    for t in targets:
+        if t >= today:
+            continue
+        snap_path = PROCESSED_DIR / "signal_log" / f"signal_snapshots_{t:%Y%m%d}.csv"
+        if not snap_path.exists():
+            missing.append(t)
+    if not missing:
+        return
+    print(f"signal_log 不足: {len(missing)}日分を backfill します...")
+    for t in missing:
+        print(f"  → backfill {t}...", end=" ", flush=True)
+        rc = subprocess.call(
+            [sys.executable, "-m", "scripts.backfill_signal_log",
+             "--from", t.isoformat(), "--to", t.isoformat()],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if rc == 0:
+            snap_path = PROCESSED_DIR / "signal_log" / f"signal_snapshots_{t:%Y%m%d}.csv"
+            if snap_path.exists():
+                print("✓")
+            else:
+                print("候補ゼロ")
+        else:
+            print(f"✗ (rc={rc})")
+
+
 def _ensure_schedule(targets: Iterable[date]) -> dict[str, str]:
     """対象日に schedule が無ければ scrape_schedule を呼んで補完してから読む。
 
@@ -503,6 +537,8 @@ def main() -> None:
                    help="HTMLは生成するがブラウザを自動で開かない")
     p.add_argument("--terminal", "-t", action="store_true",
                    help="HTML を生成せずターミナルだけに表示")
+    p.add_argument("--no-backfill", action="store_true",
+                   help="signal_log が無い過去日の自動 backfill を無効化")
     args = p.parse_args()
 
     if args.date:
@@ -517,6 +553,9 @@ def main() -> None:
     else:
         targets = [date.today()]
 
+    # 過去日で signal_log 不足の日を自動 backfill (オプトアウト可)
+    if not args.no_backfill:
+        _ensure_signal_log(targets)
     winners = _load_winners()
     schedule = _ensure_schedule(targets)
     df = _collect(targets, winners, schedule=schedule)

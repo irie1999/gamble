@@ -158,23 +158,24 @@ def _minutes_to_deadline(race_id: str, schedule: dict[str, str],
 
 
 def _classify_recommendation(ev: float, minutes_to_deadline: float | None) -> str:
-    """シグナルを「賭けるべき」か「様子見」か判定。
+    """シグナルを「賭ける」か「様子見」か判定。
 
     Returns:
-        "recommended": オッズはほぼ確定 or EVに余裕あり → そのまま賭ける
-        "wait":        まだオッズが動いて消える可能性 → 様子見
+        "recommended": 締切が近くオッズがほぼ確定 → そのまま投票
+        "wait":        まだオッズが動き、消える可能性あり → 観察のみ・投票しない
 
-    判定基準:
-        ・締切まで 10分以内: 直前なのでオッズ固定 → recommended
-        ・EV > 1.20:        閾値 1.05 から余裕あり → recommended
-        ・EV > 1.10 かつ 締切 20分以内: 中程度の余裕 → recommended
-        ・上記以外: wait
+    判定基準（厳格化）:
+        ・締切まで 10分以内: オッズほぼ固定 → recommended
+        ・上記以外: wait（高EVでも、まだ動く可能性があるため）
+
+    「10分前リマインダ」のタイミングだけが「賭ける」シグナルになる。
+    早期の新規シグナル通知は全部「様子見」扱い → 「賭けた後で消える」を防ぐ。
     """
-    if minutes_to_deadline is not None and minutes_to_deadline <= 10:
-        return "recommended"
-    if ev > 1.20:
-        return "recommended"
-    if minutes_to_deadline is not None and minutes_to_deadline <= 20 and ev > 1.10:
+    if minutes_to_deadline is None:
+        return "wait"  # 締切不明なら安全側
+    if minutes_to_deadline < 0:
+        return "wait"  # 締切過ぎ（賭けられない）
+    if minutes_to_deadline <= 10:
         return "recommended"
     return "wait"
 
@@ -510,7 +511,7 @@ def main() -> None:
                 body = _format_push_body(cur_ids, details,
                                          new_ids=new_ids, schedule=schedule)
                 push_all(
-                    f"競艇シグナル 新規{len(new_ids)}件 / 計{len(cur_ids)}件",
+                    f"🔍 シグナル発見 新規{len(new_ids)}件 ※10分前リマインダまで観察",
                     body,
                 )
         elif removed:
@@ -531,7 +532,7 @@ def main() -> None:
                 minutes_threshold=effective_threshold,
             )
             if soon:
-                title = f"⏰ 締切{args.deadline_reminder_min}分前 {len(soon)}件"
+                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}分前 {len(soon)}件"
                 print(f"[{now}] {title}: {', '.join(sorted(soon))}")
                 if not args.no_beep:
                     _beep()
