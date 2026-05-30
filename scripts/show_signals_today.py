@@ -320,30 +320,62 @@ def _print_details(df: pd.DataFrame) -> None:
                          stake=f"¥{stake:,}", status=status))
 
 
+def _strategy_stats(df: pd.DataFrame) -> dict:
+    """戦略の実績を計算。確定レースのみ集計。"""
+    fin_df = df[df["finished"]]
+    n = len(df)
+    n_fin = len(fin_df)
+    hit = int(fin_df["hit"].sum())
+    stake = int(fin_df["latest_stake"].sum())
+    pnl = int(fin_df["pnl"].sum())
+    return {
+        "n": n, "n_fin": n_fin, "hit": hit, "stake": stake, "pnl": pnl,
+        "hit_rate": (hit / n_fin) if n_fin else 0.0,
+        "roi": (pnl / stake) if stake else 0.0,
+    }
+
+
 def _print_grand_total(df: pd.DataFrame, label: str = "合計") -> None:
     n = len(df)
     fin = int(df["finished"].sum())
-    hit = int(df["hit"].sum())
-    stake = int(df[df["finished"]]["latest_stake"].sum())
-    pnl = int(df["pnl"].sum())
     n_persist = int((df["persisted"] == "persisted").sum())
     n_drop = int((df["persisted"] == "dropped").sum())
     n_post = int((df["persisted"] == "post_only").sum())
-    persist_pnl = int(df[df["persisted"] == "persisted"]["pnl"].sum())
     print()
     print(f"=== {label} ===")
     print(f"レース数: {n} 件 (確定 {fin} / 未確定 {n - fin})")
     print(f"  └─ 持続: {n_persist} 件 / 途中消失: {n_drop} 件 / 事後のみ: {n_post} 件")
-    if fin:
-        print(f"勝率:     {hit}/{fin} = {hit / fin * 100:.1f}%")
-        print(f"ステーク: ¥{stake:,}")
-        sign = "+" if pnl > 0 else ""
-        print(f"PnL:      {sign}¥{pnl:,}")
-        if stake:
-            print(f"ROI:      {sign}{pnl / stake * 100:.1f}%")
-    if n_persist:
-        p_sign = "+" if persist_pnl > 0 else ""
-        print(f"持続のみPnL: {p_sign}¥{persist_pnl:,} (賭けるべきだったレースの合計)")
+
+    # watch していた期間（post_only/unknown を除外）の比較
+    live_df = df[df["persisted"].isin(["persisted", "dropped"])]
+    if len(live_df) == 0:
+        if n_post:
+            print()
+            print("⚠ watch_signal で観測したシグナルがありません（全て事後のみ）")
+            print("   → 比較不可。watch_signal を稼働させてください")
+        return
+
+    immediate = _strategy_stats(live_df)
+    wait = _strategy_stats(live_df[live_df["persisted"] == "persisted"])
+
+    print()
+    print(f"=== 戦略比較（watch 観測の {len(live_df)} 件のみ） ===")
+    fmt = "{label:<32} {n:>5} {fin:>5} {rate:>7} {stake:>11} {pnl:>12} {roi:>8}"
+    print(fmt.format(label="戦略", n="件数", fin="確定", rate="勝率",
+                     stake="ステーク", pnl="PnL", roi="ROI"))
+    print("-" * 86)
+    for lbl, s in [("検知即発注 (全シグナル買い)", immediate),
+                   ("締切まで観察 (持続のみ買い)", wait)]:
+        sign = "+" if s["pnl"] > 0 else ""
+        roi = f"{sign}{s['roi'] * 100:.1f}%" if s["stake"] else "-"
+        rate = f"{s['hit_rate'] * 100:.1f}%" if s["n_fin"] else "-"
+        print(fmt.format(
+            label=lbl, n=f"{s['n']}", fin=f"{s['n_fin']}", rate=rate,
+            stake=f"¥{s['stake']:,}", pnl=f"{sign}¥{s['pnl']:,}", roi=roi,
+        ))
+    diff_pnl = wait["pnl"] - immediate["pnl"]
+    diff_sign = "+" if diff_pnl > 0 else ""
+    print(f"\n  差分: 観察すると {diff_sign}¥{diff_pnl:,} ({len(live_df) - wait['n']} 件を見送り)")
 
 
 _HTML_TEMPLATE = """<!doctype html>
@@ -398,6 +430,8 @@ tbody tr:hover td {{ background: var(--bg-hover); }}
   <div class="card"><div class="label">持続のみPnL</div><div class="value {persist_pnl_cls}">{persist_pnl_sign}¥{persist_pnl}</div></div>
 </div>
 
+{comparison_section}
+
 {daily_section}
 
 <div class="section-title">▼ 個別レース</div>
@@ -435,6 +469,57 @@ def _to_html(df: pd.DataFrame, period: str) -> str:
     persist_pnl = int(persisted["pnl"].sum())
     persist_pnl_cls = "pos" if persist_pnl > 0 else ("neg" if persist_pnl < 0 else "")
     persist_pnl_sign = "+" if persist_pnl > 0 else ""
+
+    # watch 観測ありの行のみで「検知即発注 vs 締切まで観察」を比較
+    live_df = df[df["persisted"].isin(["persisted", "dropped"])]
+    comparison_section = ""
+    if len(live_df) > 0:
+        immediate = _strategy_stats(live_df)
+        wait = _strategy_stats(live_df[live_df["persisted"] == "persisted"])
+
+        def _cell(s, key, fmt_str, neg_ok=False):
+            v = s[key]
+            sign = "+" if v > 0 else ""
+            cls = "pos" if v > 0 else ("neg" if v < 0 and neg_ok else "")
+            return f"<td class='{cls}'>{sign}{fmt_str.format(v)}</td>"
+
+        def _row(label_main, label_sub, s):
+            sign = "+" if s["pnl"] > 0 else ""
+            pnl_cls = "pos" if s["pnl"] > 0 else ("neg" if s["pnl"] < 0 else "")
+            roi_str = f"{sign}{s['roi'] * 100:.1f}%" if s["stake"] else "-"
+            rate_str = f"{s['hit_rate'] * 100:.1f}%" if s["n_fin"] else "-"
+            return (
+                "<tr>"
+                f"<td>{label_main}<br><span style='color:var(--text-dim);font-size:11px'>{label_sub}</span></td>"
+                f"<td>{s['n']:,}</td>"
+                f"<td>{s['n_fin']:,}</td>"
+                f"<td>{rate_str}</td>"
+                f"<td>¥{s['stake']:,}</td>"
+                f"<td class='{pnl_cls}'>{sign}¥{s['pnl']:,}</td>"
+                f"<td class='{pnl_cls}'>{roi_str}</td>"
+                "</tr>"
+            )
+
+        diff_pnl = wait["pnl"] - immediate["pnl"]
+        diff_sign = "+" if diff_pnl > 0 else ""
+        diff_cls = "pos" if diff_pnl > 0 else ("neg" if diff_pnl < 0 else "")
+        skipped = len(live_df) - wait["n"]
+        comparison_section = (
+            '<div class="section-title">▼ 戦略比較 — 検知即発注 vs 締切まで観察</div>'
+            f'<div style="color:var(--text-dim);font-size:12px;margin-bottom:8px">'
+            f'watch_signal で観測したシグナル {len(live_df)} 件のみ対象 '
+            f'（事後のみ・不明は除外）</div>'
+            '<table style="margin-bottom:8px"><thead><tr>'
+            '<th>戦略</th><th>件数</th><th>確定</th><th>勝率</th>'
+            '<th>ステーク</th><th>PnL</th><th>ROI</th>'
+            '</tr></thead><tbody>'
+            + _row("検知即発注", "シグナル出現時に即買い", immediate)
+            + _row("締切まで観察", "持続したものだけ買い", wait)
+            + '</tbody></table>'
+            f'<div style="color:var(--text-dim);font-size:12px">'
+            f'差分: 観察すると <span class="{diff_cls}">{diff_sign}¥{diff_pnl:,}</span>'
+            f' ／ {skipped} 件を見送り</div>'
+        )
 
     # 日別サマリ（複数日の時のみ）
     daily_section = ""
@@ -534,6 +619,7 @@ def _to_html(df: pd.DataFrame, period: str) -> str:
         persist_pnl=f"{abs(persist_pnl):,}",
         persist_pnl_sign=persist_pnl_sign,
         persist_pnl_cls=persist_pnl_cls,
+        comparison_section=comparison_section,
         daily_section=daily_section,
         detail_rows="".join(detail_rows),
     )
