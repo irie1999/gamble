@@ -43,13 +43,36 @@ def _load_snapshots(target: date) -> pd.DataFrame:
     return df
 
 
-def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
+def _parse_deadline(race_id: str, schedule: dict[str, str]) -> datetime | None:
+    """race_id と schedule から締切 datetime を返す。失敗時は None。"""
+    dl_str = schedule.get(str(race_id), "")
+    if not dl_str or ":" not in dl_str:
+        return None
+    try:
+        hh, mm = dl_str.split(":")[:2]
+        d = datetime.strptime(str(race_id)[:8], "%Y%m%d").date()
+        return datetime.combine(d, datetime.min.time().replace(hour=int(hh), minute=int(mm)))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _aggregate(df: pd.DataFrame, schedule: dict[str, str]) -> pd.DataFrame:
+    """snapshot を race_id ごとに集計。締切前後で分けて last_seen を持つ。"""
     df = df.copy()
     df["snapshot_at"] = pd.to_datetime(df["snapshot_at"], errors="coerce")
+    df["deadline"] = df["race_id"].astype(str).map(
+        lambda rid: _parse_deadline(rid, schedule)
+    )
+    # 締切前 (≤ deadline) のスナップだけで last_seen_pre を計算
+    pre_mask = df["deadline"].notna() & (df["snapshot_at"] <= df["deadline"])
+    df["snapshot_pre"] = df["snapshot_at"].where(pre_mask)
+
     g = df.groupby("race_id")
     return pd.DataFrame({
         "first_seen": g["snapshot_at"].min(),
         "last_seen": g["snapshot_at"].max(),
+        "last_seen_pre": g["snapshot_pre"].max(),
+        "deadline": g["deadline"].first(),
         "n": g["snapshot_at"].count(),
         "max_ev": g["ev"].max(),
         "latest_ev": g["ev"].last(),
@@ -113,28 +136,27 @@ def _ensure_schedule(targets: Iterable[date]) -> dict[str, str]:
     return _load_schedule_map()
 
 
-def _classify_persisted(race_id: str, last_seen: datetime,
-                         schedule: dict[str, str],
-                         persist_threshold_min: float = 10.0) -> str:
-    """シグナルが締切まで持続したか判定。
+def _classify_persisted(deadline: datetime | None,
+                        last_seen_pre: datetime | None,
+                        persist_threshold_min: float = 10.0) -> str:
+    """シグナルが「ライブでベット可能な状態で締切まで持続したか」判定。
+
+    Args:
+        deadline: race の締切時刻（None なら不明扱い）
+        last_seen_pre: 締切 *以前* に観測された最後の snapshot 時刻
+                       (None = 締切前のスナップが1件も無い)
 
     Returns:
-        "persisted": 締切まで残り persist_threshold_min 分以内まで観測された（持続）
-        "dropped":   それより早く候補から外れた（途中消失）
+        "persisted": 締切前 last_seen が締切まで残り persist_threshold_min 分以内
+        "dropped":   締切前 last_seen はあるが、それより早く候補から外れた
+        "post_only": 締切後のスナップしか無い（後追い分析のみ・ライブで賭けられなかった）
         "unknown":   schedule に該当 race_id 無し or パース失敗
     """
-    dl_str = schedule.get(str(race_id), "")
-    if not dl_str or ":" not in dl_str:
+    if deadline is None or pd.isna(deadline):
         return "unknown"
-    try:
-        hh, mm = dl_str.split(":")[:2]
-        d = datetime.strptime(str(race_id)[:8], "%Y%m%d").date()
-        deadline = datetime.combine(d, datetime.min.time().replace(hour=int(hh), minute=int(mm)))
-    except (ValueError, AttributeError):
-        return "unknown"
-    if pd.isna(last_seen):
-        return "unknown"
-    delta_min = (deadline - last_seen).total_seconds() / 60.0
+    if last_seen_pre is None or pd.isna(last_seen_pre):
+        return "post_only"
+    delta_min = (deadline - last_seen_pre).total_seconds() / 60.0
     return "persisted" if delta_min <= persist_threshold_min else "dropped"
 
 
@@ -158,14 +180,17 @@ def _collect(targets: Iterable[date], winners: dict,
     """対象日それぞれの snapshot を集計し1つの DataFrame に。
     各行に date / finished / hit / pnl / winner_lane / persisted を付与。
 
-    persisted: "persisted" (締切まで持続) / "dropped" (途中消失) / "unknown"
+    persisted: "persisted" (締切まで持続) / "dropped" (途中消失) /
+               "post_only" (締切後スナップのみ) / "unknown" (schedule無し)
     """
+    if schedule is None:
+        schedule = {}
     parts: list[pd.DataFrame] = []
     for t in targets:
         df = _load_snapshots(t)
         if df.empty:
             continue
-        agg = _aggregate(df)
+        agg = _aggregate(df, schedule)
         agg["date"] = t.isoformat()
         parts.append(agg)
     if not parts:
@@ -178,11 +203,8 @@ def _collect(targets: Iterable[date], winners: dict,
         axis=1, result_type="expand",
     )
     combined = pd.concat([combined, enriched], axis=1)
-
-    if schedule is None:
-        schedule = {}
     combined["persisted"] = combined.apply(
-        lambda r: _classify_persisted(str(r["race_id"]), r["last_seen"], schedule),
+        lambda r: _classify_persisted(r.get("deadline"), r.get("last_seen_pre")),
         axis=1,
     )
     return combined
@@ -215,10 +237,10 @@ def _print_details(df: pd.DataFrame) -> None:
                      persist="持続", ev_max="最高EV", odds="オッズ",
                      stake="ステーク", status="結果"))
     print("-" * 100)
-    persist_short = {"persisted": "🔵", "dropped": "🟡", "unknown": "─"}
-    persist_order = {"persisted": 0, "dropped": 1, "unknown": 2}
+    persist_short = {"persisted": "🔵", "dropped": "🟡", "post_only": "⚫", "unknown": "─"}
+    persist_order = {"persisted": 0, "dropped": 1, "post_only": 2, "unknown": 3}
     df_sorted = df.copy()
-    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(3)
+    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(4)
     df_sorted = df_sorted.sort_values(
         ["date", "_porder", "max_ev"], ascending=[True, True, False]
     )
@@ -252,11 +274,12 @@ def _print_grand_total(df: pd.DataFrame, label: str = "合計") -> None:
     pnl = int(df["pnl"].sum())
     n_persist = int((df["persisted"] == "persisted").sum())
     n_drop = int((df["persisted"] == "dropped").sum())
+    n_post = int((df["persisted"] == "post_only").sum())
     persist_pnl = int(df[df["persisted"] == "persisted"]["pnl"].sum())
     print()
     print(f"=== {label} ===")
     print(f"レース数: {n} 件 (確定 {fin} / 未確定 {n - fin})")
-    print(f"  └─ 持続: {n_persist} 件 / 途中消失: {n_drop} 件")
+    print(f"  └─ 持続: {n_persist} 件 / 途中消失: {n_drop} 件 / 事後のみ: {n_post} 件")
     if fin:
         print(f"勝率:     {hit}/{fin} = {hit / fin * 100:.1f}%")
         print(f"ステーク: ¥{stake:,}")
@@ -335,6 +358,7 @@ tbody tr:hover td {{ background: var(--bg-hover); }}
 _PERSIST_BADGE = {
     "persisted": "<span class='badge badge-persisted'>🔵 持続</span>",
     "dropped":   "<span class='badge badge-dropped'>🟡 途中消失</span>",
+    "post_only": "<span class='badge badge-unknown'>⚫ 事後のみ</span>",
     "unknown":   "<span class='badge badge-unknown'>─ 不明</span>",
 }
 
@@ -396,10 +420,10 @@ def _to_html(df: pd.DataFrame, period: str) -> str:
             f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
         )
 
-    # 個別レース行（持続→消失→不明の順、各内では最高EV降順）
-    persist_order = {"persisted": 0, "dropped": 1, "unknown": 2}
+    # 個別レース行（持続→消失→事後のみ→不明の順、各内では最高EV降順）
+    persist_order = {"persisted": 0, "dropped": 1, "post_only": 2, "unknown": 3}
     df_sorted = df.copy()
-    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(3)
+    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(4)
     df_sorted = df_sorted.sort_values(
         ["date", "_porder", "max_ev"], ascending=[True, True, False]
     )
