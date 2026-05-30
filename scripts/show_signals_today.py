@@ -143,21 +143,41 @@ def _ensure_signal_log(targets: Iterable[date]) -> None:
 def _ensure_schedule(targets: Iterable[date]) -> dict[str, str]:
     """対象日に schedule が無ければ scrape_schedule を呼んで補完してから読む。
 
-    過去日のシグナル履歴を持続/消失判定するには、その日の race_schedule.csv が
-    必要だが、watch_signal は今日の分しか取得しない。対象日のうち schedule が
-    無い日について scrape_schedule を順次起動する。
+    backfill された日（snapshot_at が全部 23:59 → 当日 live 観測なし）は
+    持続判定が必ず "post_only" になるので schedule 取得不要。
+    実 watch_signal 由来のスナップ（live 観測あり）のある日だけスクレイプする。
     """
     schedule = _load_schedule_map()
     target_list = list(targets)
-    missing = []
+
+    # 各日について snapshot を見て、live 観測（snapshot_at が早い時間帯）があるか判定
+    live_dates = []
     for d in target_list:
+        snap_path = (PROCESSED_DIR / "signal_log"
+                     / f"signal_snapshots_{d.strftime('%Y%m%d')}.csv")
+        if not snap_path.exists():
+            continue
+        try:
+            sdf = pd.read_csv(snap_path, usecols=["snapshot_at"])
+        except Exception:
+            continue
+        if sdf.empty:
+            continue
+        # snapshot_at が 22:00 より前の行があれば「live 観測あり」とみなす
+        # backfill は全部 23:59:00 固定なので、それより早ければ実 watch_signal
+        ts = pd.to_datetime(sdf["snapshot_at"], errors="coerce")
+        if (ts.dt.hour < 22).any():
+            live_dates.append(d)
+
+    missing = []
+    for d in live_dates:
         prefix = d.strftime("%Y%m%d")
         if not any(rid.startswith(prefix) for rid in schedule):
             missing.append(d)
     if not missing:
         return schedule
 
-    print(f"schedule 不足: {len(missing)}日分を scrape します...")
+    print(f"schedule 不足: {len(missing)}日分を scrape します（live 観測あり日のみ）...")
     for d in missing:
         print(f"  → scrape_schedule --date {d}")
         rc = subprocess.call(
