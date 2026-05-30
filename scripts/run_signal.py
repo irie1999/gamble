@@ -260,39 +260,64 @@ def _run_historical_backtest(
     target: date, *, days: int, ev_threshold: float, max_odds: float,
     min_odds: Optional[float], kelly_fraction: float,
     excluded_venues: list[str],
-) -> Optional[tuple[Path, str, str]]:
+    persisted_ev_threshold: float = 1.20,
+) -> Optional[tuple[Path, str, str, Optional[Path]]]:
     """target 当日を含まない過去 days 日のバックテストを実行。
 
-    成功時は (出力ディレクトリ, since, until) を返す。失敗時は None。
-    出力先は data/processed/backtest_history/ で、当日用 bets と分離する。
+    2つのバックテストを実行:
+      1. 通常 (--ev-threshold で指定): 全シグナルを買った場合
+      2. 持続のみ近似 (--persisted-ev-threshold ≥ 1.20): 高EVシグナルのみ買った場合
+         （オッズが 10-20% 動いても EV>1.05 を維持するレベル = 持続しやすい）
+
+    成功時は (出力ディレクトリ, since, until, 持続版出力ディレクトリ) を返す。
+    失敗時は None。持続版が ev_threshold と同じなら持続版は None。
     """
     since = (target - timedelta(days=days)).isoformat()
     until = (target - timedelta(days=1)).isoformat()
     out_dir = PROCESSED_DIR / "backtest_history"
     out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable, "-m", "scripts.backtest",
-        "--features", str(PROCESSED_DIR / "features.parquet"),
-        "--payouts", str(RAW_DIR / "races_payouts.parquet"),
-        "--odds", str(RAW_DIR / "odds_win.csv"),
-        "--strategy", "lane1_kelly",
-        "--since", since,
-        "--until", until,
-        "--kelly-fraction", str(kelly_fraction),
-        "--ev-threshold", str(ev_threshold),
-        "--max-odds", str(max_odds),
-        "--out", str(out_dir),
-    ]
-    if min_odds is not None:
-        cmd += ["--min-odds", str(min_odds)]
-    if excluded_venues:
-        cmd += ["--exclude-venues", *excluded_venues]
-    logger.info("実行: %s", " ".join(cmd))
-    res = subprocess.run(cmd, check=False)
+
+    def _build_cmd(ev: float, out: Path) -> list[str]:
+        cmd = [
+            sys.executable, "-m", "scripts.backtest",
+            "--features", str(PROCESSED_DIR / "features.parquet"),
+            "--payouts", str(RAW_DIR / "races_payouts.parquet"),
+            "--odds", str(RAW_DIR / "odds_win.csv"),
+            "--strategy", "lane1_kelly",
+            "--since", since,
+            "--until", until,
+            "--kelly-fraction", str(kelly_fraction),
+            "--ev-threshold", str(ev),
+            "--max-odds", str(max_odds),
+            "--out", str(out),
+        ]
+        if min_odds is not None:
+            cmd += ["--min-odds", str(min_odds)]
+        if excluded_venues:
+            cmd += ["--exclude-venues", *excluded_venues]
+        return cmd
+
+    # 1. 通常バックテスト
+    cmd_std = _build_cmd(ev_threshold, out_dir)
+    logger.info("実行: %s", " ".join(cmd_std))
+    res = subprocess.run(cmd_std, check=False)
     if res.returncode != 0:
         logger.warning("過去バックテスト失敗 rc=%d (HTMLには載せず続行)", res.returncode)
         return None
-    return out_dir, since, until
+
+    # 2. 持続シグナル近似（EV閾値を上げて再実行）
+    persisted_out: Optional[Path] = None
+    if persisted_ev_threshold > ev_threshold:
+        persisted_out = PROCESSED_DIR / "backtest_history_persisted"
+        persisted_out.mkdir(parents=True, exist_ok=True)
+        cmd_p = _build_cmd(persisted_ev_threshold, persisted_out)
+        logger.info("実行(持続版): %s", " ".join(cmd_p))
+        res_p = subprocess.run(cmd_p, check=False)
+        if res_p.returncode != 0:
+            logger.warning("持続バックテスト失敗 rc=%d (省略して続行)", res_p.returncode)
+            persisted_out = None
+
+    return out_dir, since, until, persisted_out
 
 
 def _append_signal_snapshot(target: date, bets_csv: Path) -> Optional[Path]:
@@ -341,7 +366,7 @@ def _append_signal_snapshot(target: date, bets_csv: Path) -> Optional[Path]:
 
 
 def _make_report(bets_csv: Path, target: date, ev_threshold: float,
-                 history: Optional[tuple[Path, str, str]] = None,
+                 history: Optional[tuple[Path, str, str, Optional[Path]]] = None,
                  signal_log: Optional[Path] = None) -> Path:
     out = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
     cmd = [sys.executable, "-m", "scripts.signal_report",
@@ -352,7 +377,7 @@ def _make_report(bets_csv: Path, target: date, ev_threshold: float,
     if signal_log is not None and signal_log.exists():
         cmd += ["--signal-log", str(signal_log)]
     if history is not None:
-        hist_dir, since, until = history
+        hist_dir, since, until, persisted_dir = history
         summary_file = hist_dir / "summary_lane1_kelly.json"
         equity_file = hist_dir / "equity_lane1_kelly.csv"
         bets_file = hist_dir / "bets_lane1_kelly.csv"
@@ -364,6 +389,11 @@ def _make_report(bets_csv: Path, target: date, ev_threshold: float,
                 cmd += ["--history-equity", str(equity_file)]
             if bets_file.exists():
                 cmd += ["--history-bets", str(bets_file)]
+        # 持続シグナル近似 (高EVのみ買った場合) のサマリも渡す
+        if persisted_dir is not None:
+            p_summary = persisted_dir / "summary_lane1_kelly.json"
+            if p_summary.exists():
+                cmd += ["--persisted-summary", str(p_summary)]
     _run(cmd)
     return out
 
@@ -403,6 +433,9 @@ def main() -> None:
                    help="時間ベース shrinkage の最大係数 (0で無効、推奨0.3)。"
                         "Kelly のステーク計算で「予想確定オッズ」を使い、早めの通知でも保守的に。"
                         "EVフィルタは元 odds で判定するので候補数は変わらない")
+    p.add_argument("--persisted-ev-threshold", type=float, default=1.20,
+                   help="過去バックテストで「持続シグナル」近似に使う EV 閾値（デフォルト 1.20）。"
+                        "通常 EV 閾値より大きいときだけ第2バックテストを実行して比較表示")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -498,9 +531,9 @@ def main() -> None:
         print("  [5/6] HTML結果取得: スキップ")
 
     # 6. 過去バックテスト集計（オプション・通常は手動実行時のみ）
-    history: Optional[tuple[Path, str, str]] = None
+    history: Optional[tuple[Path, str, str, Optional[Path]]] = None
     if not args.no_backtest_summary:
-        print(f"  [6/7] 過去 {args.backtest_days}日のバックテスト集計中...")
+        print(f"  [6/7] 過去 {args.backtest_days}日のバックテスト集計中（通常+持続）...")
         history = _run_historical_backtest(
             target,
             days=args.backtest_days,
@@ -509,6 +542,7 @@ def main() -> None:
             min_odds=args.min_odds,
             kelly_fraction=args.kelly_fraction,
             excluded_venues=args.exclude_venues,
+            persisted_ev_threshold=args.persisted_ev_threshold,
         )
 
     # 6.5. 今日のシグナル履歴に現在の bets を追記（候補から外れたものも追跡できるように）

@@ -436,11 +436,13 @@ def _equity_svg(values: list[float], initial: float) -> str:
 
 def _render_history_section(summary_path: Path, equity_path: Path,
                             since: str, until: str,
-                            actual_since: str = "", actual_until: str = "") -> str:
+                            actual_since: str = "", actual_until: str = "",
+                            persisted_summary_path: Path | None = None) -> str:
     """過去バックテスト集計セクションのHTMLを返す。データ不足なら空文字。
 
     since/until は要求された期間。actual_since/actual_until が指定されており、
     要求より狭ければ「実データ範囲が短い」旨の注釈を出す。
+    persisted_summary_path が渡されたら「全シグナル vs 持続のみ」の比較表を追加。
     """
     if not summary_path.exists():
         return ""
@@ -481,6 +483,45 @@ def _render_history_section(summary_path: Path, equity_path: Path,
                 f'</div>'
             )
 
+    # 「全シグナル vs 持続のみ」の比較セクション
+    comparison_html = ""
+    if persisted_summary_path is not None and persisted_summary_path.exists():
+        try:
+            p_sum = json.loads(persisted_summary_path.read_text(encoding="utf-8"))
+        except Exception:
+            p_sum = None
+        if p_sum and int(p_sum.get("n_bets", 0) or 0) > 0:
+            pn = int(p_sum.get("n_bets", 0))
+            pstake = int(p_sum.get("stake_total", 0))
+            ppnl = int(p_sum.get("pnl", 0))
+            proi = float(p_sum.get("roi", 0))
+            phit = float(p_sum.get("hit_rate", 0))
+            pdd = float(p_sum.get("max_drawdown", 0))
+            ppnl_cls = "pos" if ppnl > 0 else ("neg" if ppnl < 0 else "")
+            psign = "+" if ppnl > 0 else ""
+            keep_rate = (pn / n_bets * 100) if n_bets else 0
+            comparison_html = (
+                '<div class="section-title" style="margin-top:24px">▶ 全シグナル vs 持続シグナルのみ（高EV近似）</div>'
+                '<table style="margin-bottom:16px"><thead><tr>'
+                '<th>戦略</th><th>件数</th><th>合計ステーク</th><th>PnL</th>'
+                '<th>ROI</th><th>勝率</th><th>最大DD</th>'
+                '</tr></thead><tbody>'
+                '<tr>'
+                '<td>全シグナル<br><span style="color:var(--text-dim);font-size:11px">EV>1.05 全部買う</span></td>'
+                f'<td>{n_bets:,}</td><td>¥{int(stake):,}</td>'
+                f'<td class="{pnl_cls}">{sign}¥{int(pnl):,}</td>'
+                f'<td class="{pnl_cls}">{sign}{roi*100:.1f}%</td>'
+                f'<td>{hit*100:.1f}%</td><td class="neg">{max_dd*100:.1f}%</td>'
+                '</tr><tr>'
+                '<td>持続シグナルのみ<br><span style="color:var(--text-dim);font-size:11px">高EVのみ→「持続」近似</span></td>'
+                f'<td>{pn:,} <span style="color:var(--text-dim);font-size:11px">({keep_rate:.0f}%)</span></td>'
+                f'<td>¥{pstake:,}</td>'
+                f'<td class="{ppnl_cls}">{psign}¥{ppnl:,}</td>'
+                f'<td class="{ppnl_cls}">{psign}{proi*100:.1f}%</td>'
+                f'<td>{phit*100:.1f}%</td><td class="neg">{pdd*100:.1f}%</td>'
+                '</tr></tbody></table>'
+            )
+
     return (
         '<div class="section-title">▼ 過去バックテスト</div>'
         '<div class="history-card">'
@@ -498,6 +539,7 @@ def _render_history_section(summary_path: Path, equity_path: Path,
         f'<div class="card"><div class="label">最終バンクロール</div><div class="value">¥{int(ending):,}</div></div>'
         '</div>'
         + (f'<div class="equity-wrap">{svg}</div>' if svg else "")
+        + comparison_html
         + '</div>'
     )
 
@@ -807,6 +849,9 @@ def main() -> None:
     p.add_argument("--signal-log", default=None,
                    help="本日のシグナル履歴 snapshot CSV のパス。"
                         "watch_signal の各 iteration で追記されたものを集計")
+    p.add_argument("--persisted-summary", default=None,
+                   help="持続シグナル(高EV)のみで買った場合のバックテスト summary JSON。"
+                        "「全シグナル vs 持続のみ」の比較表示に使う")
     args = p.parse_args()
 
     bets = pd.read_csv(args.bets)
@@ -857,6 +902,8 @@ def main() -> None:
             args.history_until,
             actual_since=actual_since,
             actual_until=actual_until,
+            persisted_summary_path=(Path(args.persisted_summary)
+                                    if args.persisted_summary else None),
         )
         if args.history_bets:
             history_section += _render_history_bets_section(Path(args.history_bets))
