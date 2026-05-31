@@ -242,12 +242,12 @@ def run_backtest(
             logger.info("min_odds=%s 適用後 %d候補（%d→）", config.min_odds, len(eligible), before)
         # ライブ運用フィルタ: 締切過ぎたレース（=もう投票できない）を除外。
         # watch_signal が午後起動 → 朝のレースを再評価 → 候補化、を防ぐ。
-        if config.skip_post_deadline_races and config.schedule_map:
+        if config.skip_post_deadline_races and config.schedule_map and not eligible.empty:
             before = len(eligible)
             now_dt = datetime.now()
             still_open = eligible["race_id"].astype(str).apply(
                 lambda rid: _race_still_open(rid, config.schedule_map, now_dt)
-            )
+            ).astype(bool)
             eligible = eligible[still_open]
             logger.info("skip_post_deadline 適用後 %d候補（%d→ 締切過ぎ %d件除外）",
                         len(eligible), before, before - len(eligible))
