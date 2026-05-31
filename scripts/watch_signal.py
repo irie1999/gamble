@@ -316,6 +316,49 @@ def _has_near_deadline_races(schedule: dict[str, str], window_min: int,
     return False
 
 
+def _min_minutes_to_deadline(schedule: dict[str, str],
+                             now: datetime | None = None) -> float | None:
+    """schedule から「最も近い未来の締切」までの分数を返す。
+
+    全部過去 or schedule 空なら None。クイック polling の間隔を動的に
+    調整する用途。
+    """
+    if not schedule:
+        return None
+    cur_now = now if now is not None else datetime.now()
+    today = cur_now.date()
+    best: float | None = None
+    for rid, dl_str in schedule.items():
+        if not dl_str or ":" not in dl_str:
+            continue
+        try:
+            hh, mm = dl_str.split(":")[:2]
+            deadline = datetime.combine(today, _time(int(hh), int(mm)))
+        except (ValueError, AttributeError):
+            continue
+        delta_min = (deadline - cur_now).total_seconds() / 60.0
+        if delta_min <= 0:
+            continue
+        if best is None or delta_min < best:
+            best = delta_min
+    return best
+
+
+def _adaptive_quick_interval(schedule: dict[str, str], fast_interval: int,
+                             critical_interval: int,
+                             critical_window_min: int,
+                             now: datetime | None = None) -> int:
+    """締切までの残り時間に応じてクイック間隔を切り替える。
+
+    残り <= critical_window_min: critical_interval (1分等)
+    それ以外:                     fast_interval (3分等)
+    """
+    nearest = _min_minutes_to_deadline(schedule, now)
+    if nearest is not None and nearest <= critical_window_min:
+        return critical_interval
+    return fast_interval
+
+
 def _open_browser(target: date) -> None:
     html = PROCESSED_DIR / f"signals_{target.strftime('%Y%m%d')}.html"
     if html.exists():
@@ -416,6 +459,12 @@ def main() -> None:
                         "通常 --interval (10分) との二重ループで動く。features 再生成はスキップ")
     p.add_argument("--fast-window-min", type=int, default=30,
                    help="締切までこの分数以内のレースが存在する間だけクイック polling を発火（デフォルト30分）")
+    p.add_argument("--critical-interval", type=int, default=1,
+                   help="締切直前のレースがあるときの「超クイック iteration」の分数（デフォルト1分）。"
+                        "fast-interval より細かく刻む。直前にシグナルが出ても投票時間を確保したい用途")
+    p.add_argument("--critical-window-min", type=int, default=8,
+                   help="締切までこの分数以内のレースが存在する間は critical-interval に切替（デフォルト8分）。"
+                        "発火タイミング次第で 1〜2分のズレは出るが、最低でも 6〜7分の通知猶予を確保する狙い")
     p.add_argument("--no-fast-polling", action="store_true",
                    help="クイック polling を無効化（通常 --interval のみで動作）")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -575,7 +624,14 @@ def main() -> None:
             next_full = last_full_at + timedelta(minutes=args.interval)
             next_event_at, next_event_kind = next_full, "full"
             if fast_enabled:
-                next_quick = last_quick_at + timedelta(minutes=args.fast_interval)
+                # 締切直前のレースがあるなら critical_interval (1分) に切替、
+                # それ以外なら fast_interval (3分) で polling。
+                eff_interval = _adaptive_quick_interval(
+                    schedule_peek, args.fast_interval,
+                    args.critical_interval, args.critical_window_min,
+                    now=now_dt,
+                )
+                next_quick = last_quick_at + timedelta(minutes=eff_interval)
                 if next_quick < next_event_at:
                     next_event_at, next_event_kind = next_quick, "quick"
 
