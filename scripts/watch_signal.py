@@ -55,6 +55,7 @@ from src.notify.push import push_all
 from src.utils.config import MODELS_DIR, PROCESSED_DIR, RAW_DIR
 
 BETS_CSV = MODELS_DIR / "backtest" / "bets_lane1_kelly.csv"
+WATCHLIST_CSV = MODELS_DIR / "backtest" / "watchlist_lane1_kelly.csv"
 SCHEDULE_CSV = RAW_DIR / "race_schedule.csv"
 
 
@@ -103,6 +104,34 @@ def _hydrate_env_from_registry() -> list[str]:
         except OSError:
             continue
     return hydrated
+
+
+def _current_watchlist() -> tuple[set[str], dict[str, dict]]:
+    """watchlist CSV (準シグナル) から (race_id 集合, 詳細 dict) を返す。
+
+    詳細 dict は bets と同じスキーマだが stake は計算されていない（候補外なので0）。
+    """
+    if not WATCHLIST_CSV.exists():
+        return set(), {}
+    try:
+        df = pd.read_csv(WATCHLIST_CSV)
+    except Exception:
+        return set(), {}
+    if df.empty:
+        return set(), {}
+    details: dict[str, dict] = {}
+    for _, r in df.iterrows():
+        rid = str(r["race_id"])
+        p_blend = r.get("blended_win_prob")
+        if p_blend is None or pd.isna(p_blend):
+            p_blend = r.get("pred_win_prob", 0)
+        details[rid] = {
+            "odds": float(r.get("odds_win", 0) or 0),
+            "ev": float(r.get("ev", 0) or 0),
+            "stake": 0,
+            "p_blend": float(p_blend or 0),
+        }
+    return set(details.keys()), details
 
 
 def _current_bets() -> tuple[set[str], dict[str, dict]]:
@@ -465,6 +494,10 @@ def main() -> None:
     p.add_argument("--critical-window-min", type=int, default=8,
                    help="締切までこの分数以内のレースが存在する間は critical-interval に切替（デフォルト8分）。"
                         "発火タイミング次第で 1〜2分のズレは出るが、最低でも 6〜7分の通知猶予を確保する狙い")
+    p.add_argument("--pre-alert-window-min", type=int, default=15,
+                   help="watchlist (EV 0.95〜1.05 = 準シグナル) のレースで締切がこの分数以内なら"
+                        "事前予告通知を1回だけ送る（デフォルト15分）。0で無効。"
+                        "実際にシグナル化しなくても通知される false-positive あり")
     p.add_argument("--no-fast-polling", action="store_true",
                    help="クイック polling を無効化（通常 --interval のみで動作）")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -502,6 +535,7 @@ def main() -> None:
     state = {
         "prev_ids": set(),
         "reminded_ids": set(),
+        "pre_alerted_ids": set(),
         "first_run": True,
         "iteration": 0,
         "quick_iteration": 0,
@@ -589,6 +623,24 @@ def main() -> None:
                     body = _format_push_body(soon, details, schedule=schedule)
                     push_all(title, body)
                 state["reminded_ids"] |= soon
+
+        # 事前予告 (pre-alert): watchlist のレースで締切が pre_alert_window_min 以内のものを
+        # 1回だけ通知。シグナル化前に「もうすぐシグナルになるかも」を知らせる。
+        if args.pre_alert_window_min > 0:
+            wl_ids, wl_details = _current_watchlist()
+            # bets に出てる行 (= 既にシグナル化) は除外。watchlist は near-threshold だけ通知。
+            wl_ids = wl_ids - cur_ids
+            soon_wl = _races_near_deadline(
+                wl_ids, schedule, state["pre_alerted_ids"],
+                minutes_threshold=args.pre_alert_window_min,
+            )
+            if soon_wl:
+                title = f"👀 まもなくシグナル化？ {len(soon_wl)}件 (EV準閾値)"
+                print(f"[{now}] {title}: {', '.join(sorted(soon_wl))}")
+                if not args.no_push:
+                    body = _format_push_body(soon_wl, wl_details, schedule=schedule)
+                    push_all(title, body)
+                state["pre_alerted_ids"] |= soon_wl
 
         state["prev_ids"] = cur_ids
         state["first_run"] = False

@@ -93,6 +93,14 @@ def main() -> None:
              "ライブ運用時に「事後のみ」誤検知シグナルを防ぐ。"
              "schedule_map が必要。過去日 backtest には影響しない。",
     )
+    parser.add_argument(
+        "--watchlist-ev-threshold",
+        type=float,
+        default=None,
+        help="準シグナル（事前予告）の EV 下限。--ev-threshold より低い値を指定すると、"
+             "EV がこの値〜閾値の間にいるレースを watchlist_<strategy>.csv に出力。"
+             "ライブ運用で「もうすぐ閾値超え」のレースを早期通知する用途。",
+    )
     parser.add_argument("--out", default=str(MODELS_DIR / "backtest"))
     args = parser.parse_args()
 
@@ -141,12 +149,15 @@ def main() -> None:
         odds_shrinkage_time_constant_min=args.odds_shrinkage_time_const_min,
         schedule_map=schedule_map,
         skip_post_deadline_races=args.skip_post_deadline,
+        watchlist_ev_threshold=args.watchlist_ev_threshold,
     )
     result = run_backtest(pred, payouts, odds_df=odds, config=cfg)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     result.bets.to_csv(out_dir / f"bets_{args.strategy}.csv", index=False)
+    if args.watchlist_ev_threshold is not None:
+        result.watchlist.to_csv(out_dir / f"watchlist_{args.strategy}.csv", index=False)
     if not result.equity_curve.empty:
         result.equity_curve.to_csv(out_dir / f"equity_{args.strategy}.csv")
     (out_dir / f"summary_{args.strategy}.json").write_text(

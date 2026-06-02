@@ -140,6 +140,11 @@ class BacktestConfig:
     # True にすると、watch_signal が午後に起動して朝のレースを再評価 → 候補化、
     # という「事後のみ」のシグナル誤検知を防げる。run_signal は当日 backtest 時に True。
     skip_post_deadline_races: bool = False
+    # 事前予告用の閾値。ev_threshold より低い値を入れると、EV がこの値〜
+    # ev_threshold の間にいるレースを watchlist (準シグナル) として別出力する。
+    # 「もうすぐシグナル化しそうなレース」を締切直前まで掴めるため、ライブ運用で
+    # 通知の余裕時間を稼げる。None で無効。
+    watchlist_ev_threshold: Optional[float] = None
 
 
 @dataclass
@@ -147,6 +152,7 @@ class BacktestResult:
     bets: pd.DataFrame
     summary: dict
     equity_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    watchlist: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _winner_lane_from_payouts(payouts_df: pd.DataFrame) -> pd.DataFrame:
@@ -200,6 +206,7 @@ def run_backtest(
 
     戻り値: bets（個別ベット内訳）、summary（指標）、equity_curve。
     """
+    watchlist_df = pd.DataFrame()
     # --- 確率の準備 ---
     pred = _build_pred_with_odds(pred_df, odds_df)
 
@@ -253,6 +260,18 @@ def run_backtest(
                         len(eligible), before, before - len(eligible))
         eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
         candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
+
+        # watchlist: EV が watchlist_threshold〜ev_threshold の間 = 「準シグナル」
+        # ライブ運用で締切直前に EV が閾値を超えそうなレースの早期通知用。
+        watchlist_df = pd.DataFrame()
+        if config.watchlist_ev_threshold is not None and \
+                config.watchlist_ev_threshold < config.ev_threshold:
+            wl = eligible[
+                (eligible["ev"] >= config.watchlist_ev_threshold) &
+                (eligible["ev"] <= config.ev_threshold)
+            ].copy()
+            if not wl.empty:
+                watchlist_df = wl.reset_index(drop=True)
         if config.strategy == "lane1_kelly":
             stakes = []
             eff_odds_list = []
@@ -321,6 +340,7 @@ def run_backtest(
     if bets.empty:
         return BacktestResult(
             bets=bets,
+            watchlist=watchlist_df,
             summary={
                 "strategy": config.strategy,
                 "n_bets": 0,
@@ -381,4 +401,7 @@ def run_backtest(
         "ending_bankroll": float(equity.iloc[-1]) if len(equity) else config.initial_bankroll,
     }
 
-    return BacktestResult(bets=bets, summary=summary, equity_curve=equity_curve)
+    return BacktestResult(
+        bets=bets, summary=summary, equity_curve=equity_curve,
+        watchlist=watchlist_df,
+    )

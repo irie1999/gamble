@@ -225,7 +225,8 @@ def _rebuild_features() -> None:
 def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
                   min_odds: Optional[float], kelly_fraction: float,
                   excluded_venues: list[str],
-                  odds_shrinkage_max: float = 0.0) -> Path:
+                  odds_shrinkage_max: float = 0.0,
+                  watchlist_ev_threshold: Optional[float] = None) -> Path:
     """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。
 
     target が当日（今日）の場合は --skip-post-deadline を自動付与し、
@@ -250,6 +251,8 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
         cmd += ["--exclude-venues", *excluded_venues]
     if odds_shrinkage_max > 0:
         cmd += ["--odds-shrinkage-max", str(odds_shrinkage_max)]
+    if watchlist_ev_threshold is not None:
+        cmd += ["--watchlist-ev-threshold", str(watchlist_ev_threshold)]
     if target == date.today():
         cmd += ["--skip-post-deadline"]
     _run(cmd)
@@ -412,6 +415,10 @@ def main() -> None:
     p.add_argument("--skip-features", action="store_true",
                    help="features.parquet の再生成をスキップ（既に最新の場合）")
     p.add_argument("--ev-threshold", type=float, default=1.05)
+    p.add_argument("--watchlist-ev-threshold", type=float, default=0.95,
+                   help="準シグナル(事前予告)の EV 下限。--ev-threshold より低い値。"
+                        "EV がこの値〜閾値の間のレースを watchlist_lane1_kelly.csv に出力。"
+                        "watch_signal の pre-alert に使う。0で無効")
     p.add_argument("--min-odds", type=float, default=None,
                    help="1号艇オッズ下限。指定すると本命過ぎを除外。デフォルトは未設定")
     p.add_argument("--max-odds", type=float, default=10.0)
@@ -499,6 +506,8 @@ def main() -> None:
         kelly_fraction=args.kelly_fraction,
         excluded_venues=args.exclude_venues,
         odds_shrinkage_max=args.odds_shrinkage_max,
+        watchlist_ev_threshold=(args.watchlist_ev_threshold
+                                if args.watchlist_ev_threshold > 0 else None),
     )
 
     # 5. 結果取得 + 締切時刻取得 → backtest 再実行
