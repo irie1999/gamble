@@ -494,10 +494,10 @@ def main() -> None:
     p.add_argument("--critical-window-min", type=int, default=8,
                    help="締切までこの分数以内のレースが存在する間は critical-interval に切替（デフォルト8分）。"
                         "発火タイミング次第で 1〜2分のズレは出るが、最低でも 6〜7分の通知猶予を確保する狙い")
-    p.add_argument("--pre-alert-window-min", type=int, default=15,
+    p.add_argument("--pre-alert-window-min", type=int, default=0,
                    help="watchlist (EV 0.95〜1.05 = 準シグナル) のレースで締切がこの分数以内なら"
-                        "事前予告通知を1回だけ送る（デフォルト15分）。0で無効。"
-                        "実際にシグナル化しなくても通知される false-positive あり")
+                        "事前予告通知を1回だけ送る。0で無効（デフォルト）。"
+                        "デフォルト無効の理由: backtest と整合する運用は「締切10分前リマインダのみ」")
     p.add_argument("--no-fast-polling", action="store_true",
                    help="クイック polling を無効化（通常 --interval のみで動作）")
     p.add_argument("--verbose", "-v", action="store_true",
@@ -571,32 +571,10 @@ def main() -> None:
         removed = state["prev_ids"] - cur_ids
 
         if state["first_run"]:
-            print(f"[{now}] 初回: 候補 {len(cur_ids)}件")
-            if cur_ids and not args.no_open_browser:
-                _open_browser(target)
-            if cur_ids and not args.no_push:
-                body = _format_push_body(cur_ids, details, schedule=schedule)
-                push_all(f"競艇シグナル {len(cur_ids)}件 (初回)", body)
+            print(f"[{now}] 初回: 候補 {len(cur_ids)}件 (※検知通知は無効 - 締切10分前リマインダのみ送信)")
         elif new_ids:
             msg = f"新規 {len(new_ids)}件 / 計 {len(cur_ids)}件: {', '.join(sorted(new_ids))}"
-            print(f"[{now}] 🔔 {msg}")
-            if not args.no_beep:
-                _beep()
-            if not args.no_toast:
-                short = f"{len(new_ids)}件: " + ", ".join(
-                    rid.rsplit("-", 1)[0].split("-", 1)[1] + "-" + rid.rsplit("-", 1)[1]
-                    for rid in sorted(new_ids)[:3]
-                )
-                _show_toast(f"競艇シグナル新規 {len(new_ids)}件", short)
-            if not args.no_open_browser:
-                _open_browser(target)
-            if not args.no_push:
-                body = _format_push_body(cur_ids, details,
-                                         new_ids=new_ids, schedule=schedule)
-                push_all(
-                    f"🔍 シグナル発見 新規{len(new_ids)}件 ※10分前リマインダまで観察",
-                    body,
-                )
+            print(f"[{now}] 🔔 {msg} (※通知は10分前リマインダまで送らない)")
         elif removed:
             print(f"[{now}] 候補 {len(cur_ids)}件（{len(removed)}件が候補外に）")
         else:
