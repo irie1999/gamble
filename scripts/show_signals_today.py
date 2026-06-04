@@ -140,14 +140,19 @@ def _ensure_signal_log(targets: Iterable[date]) -> None:
             print(f"✗ (rc={rc})")
 
 
-def _ensure_schedule(targets: Iterable[date]) -> dict[str, str]:
+def _ensure_schedule(targets: Iterable[date], *,
+                     skip_scrape: bool = False) -> dict[str, str]:
     """対象日に schedule が無ければ scrape_schedule を呼んで補完してから読む。
 
     backfill された日（snapshot_at が全部 23:59 → 当日 live 観測なし）は
     持続判定が必ず "post_only" になるので schedule 取得不要。
     実 watch_signal 由来のスナップ（live 観測あり）のある日だけスクレイプする。
+
+    skip_scrape=True なら不足してもスクレイプしない（持続判定が "unknown" になる）。
     """
     schedule = _load_schedule_map()
+    if skip_scrape:
+        return schedule
     target_list = list(targets)
 
     # 各日について snapshot を見て、live 観測（snapshot_at が早い時間帯）があるか判定
@@ -645,6 +650,9 @@ def main() -> None:
                    help="HTML を生成せずターミナルだけに表示")
     p.add_argument("--no-backfill", action="store_true",
                    help="signal_log が無い過去日の自動 backfill を無効化")
+    p.add_argument("--no-schedule-scrape", action="store_true",
+                   help="不足しているスケジュールの自動スクレイプを無効化。"
+                        "長期間の集計を高速に出したい時に使う（持続判定の精度は落ちる）")
     args = p.parse_args()
 
     if args.date:
@@ -663,7 +671,7 @@ def main() -> None:
     if not args.no_backfill:
         _ensure_signal_log(targets)
     winners = _load_winners()
-    schedule = _ensure_schedule(targets)
+    schedule = _ensure_schedule(targets, skip_scrape=args.no_schedule_scrape)
     df = _collect(targets, winners, schedule=schedule)
     if df.empty:
         print(f"対象期間にシグナルログなし: {targets[0]} 〜 {targets[-1]}")
