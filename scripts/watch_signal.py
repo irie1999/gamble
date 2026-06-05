@@ -653,7 +653,8 @@ def main() -> None:
 
             next_full = last_full_at + timedelta(minutes=args.interval)
             next_event_at, next_event_kind = next_full, "full"
-            if fast_enabled:
+            # 初回は features 生成のため必ず full にする（quick だと features 未更新でモデル推論が失敗）
+            if fast_enabled and state["iteration"] > 0:
                 # 締切直前のレースがあるなら critical_interval (1分) に切替、
                 # それ以外なら fast_interval (3分) で polling。
                 eff_interval = _adaptive_quick_interval(
