@@ -480,9 +480,11 @@ def main() -> None:
     p.add_argument("--rebuild-features-every", type=int, default=6,
                    help="N回に1回だけ features を再生成（毎回再生成すると重いため）。"
                         "デフォルト6=10分間隔なら1時間に1回")
-    p.add_argument("--deadline-reminder-min", type=int, default=10,
-                   help="締切のN分前に最新オッズで再通知する（既に通知済の候補も対象）。"
-                        "0で無効。実際の発火は iteration タイミング次第で N+α 分前になることもある")
+    p.add_argument("--deadline-reminder-min", type=int, default=5,
+                   help="締切のN分前に最新オッズで通知する（デフォルト5分）。"
+                        "0で無効。実際の発火は iteration タイミング次第で N〜N+2 分前になる。"
+                        "5分前推奨理由: 10分前と5分前でオッズが大幅変動するレースがあるため、"
+                        "5分前の方がオッズが安定し backtest 条件に近い")
     p.add_argument("--fast-interval", type=int, default=3,
                    help="締切が近いレースがあるときの「クイック iteration」の分数（デフォルト3分）。"
                         "通常 --interval (10分) との二重ループで動く。features 再生成はスキップ")
@@ -593,7 +595,7 @@ def main() -> None:
                 minutes_threshold=effective_threshold,
             )
             if soon:
-                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}分前 {len(soon)}件"
+                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}〜{effective_threshold}分前 {len(soon)}件"
                 print(f"[{now}] {title}: {', '.join(sorted(soon))}")
                 if not args.no_beep:
                     _beep()
