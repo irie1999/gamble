@@ -212,15 +212,20 @@ def _classify_recommendation(ev: float, minutes_to_deadline: float | None) -> st
 def _races_near_deadline(ids: set[str], schedule: dict[str, str],
                          already_reminded: set[str],
                          minutes_threshold: int,
+                         minimum_window_min: float = 0,
                          now: datetime | None = None) -> set[str]:
     """締切まで minutes_threshold 分以内のレースを返す。
 
     既にリマインド済み・締切が過ぎたもの・schedule に締切時刻が無いものは除外。
+    minimum_window_min > 0 を指定すると「締切まで残り N分未満」のレースも
+    除外する（投票時間が確保できない直前シグナルを通知させない用途）。
     """
     if now is None:
         now = datetime.now()
     today = now.date()
     soon: set[str] = set()
+    threshold = timedelta(minutes=minutes_threshold)
+    min_window = timedelta(minutes=minimum_window_min)
     for rid in ids:
         if rid in already_reminded:
             continue
@@ -233,7 +238,7 @@ def _races_near_deadline(ids: set[str], schedule: dict[str, str],
         except (ValueError, AttributeError):
             continue
         delta = deadline - now
-        if timedelta(0) < delta <= timedelta(minutes=minutes_threshold):
+        if min_window < delta <= threshold:
             soon.add(rid)
     return soon
 
@@ -485,6 +490,10 @@ def main() -> None:
                         "0で無効。実際の発火は iteration タイミング次第で N〜N+2 分前になる。"
                         "5分前推奨理由: 10分前と5分前でオッズが大幅変動するレースがあるため、"
                         "5分前の方がオッズが安定し backtest 条件に近い")
+    p.add_argument("--min-bet-window-min", type=int, default=3,
+                   help="締切までこの分数未満のレースは通知しない（デフォルト3分）。"
+                        "直前にシグナル化したレースは投票時間が確保できないため。"
+                        "0で無効（締切直前でも通知する）")
     p.add_argument("--fast-interval", type=int, default=3,
                    help="締切が近いレースがあるときの「クイック iteration」の分数（デフォルト3分）。"
                         "通常 --interval (10分) との二重ループで動く。features 再生成はスキップ")
@@ -583,16 +592,18 @@ def main() -> None:
             print(f"[{now}] 候補 {len(cur_ids)}件（変化なし）")
 
         # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知。
-        # バッファ無し → polling のタイミング次第で N〜N-1 分前に発火（最短 N-1分）。
-        # 「N分前に1回だけ」を厳格に近づける挙動。
+        # min-bet-window-min 未満のレースは「投票時間が確保できない」ので通知しない。
+        # 例: deadline_reminder_min=5 / min_bet_window_min=3 → 締切 3〜5分前に発火。
         if args.deadline_reminder_min > 0:
             effective_threshold = args.deadline_reminder_min
             soon = _races_near_deadline(
                 cur_ids, schedule, state["reminded_ids"],
                 minutes_threshold=effective_threshold,
+                minimum_window_min=args.min_bet_window_min,
             )
             if soon:
-                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}分前 {len(soon)}件"
+                title = (f"✅ 投票タイミング！締切{args.min_bet_window_min}〜"
+                         f"{args.deadline_reminder_min}分前 {len(soon)}件")
                 print(f"[{now}] {title}: {', '.join(sorted(soon))}")
                 if not args.no_beep:
                     _beep()
