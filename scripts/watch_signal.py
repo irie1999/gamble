@@ -582,20 +582,17 @@ def main() -> None:
         else:
             print(f"[{now}] 候補 {len(cur_ids)}件（変化なし）")
 
-        # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知
+        # 締切リマインド: 候補のうち締切 N分以内のものを1回だけ通知。
+        # バッファ無し → polling のタイミング次第で N〜N-1 分前に発火（最短 N-1分）。
+        # 「N分前に1回だけ」を厳格に近づける挙動。
         if args.deadline_reminder_min > 0:
-            # クイック polling 有効時は隙間が小さいのでバッファ最小（2分）。
-            # クイック無効時は半周期ぶん足す（従来動作）
-            if args.no_fast_polling or args.fast_interval <= 0:
-                effective_threshold = args.deadline_reminder_min + max(args.interval // 2, 2)
-            else:
-                effective_threshold = args.deadline_reminder_min + 2
+            effective_threshold = args.deadline_reminder_min
             soon = _races_near_deadline(
                 cur_ids, schedule, state["reminded_ids"],
                 minutes_threshold=effective_threshold,
             )
             if soon:
-                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}〜{effective_threshold}分前 {len(soon)}件"
+                title = f"✅ 投票タイミング！締切{args.deadline_reminder_min}分前 {len(soon)}件"
                 print(f"[{now}] {title}: {', '.join(sorted(soon))}")
                 if not args.no_beep:
                     _beep()
