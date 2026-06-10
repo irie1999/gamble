@@ -148,6 +148,8 @@ def _ensure_schedule(targets: Iterable[date], *,
     持続判定が必ず "post_only" になるので schedule 取得不要。
     実 watch_signal 由来のスナップ（live 観測あり）のある日だけスクレイプする。
 
+    一度試した日は <RAW_DIR>/.schedule_scrape_attempted.txt に記録し、
+    次回以降は失敗していてもスキップ（再 scrape を防止）。
     skip_scrape=True なら不足してもスクレイプしない（持続判定が "unknown" になる）。
     """
     schedule = _load_schedule_map()
@@ -174,15 +176,30 @@ def _ensure_schedule(targets: Iterable[date], *,
         if (ts.dt.hour < 22).any():
             live_dates.append(d)
 
+    # 過去に scrape を試した日（成功/失敗問わず）を読み込み → 二度試さない
+    attempted_path = RAW_DIR / ".schedule_scrape_attempted.txt"
+    attempted: set[str] = set()
+    if attempted_path.exists():
+        try:
+            attempted = {ln.strip() for ln in
+                         attempted_path.read_text(encoding="utf-8").splitlines()
+                         if ln.strip()}
+        except Exception:
+            pass
+
     missing = []
     for d in live_dates:
         prefix = d.strftime("%Y%m%d")
-        if not any(rid.startswith(prefix) for rid in schedule):
-            missing.append(d)
+        if any(rid.startswith(prefix) for rid in schedule):
+            continue
+        if prefix in attempted:
+            continue
+        missing.append(d)
     if not missing:
         return schedule
 
     print(f"schedule 不足: {len(missing)}日分を scrape します（live 観測あり日のみ）...")
+    new_attempts: list[str] = []
     for d in missing:
         print(f"  → scrape_schedule --date {d}")
         rc = subprocess.call(
@@ -192,6 +209,15 @@ def _ensure_schedule(targets: Iterable[date], *,
         )
         if rc != 0:
             logger.warning("scrape_schedule 失敗 (rc=%d) date=%s", rc, d)
+        # 成功/失敗どちらでも attempted に記録 → 次回スキップ
+        new_attempts.append(d.strftime("%Y%m%d"))
+
+    if new_attempts:
+        attempted_path.parent.mkdir(parents=True, exist_ok=True)
+        with attempted_path.open("a", encoding="utf-8") as f:
+            for s in new_attempts:
+                f.write(s + "\n")
+
     return _load_schedule_map()
 
 
