@@ -246,18 +246,26 @@ def _classify_persisted(deadline: datetime | None,
 
 
 def _enrich_row(rid: str, latest_stake: int, winners: dict) -> dict:
-    """payouts と突合して finished/hit/pnl を返す。"""
+    """payouts と突合して finished/hit/pnl/settled_odds を返す。
+
+    settled_odds: 1号艇が勝った時のみ payout/100 で確定オッズが分かる。
+    負けレースは settled_odds=NaN（1号艇の確定オッズが payouts に無いため）。
+    """
     result = winners.get(rid)
     if not result or pd.isna(result["winner_lane"]):
-        return {"finished": False, "hit": False, "pnl": 0, "winner_lane": None}
+        return {"finished": False, "hit": False, "pnl": 0,
+                "winner_lane": None, "settled_odds": float("nan")}
     winner = int(result["winner_lane"])
     hit = (winner == 1)
     if hit:
         payout = float(result["payout_yen"])
         pnl = int(latest_stake * payout / 100.0 - latest_stake)
+        settled_odds = payout / 100.0
     else:
         pnl = -latest_stake
-    return {"finished": True, "hit": hit, "pnl": pnl, "winner_lane": winner}
+        settled_odds = float("nan")
+    return {"finished": True, "hit": hit, "pnl": pnl,
+            "winner_lane": winner, "settled_odds": settled_odds}
 
 
 def _collect(targets: Iterable[date], winners: dict,
@@ -467,7 +475,7 @@ tbody tr:hover td {{ background: var(--bg-hover); }}
 
 <div class="section-title">▼ 個別レース</div>
 <table><thead><tr>
-<th>日付</th><th>場</th><th>R</th><th>観測時間</th><th>持続</th><th>最高EV</th><th>オッズ</th><th>ステーク</th><th>結果</th><th>PnL</th>
+<th>日付</th><th>場</th><th>R</th><th>観測時間</th><th>持続</th><th>最高EV</th><th>記録オッズ</th><th>確定オッズ</th><th>ステーク</th><th>結果</th><th>PnL</th>
 </tr></thead><tbody>{detail_rows}</tbody></table>
 
 </body></html>
@@ -606,6 +614,19 @@ def _to_html(df: pd.DataFrame, period: str) -> str:
         seen = f"{r['first_seen'].strftime('%H:%M')}〜{r['last_seen'].strftime('%H:%M')}"
         stake = int(r["latest_stake"]) if pd.notna(r["latest_stake"]) else 0
         odds = float(r["latest_odds"]) if pd.notna(r["latest_odds"]) else 0.0
+        settled = float(r.get("settled_odds", float("nan")))
+        # 確定オッズ表示: 的中時は確定値、外れは不明扱い
+        if pd.notna(settled) and settled > 0:
+            ratio = settled / odds if odds > 0 else 1.0
+            # 30%以上下落 = 大幅shrinkage → 色付き警告
+            if ratio < 0.7:
+                settled_html = f"<span class='neg'>{settled:.2f}</span>"
+            elif ratio > 1.3:
+                settled_html = f"<span class='pos'>{settled:.2f}</span>"
+            else:
+                settled_html = f"{settled:.2f}"
+        else:
+            settled_html = "<span style='color:var(--text-dim)'>-</span>"
         persist_html = _PERSIST_BADGE.get(str(r.get("persisted", "unknown")),
                                           _PERSIST_BADGE["unknown"])
         if r["finished"]:
@@ -628,6 +649,7 @@ def _to_html(df: pd.DataFrame, period: str) -> str:
             f"<td>{persist_html}</td>"
             f"<td>{r['max_ev']:.3f}</td>"
             f"<td>{odds:.2f}</td>"
+            f"<td>{settled_html}</td>"
             f"<td>¥{stake:,}</td>"
             f"<td>{status}</td>"
             f"<td>{pnl_html}</td>"
