@@ -414,7 +414,8 @@ def _run_signal_once(variant: str, extra_args: list[str], *,
     """
     module = "scripts.run_signal_v2" if variant == "v2" else "scripts.run_signal"
     cmd = [sys.executable, "-m", module,
-           "--autofill", "--no-open", "--no-backtest-summary"]
+           "--autofill", "--no-open", "--no-backtest-summary",
+           "--live-mode"]  # watch_signal は常にライブ。odds_win.csv を汚染しない
     if skip_features:
         cmd.append("--skip-features")
     cmd += extra_args

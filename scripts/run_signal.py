@@ -40,6 +40,10 @@ from typing import Optional
 import pandas as pd
 
 from src.utils.config import MODELS_DIR, PROCESSED_DIR, RAW_DIR
+
+# オッズデータの分離: backtest用 (確定値) と watch_signal用 (ライブ値) を別ファイルに
+BACKTEST_ODDS_PATH = RAW_DIR / "odds_win.csv"          # 過去日: 確定オッズ
+LIVE_ODDS_PATH = RAW_DIR / "odds_win_live.csv"         # 当日: watch_signal スクレイプ値
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -88,23 +92,64 @@ def _autofill_races(target: date) -> None:
 
 
 def _autofill_odds(target: date, workers: int, *, force: bool = False,
-                   skip_past_deadline: Optional[Path] = None) -> None:
+                   skip_past_deadline: Optional[Path] = None,
+                   out_path: Optional[Path] = None) -> None:
     """odds_win.csv に該当日のオッズを取得。
 
     force=True なら --resume を付けず既存レースも再スクレイプする（オッズは
     締切に向けて動くため、watch_signal の定期実行では force=True が必要）。
     skip_past_deadline に schedule CSV を渡すと、締切過ぎのレース（オッズは
     既に確定済み）はスクレイプ対象から除外される。
+    out_path に LIVE_ODDS_PATH を渡すと watch_signal のライブオッズを
+    backtest用 odds_win.csv と分離して保存（過去データの汚染を防ぐ）。
     """
+    final_out = out_path or BACKTEST_ODDS_PATH
     cmd = [sys.executable, "-m", "scripts.scrape_odds",
            "--from", target.isoformat(), "--to", target.isoformat(),
            "--races-from", str(RAW_DIR / "races.parquet"),
-           "--workers", str(workers)]
+           "--workers", str(workers),
+           "--out", str(final_out)]
     if not force:
         cmd.append("--resume")
     if skip_past_deadline is not None and skip_past_deadline.exists():
         cmd += ["--skip-past-deadline", str(skip_past_deadline)]
     _run(cmd)
+
+
+def _prepare_backtest_odds_path(target: date, *, live_mode: bool) -> Path:
+    """backtest に渡すオッズファイルのパスを準備。
+
+    live_mode=False: BACKTEST_ODDS_PATH をそのまま返す（過去データ用）
+    live_mode=True:  BACKTEST_ODDS_PATH + LIVE_ODDS_PATH をマージして
+                     一時ファイルを生成。今日のレースのみ LIVE 値を優先、
+                     過去レースは BACKTEST 値を保持。
+
+    これにより:
+      - 過去日 backtest は確定オッズ (汚染なし)
+      - 当日 live signal は最新のスクレイプ値
+    """
+    if not live_mode:
+        return BACKTEST_ODDS_PATH
+
+    today_str = target.strftime("%Y%m%d")
+    parts: list[pd.DataFrame] = []
+    if BACKTEST_ODDS_PATH.exists():
+        df_main = pd.read_csv(BACKTEST_ODDS_PATH)
+        parts.append(df_main)
+    if LIVE_ODDS_PATH.exists():
+        df_live = pd.read_csv(LIVE_ODDS_PATH)
+        # 今日のレースだけ抜き出す（他日が混入していても無視）
+        df_live = df_live[df_live["race_id"].astype(str).str.startswith(today_str)]
+        parts.append(df_live)
+    if not parts:
+        return BACKTEST_ODDS_PATH
+
+    merged = pd.concat(parts, ignore_index=True).drop_duplicates(
+        subset=["race_id", "lane"], keep="last"
+    )
+    merged_path = RAW_DIR / "odds_win_merged.tmp.csv"
+    merged.to_csv(merged_path, index=False)
+    return merged_path
 
 
 def _schedule_today_coverage(schedule_path: Path, target: date) -> tuple[int, int]:
@@ -226,18 +271,22 @@ def _run_backtest(target: date, *, ev_threshold: float, max_odds: float,
                   min_odds: Optional[float], kelly_fraction: float,
                   excluded_venues: list[str],
                   odds_shrinkage_max: float = 0.0,
-                  watchlist_ev_threshold: Optional[float] = None) -> Path:
+                  watchlist_ev_threshold: Optional[float] = None,
+                  live_mode: bool = False) -> Path:
     """指定日1日分のバックテスト → bets_lane1_kelly.csv のパスを返す。
 
     target が当日（今日）の場合は --skip-post-deadline を自動付与し、
     既に締切過ぎたレースを候補から除外する（事後のみシグナルの誤検知防止）。
     過去日 backtest には影響しない。
+    live_mode=True で watch_signal 文脈: LIVE_ODDS_PATH を BACKTEST_ODDS_PATH に
+    マージしたファイルを使用（今日のレースは最新スクレイプ値、過去日は確定値）。
     """
+    odds_path = _prepare_backtest_odds_path(target, live_mode=live_mode)
     cmd = [
         sys.executable, "-m", "scripts.backtest",
         "--features", str(PROCESSED_DIR / "features.parquet"),
         "--payouts", str(RAW_DIR / "races_payouts.parquet"),
-        "--odds", str(RAW_DIR / "odds_win.csv"),
+        "--odds", str(odds_path),
         "--strategy", "lane1_kelly",
         "--since", target.isoformat(),
         "--until", target.isoformat(),
@@ -443,13 +492,19 @@ def main() -> None:
     p.add_argument("--persisted-ev-threshold", type=float, default=1.20,
                    help="過去バックテストで「持続シグナル」近似に使う EV 閾値（デフォルト 1.20）。"
                         "通常 EV 閾値より大きいときだけ第2バックテストを実行して比較表示")
+    p.add_argument("--live-mode", action="store_true",
+                   help="watch_signal の文脈で呼ばれた時に指定。"
+                        "今日のオッズスクレイプを LIVE_ODDS_PATH (odds_win_live.csv) に分離保存し、"
+                        "backtest用 odds_win.csv を汚染しない。"
+                        "当日 backtest 時は両ファイルをマージして使う")
     args = p.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
     print(f"=== シグナル生成: {target} ===")
 
     races_path = RAW_DIR / "races.parquet"
-    odds_path = RAW_DIR / "odds_win.csv"
+    # live-mode 時はライブオッズ用ファイルを使う（backtest 用 odds_win.csv を汚染しない）
+    odds_path = LIVE_ODDS_PATH if args.live_mode else BACKTEST_ODDS_PATH
 
     # 1. races チェック
     n_races = _races_has_date(races_path, target)
@@ -476,14 +531,14 @@ def main() -> None:
     if args.refresh_odds and args.autofill:
         print("       → --refresh-odds 指定のため強制再取得（--resume 無効化）")
         _autofill_odds(target, args.workers, force=True,
-                       skip_past_deadline=schedule_path)
+                       skip_past_deadline=schedule_path, out_path=odds_path)
         n_odds = _odds_has_date(odds_path, target)
         print(f"       再取得後: {n_odds} 件")
     elif n_odds < n_races * 0.8:  # 80%未満なら不足とみなす（一部レース欠損は許容）
         if args.autofill:
             print("       → 不足のため scrape_odds を実行")
             _autofill_odds(target, args.workers,
-                           skip_past_deadline=schedule_path)
+                           skip_past_deadline=schedule_path, out_path=odds_path)
             n_odds = _odds_has_date(odds_path, target)
             print(f"       再取得後: {n_odds} 件")
         else:
@@ -508,6 +563,7 @@ def main() -> None:
         odds_shrinkage_max=args.odds_shrinkage_max,
         watchlist_ev_threshold=(args.watchlist_ev_threshold
                                 if args.watchlist_ev_threshold > 0 else None),
+        live_mode=args.live_mode,
     )
 
     # 5. 結果取得 + 締切時刻取得 → backtest 再実行
