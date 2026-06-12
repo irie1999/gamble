@@ -1,0 +1,407 @@
+"""バックテストエンジン。
+
+戦略:
+  1. (option) 学習済みモデルで各艇の1着確率 p_model を推定
+  2. (option) 公衆オッズから p_market を計算し、Benter式でブレンド -> p_final
+  3. EV = p_final * odds が閾値以上のベットを抽出
+  4. fractional Kelly でベットサイズを決定
+  5. 結果（払戻DataFrame）と突合して PnL を計算
+
+戦略選択:
+  - "flat":          EV閾値超過の艇に固定額ベット
+  - "kelly":         fractional Kelly でサイズ決定（推奨）
+  - "always_top1":   常に1コース単勝（ベンチマーク）
+  - "model_top1":    モデル予測1位に固定額ベット（オッズ無視ベンチマーク）
+
+参考文献:
+  - Benter (1994), Hausch-Ziemba-Rubinstein (1981), Kelly (1956)
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from datetime import datetime, time as _time
+from typing import Literal, Mapping, Optional
+
+import numpy as np
+import pandas as pd
+
+from src.strategy.blending import add_blended_probability
+from src.strategy.ev import select_value_bets
+from src.strategy.kelly import kelly_stake
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def expected_close_odds(
+    current_odds: float,
+    minutes_to_deadline: float,
+    max_shrinkage: float,
+    time_constant_min: float = 30.0,
+) -> float:
+    """締切時刻に向けて 1号艇 オッズが下がる現象をモデル化した「予想確定オッズ」。
+
+    factor = 1 - max_shrinkage * (1 - exp(-t/τ))
+    expected = 1 + (current - 1) * factor
+
+      t = 0:   factor = 1.0           → expected = current (収縮なし)
+      t → ∞:   factor = 1 - max_shrinkage  → expected = 最大収縮値
+
+    例: max_shrinkage=0.3, τ=30 のとき
+      t = 5min:  factor = 0.953 (4.7% 収縮)
+      t = 30min: factor = 0.810 (19% 収縮)
+      t = 60min: factor = 0.741 (26% 収縮)
+      t = 120min: factor = 0.711 (29% 収縮)
+
+    Kelly計算で「保守的なオッズ」を仮定する用途。締切近いほど現在オッズに信頼を置く。
+    """
+    if minutes_to_deadline <= 0 or max_shrinkage <= 0 or current_odds <= 1.0:
+        return float(current_odds)
+    factor = 1.0 - max_shrinkage * (1.0 - math.exp(-minutes_to_deadline / time_constant_min))
+    return max(1.0, 1.0 + (current_odds - 1.0) * factor)
+
+
+def _race_still_open(
+    race_id: str,
+    schedule: Mapping[str, str],
+    now: datetime,
+) -> bool:
+    """締切が now より未来か（=まだ投票可能か）。
+
+    schedule に該当 race_id が無い・パース失敗時は True を返す（安全側で残す）。
+    過去日（race_id の日付が today より過去）は常に True（バックテスト保護）。
+    """
+    if str(race_id)[:8] != now.strftime("%Y%m%d"):
+        return True  # 過去日 backtest はそのまま
+    dl_str = schedule.get(str(race_id), "")
+    if not dl_str or ":" not in str(dl_str):
+        return True
+    try:
+        hh, mm = str(dl_str).split(":")[:2]
+        deadline = datetime.combine(now.date(), _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return True
+    return deadline > now
+
+
+def _minutes_to_deadline_from_schedule(
+    race_id: str,
+    schedule: Mapping[str, str],
+    now: datetime,
+) -> float:
+    """race_id (YYYYMMDD-VV-RR) と schedule から締切までの分数を返す。
+
+    schedule に該当 race_id が無い or パース失敗時は 0.0（→ shrinkage 適用無し）。
+    既に締切過ぎでも 0.0 を返す。
+    """
+    dl_str = schedule.get(str(race_id))
+    if not dl_str or ":" not in str(dl_str):
+        return 0.0
+    try:
+        d = datetime.strptime(str(race_id)[:8], "%Y%m%d").date()
+        hh, mm = str(dl_str).split(":")[:2]
+        deadline = datetime.combine(d, _time(int(hh), int(mm)))
+    except (ValueError, AttributeError):
+        return 0.0
+    delta = (deadline - now).total_seconds() / 60.0
+    return max(0.0, delta)
+
+
+Strategy = Literal["flat", "kelly", "always_top1", "model_top1", "lane1_value", "lane1_kelly"]
+
+
+@dataclass
+class BacktestConfig:
+    strategy: Strategy = "kelly"
+    initial_bankroll: float = 100_000.0
+    flat_stake: float = 1_000.0
+    kelly_fraction: float = 0.25
+    ev_threshold: float = 1.05
+    min_prob: float = 0.05
+    blend_alpha: float = 0.7        # Benter ブレンド比（モデル側）
+    takeout: float = 0.25           # 単勝の控除率
+    bet_type: str = "win"           # 当面は単勝のみ
+    # 1コース勝率が低い場（例: 大村24）を除外する。lane1_value/lane1_kelly でのみ効く。
+    excluded_venues: tuple[str, ...] = ()
+    # 1号艇のオッズがこの値超だと「構造的に1号艇が弱いレース」とみなして除外。None で無効。
+    max_odds: Optional[float] = None
+    # 1号艇のオッズがこの値未満なら除外。本命過ぎ（市場が正しく評価済み）を回避。
+    min_odds: Optional[float] = None
+    # オッズ収縮（時間ベース）: 締切までの分数に応じて「予想確定オッズ」を計算し、
+    # Kelly のステーク決定にそれを使う。0で無効。デフォルト 0.3 (Phase 1 推奨)。
+    # filter (EV/min/max) は元の odds を使い続けるので候補数は変わらない。
+    odds_shrinkage_max: float = 0.0
+    odds_shrinkage_time_constant_min: float = 30.0
+    # race_id → "HH:MM" の締切時刻マップ。shrinkage 計算に使う。
+    # 渡されていないレースは shrinkage 適用なし（元 odds でステーク計算）。
+    schedule_map: Mapping[str, str] = field(default_factory=dict)
+    # ライブ運用フィルタ: 「現在時刻 > 締切」のレースを候補から除外する。
+    # True にすると、watch_signal が午後に起動して朝のレースを再評価 → 候補化、
+    # という「事後のみ」のシグナル誤検知を防げる。run_signal は当日 backtest 時に True。
+    skip_post_deadline_races: bool = False
+    # 事前予告用の閾値。ev_threshold より低い値を入れると、EV がこの値〜
+    # ev_threshold の間にいるレースを watchlist (準シグナル) として別出力する。
+    # 「もうすぐシグナル化しそうなレース」を締切直前まで掴めるため、ライブ運用で
+    # 通知の余裕時間を稼げる。None で無効。
+    watchlist_ev_threshold: Optional[float] = None
+
+
+@dataclass
+class BacktestResult:
+    bets: pd.DataFrame
+    summary: dict
+    equity_curve: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    watchlist: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+def _winner_lane_from_payouts(payouts_df: pd.DataFrame) -> pd.DataFrame:
+    """単勝の払戻から、レース毎の勝者lane と payout(100円ベース) を取得。"""
+    win_rows = payouts_df[payouts_df["bet_type"] == "win"].copy()
+    win_rows["winner_lane"] = pd.to_numeric(win_rows["combo"], errors="coerce")
+    win_rows["payout_yen"] = pd.to_numeric(win_rows["payout_yen"], errors="coerce")
+    return (
+        win_rows.dropna(subset=["winner_lane"])
+        .assign(winner_lane=lambda d: d["winner_lane"].astype(int))
+        .groupby("race_id")
+        .agg(winner_lane=("winner_lane", "first"), win_payout_yen=("payout_yen", "first"))
+        .reset_index()
+    )
+
+
+def _build_pred_with_odds(
+    pred_df: pd.DataFrame,
+    odds_df: Optional[pd.DataFrame],
+) -> pd.DataFrame:
+    """予測DFに実オッズを結合。オッズが渡されない/不足する行は NaN のまま。
+
+    EV系戦略は実オッズが揃っているレースだけで動作する（補完はしない）。
+    """
+    if odds_df is None or odds_df.empty:
+        out = pred_df.copy()
+        out["odds_win"] = np.nan
+        return out
+    out = pred_df.merge(
+        odds_df[["race_id", "lane", "odds_win"]],
+        on=["race_id", "lane"], how="left",
+    )
+    return out
+
+
+def run_backtest(
+    pred_df: pd.DataFrame,
+    payouts_df: pd.DataFrame,
+    *,
+    odds_df: Optional[pd.DataFrame] = None,
+    config: BacktestConfig = BacktestConfig(),
+) -> BacktestResult:
+    """予測DataFrame×払戻DataFrameでバックテスト。
+
+    pred_df: race_id, lane, pred_win_prob (+ optional race_date)
+    payouts_df: race_id, bet_type, combo, payout_yen
+    odds_df:  race_id, lane, odds_win  (実オッズ。EV系戦略では必須)
+
+    EV系（kelly/flat）は実オッズが揃ったレースだけを対象にする。
+    オッズが無い場合はそのレースをスキップ（人工オッズで埋めない）。
+
+    戻り値: bets（個別ベット内訳）、summary（指標）、equity_curve。
+    """
+    watchlist_df = pd.DataFrame()
+    # --- 確率の準備 ---
+    pred = _build_pred_with_odds(pred_df, odds_df)
+
+    # 市場ブレンド：odds が全艇分そろっているレースのみで適用
+    full_odds = pred.groupby("race_id")["odds_win"].transform(lambda s: s.notna().all())
+    pred["blended_win_prob"] = pred["pred_win_prob"]
+    if full_odds.any():
+        sub = pred[full_odds].copy()
+        sub = add_blended_probability(sub, alpha=config.blend_alpha, takeout=config.takeout)
+        pred.loc[full_odds, "blended_win_prob"] = sub["blended_win_prob"].values
+
+    # --- 戦略ごとのベット選択 ---
+    if config.strategy == "always_top1":
+        bets = pred[pred["lane"] == 1].copy()
+        bets["stake"] = config.flat_stake
+    elif config.strategy == "model_top1":
+        bets = (
+            pred.sort_values(["race_id", "pred_win_prob"], ascending=[True, False])
+                .groupby("race_id", group_keys=False)
+                .head(1)
+                .copy()
+        )
+        bets["stake"] = config.flat_stake
+    elif config.strategy in ("lane1_value", "lane1_kelly"):
+        # 1号艇限定: 実オッズと推定確率から EV>閾値 のレースのみベット
+        # 過小評価された1号艇本命を狙う（穴狙いではなく本命の妙味）
+        eligible = pred[full_odds & (pred["lane"] == 1)].copy()
+        # 場フィルタ: 1コース勝率が構造的に低い場を除外
+        if config.excluded_venues:
+            venue_codes = eligible["race_id"].astype(str).str.split("-").str[1]
+            eligible = eligible[~venue_codes.isin(config.excluded_venues)]
+            logger.info("excluded_venues=%s 適用後 %d候補", config.excluded_venues, len(eligible))
+        if config.max_odds is not None:
+            before = len(eligible)
+            eligible = eligible[eligible["odds_win"] <= config.max_odds]
+            logger.info("max_odds=%s 適用後 %d候補（%d→）", config.max_odds, len(eligible), before)
+        if config.min_odds is not None:
+            before = len(eligible)
+            eligible = eligible[eligible["odds_win"] >= config.min_odds]
+            logger.info("min_odds=%s 適用後 %d候補（%d→）", config.min_odds, len(eligible), before)
+        # ライブ運用フィルタ: 締切過ぎたレース（=もう投票できない）を除外。
+        # watch_signal が午後起動 → 朝のレースを再評価 → 候補化、を防ぐ。
+        if config.skip_post_deadline_races and config.schedule_map and not eligible.empty:
+            before = len(eligible)
+            now_dt = datetime.now()
+            still_open = eligible["race_id"].astype(str).apply(
+                lambda rid: _race_still_open(rid, config.schedule_map, now_dt)
+            ).astype(bool)
+            eligible = eligible[still_open]
+            logger.info("skip_post_deadline 適用後 %d候補（%d→ 締切過ぎ %d件除外）",
+                        len(eligible), before, before - len(eligible))
+        eligible["ev"] = eligible["blended_win_prob"] * eligible["odds_win"]
+        candidates = eligible[eligible["ev"] > config.ev_threshold].copy()
+
+        # watchlist: EV が watchlist_threshold〜ev_threshold の間 = 「準シグナル」
+        # ライブ運用で締切直前に EV が閾値を超えそうなレースの早期通知用。
+        watchlist_df = pd.DataFrame()
+        if config.watchlist_ev_threshold is not None and \
+                config.watchlist_ev_threshold < config.ev_threshold:
+            wl = eligible[
+                (eligible["ev"] >= config.watchlist_ev_threshold) &
+                (eligible["ev"] <= config.ev_threshold)
+            ].copy()
+            if not wl.empty:
+                watchlist_df = wl.reset_index(drop=True)
+        if config.strategy == "lane1_kelly":
+            stakes = []
+            eff_odds_list = []
+            now_for_shrink = datetime.now()
+            for _, r in candidates.iterrows():
+                actual_odds = float(r["odds_win"])
+                # 時間ベース shrinkage: 締切までの分数に応じて「予想確定オッズ」を計算。
+                # schedule に該当レースの締切時刻があり、shrinkage_max>0 のときのみ適用。
+                if config.odds_shrinkage_max > 0:
+                    mins = _minutes_to_deadline_from_schedule(
+                        str(r["race_id"]), config.schedule_map, now_for_shrink,
+                    )
+                    eff_odds = expected_close_odds(
+                        actual_odds, mins,
+                        config.odds_shrinkage_max,
+                        config.odds_shrinkage_time_constant_min,
+                    )
+                else:
+                    eff_odds = actual_odds
+                eff_odds_list.append(eff_odds)
+                stakes.append(kelly_stake(
+                    bankroll=config.initial_bankroll,
+                    p=float(r["blended_win_prob"]),
+                    odds=eff_odds,
+                    fraction=config.kelly_fraction,
+                ))
+            candidates["effective_odds_for_kelly"] = eff_odds_list
+            candidates["stake"] = stakes
+            candidates = candidates[candidates["stake"] > 0]
+        else:
+            candidates["stake"] = config.flat_stake
+        bets = candidates
+    else:
+        # EV系戦略は実オッズが揃ったレースのみ対象
+        eligible = pred[full_odds].copy()
+        if eligible.empty:
+            logger.warning(
+                "EV系戦略 '%s' を実行するための実オッズが1件もありません。"
+                " --odds で odds_win.csv を渡してください。",
+                config.strategy,
+            )
+        candidates = select_value_bets(
+            eligible,
+            prob_col="blended_win_prob",
+            odds_col="odds_win",
+            ev_threshold=config.ev_threshold,
+            min_prob=config.min_prob,
+            top_k_per_race=1,
+        )
+        if config.strategy == "flat":
+            candidates["stake"] = config.flat_stake
+        else:  # kelly
+            stakes = []
+            bankroll = config.initial_bankroll
+            for _, r in candidates.iterrows():
+                stakes.append(kelly_stake(
+                    bankroll=bankroll,
+                    p=float(r["blended_win_prob"]),
+                    odds=float(r["odds_win"]),
+                    fraction=config.kelly_fraction,
+                ))
+            candidates["stake"] = stakes
+            candidates = candidates[candidates["stake"] > 0]
+        bets = candidates
+
+    if bets.empty:
+        return BacktestResult(
+            bets=bets,
+            watchlist=watchlist_df,
+            summary={
+                "strategy": config.strategy,
+                "n_bets": 0,
+                "stake_total": 0.0,
+                "return_total": 0.0,
+                "pnl": 0.0,
+                "roi": 0.0,
+                "hit_rate": 0.0,
+            },
+        )
+
+    # --- 結果突合 ---
+    winners = _winner_lane_from_payouts(payouts_df)
+    bets = bets.merge(winners, on="race_id", how="left")
+    # 未開催 or 結果未公開: winner_lane NaN → race_finished=False（レポートで「未確定」表示）
+    bets["race_finished"] = bets["winner_lane"].notna()
+    bets["hit"] = (bets["lane"] == bets["winner_lane"]).fillna(False)
+    bets["payout_per_100"] = np.where(bets["hit"], bets["win_payout_yen"], 0.0)
+    bets["return_yen"] = bets["stake"] * bets["payout_per_100"] / 100.0
+    bets["pnl"] = bets["return_yen"] - bets["stake"]
+    # 確定オッズ: 的中レースは payout/100、それ以外（未確定 or 不的中）は NaN
+    bets["settled_odds"] = np.where(
+        bets["hit"], bets["win_payout_yen"] / 100.0, np.nan
+    )
+
+    # 確定済みベットだけで equity curve と集計（未確定ベットは未着地として除外）
+    finished = bets[bets["race_finished"]]
+    n_pending = int((~bets["race_finished"]).sum())
+
+    sort_cols = [c for c in ["race_date", "race_id"] if c in finished.columns]
+    finished_sorted = finished.sort_values(sort_cols).reset_index(drop=True)
+    equity = config.initial_bankroll + finished_sorted["pnl"].cumsum()
+    equity_curve = pd.Series(equity.values, index=finished_sorted["race_id"])
+
+    stake_total = float(finished["stake"].sum())
+    return_total = float(finished["return_yen"].sum())
+    pnl = return_total - stake_total
+    roi = pnl / stake_total if stake_total > 0 else 0.0
+
+    # 最大ドローダウン
+    if len(equity):
+        peak = equity.cummax()
+        drawdown = (equity - peak) / peak
+        max_dd = float(drawdown.min())
+    else:
+        max_dd = 0.0
+
+    summary = {
+        "strategy": config.strategy,
+        "n_bets": int(len(bets)),
+        "n_pending": n_pending,
+        "stake_total": stake_total,
+        "return_total": return_total,
+        "pnl": float(pnl),
+        "roi": float(roi),
+        "hit_rate": float(finished["hit"].mean()) if len(finished) else 0.0,
+        "max_drawdown": max_dd,
+        "ending_bankroll": float(equity.iloc[-1]) if len(equity) else config.initial_bankroll,
+    }
+
+    return BacktestResult(
+        bets=bets, summary=summary, equity_curve=equity_curve,
+        watchlist=watchlist_df,
+    )

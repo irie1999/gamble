@@ -1,0 +1,769 @@
+"""シグナル履歴を結果付きで HTML レポートで表示。今日 / 任意日 / 過去N日まで対応。
+
+signal_snapshots を集計し、payouts と照合して的中/外れ/PnL を計算、
+HTML を生成してブラウザで自動オープン。
+
+使い方:
+    python -m scripts.show_signals_today               # 今日（HTML自動オープン）
+    python -m scripts.show_signals_today --date 2026-05-28
+    python -m scripts.show_signals_today --days 7      # 過去7日（含今日）
+    python -m scripts.show_signals_today --days 30     # 月間レビュー
+
+    python -m scripts.show_signals_today --terminal    # ブラウザ開かずターミナル表示のみ
+    python -m scripts.show_signals_today --no-open     # HTML生成のみ（ブラウザ開かない）
+    python -m scripts.show_signals_today --html out.html  # 出力先指定
+"""
+from __future__ import annotations
+
+import argparse
+import subprocess
+import sys
+import webbrowser
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Iterable
+
+import pandas as pd
+
+from src.utils.config import PROCESSED_DIR, RAW_DIR, VENUE_CODES
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _load_snapshots(target: date) -> pd.DataFrame:
+    log_path = (PROCESSED_DIR / "signal_log"
+                / f"signal_snapshots_{target.strftime('%Y%m%d')}.csv")
+    if not log_path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(log_path)
+    except Exception:
+        return pd.DataFrame()
+    return df
+
+
+def _parse_deadline(race_id: str, schedule: dict[str, str]) -> datetime | None:
+    """race_id と schedule から締切 datetime を返す。失敗時は None。"""
+    dl_str = schedule.get(str(race_id), "")
+    if not dl_str or ":" not in dl_str:
+        return None
+    try:
+        hh, mm = dl_str.split(":")[:2]
+        d = datetime.strptime(str(race_id)[:8], "%Y%m%d").date()
+        return datetime.combine(d, datetime.min.time().replace(hour=int(hh), minute=int(mm)))
+    except (ValueError, AttributeError):
+        return None
+
+
+def _aggregate(df: pd.DataFrame, schedule: dict[str, str]) -> pd.DataFrame:
+    """snapshot を race_id ごとに集計。締切前後で分けて last_seen を持つ。"""
+    df = df.copy()
+    df["snapshot_at"] = pd.to_datetime(df["snapshot_at"], errors="coerce")
+    df["deadline"] = df["race_id"].astype(str).map(
+        lambda rid: _parse_deadline(rid, schedule)
+    )
+    # 締切前 (≤ deadline) のスナップだけで last_seen_pre を計算
+    pre_mask = df["deadline"].notna() & (df["snapshot_at"] <= df["deadline"])
+    df["snapshot_pre"] = df["snapshot_at"].where(pre_mask)
+
+    g = df.groupby("race_id")
+    return pd.DataFrame({
+        "first_seen": g["snapshot_at"].min(),
+        "last_seen": g["snapshot_at"].max(),
+        "last_seen_pre": g["snapshot_pre"].max(),
+        "deadline": g["deadline"].first(),
+        "n": g["snapshot_at"].count(),
+        "max_ev": g["ev"].max(),
+        "latest_ev": g["ev"].last(),
+        "latest_odds": g["odds_win"].last(),
+        "latest_stake": g["stake"].last(),
+    }).reset_index()
+
+
+def _load_winners() -> dict[str, dict]:
+    payouts_path = RAW_DIR / "races_payouts.parquet"
+    if not payouts_path.exists():
+        return {}
+    payouts = pd.read_parquet(payouts_path,
+                              columns=["race_id", "bet_type", "combo", "payout_yen"])
+    win = payouts[payouts["bet_type"] == "win"].copy()
+    win["winner_lane"] = pd.to_numeric(win["combo"], errors="coerce")
+    win["payout_yen"] = pd.to_numeric(win["payout_yen"], errors="coerce")
+    win = win.dropna(subset=["winner_lane"])
+    return win.set_index("race_id")[["winner_lane", "payout_yen"]].to_dict("index")
+
+
+def _load_schedule_map() -> dict[str, str]:
+    """race_id → "HH:MM" の締切時刻マップ。持続/消失判定に使う。"""
+    sched_path = RAW_DIR / "race_schedule.csv"
+    if not sched_path.exists() or sched_path.stat().st_size == 0:
+        return {}
+    try:
+        df = pd.read_csv(sched_path)
+        return dict(zip(df["race_id"].astype(str), df["deadline_time"].astype(str)))
+    except Exception:
+        return {}
+
+
+def _ensure_signal_log(targets: Iterable[date]) -> None:
+    """signal_log が無い過去日について backfill_signal_log を順次実行。
+
+    過去日（today 未満）のみが対象。今日のレースは watch_signal が動いていれば
+    自動的に記録されるので backfill 不要。
+    """
+    today = date.today()
+    missing = []
+    for t in targets:
+        if t >= today:
+            continue
+        snap_path = PROCESSED_DIR / "signal_log" / f"signal_snapshots_{t:%Y%m%d}.csv"
+        if not snap_path.exists():
+            missing.append(t)
+    if not missing:
+        return
+    print(f"signal_log 不足: {len(missing)}日分を backfill します...")
+    for t in missing:
+        print(f"  → backfill {t}...", end=" ", flush=True)
+        rc = subprocess.call(
+            [sys.executable, "-m", "scripts.backfill_signal_log",
+             "--from", t.isoformat(), "--to", t.isoformat()],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if rc == 0:
+            snap_path = PROCESSED_DIR / "signal_log" / f"signal_snapshots_{t:%Y%m%d}.csv"
+            if snap_path.exists():
+                print("✓")
+            else:
+                print("候補ゼロ")
+        else:
+            print(f"✗ (rc={rc})")
+
+
+def _ensure_schedule(targets: Iterable[date], *,
+                     skip_scrape: bool = False) -> dict[str, str]:
+    """対象日に schedule が無ければ scrape_schedule を呼んで補完してから読む。
+
+    backfill された日（snapshot_at が全部 23:59 → 当日 live 観測なし）は
+    持続判定が必ず "post_only" になるので schedule 取得不要。
+    実 watch_signal 由来のスナップ（live 観測あり）のある日だけスクレイプする。
+
+    一度試した日は <RAW_DIR>/.schedule_scrape_attempted.txt に記録し、
+    次回以降は失敗していてもスキップ（再 scrape を防止）。
+    skip_scrape=True なら不足してもスクレイプしない（持続判定が "unknown" になる）。
+    """
+    schedule = _load_schedule_map()
+    if skip_scrape:
+        return schedule
+    target_list = list(targets)
+
+    # 各日について snapshot を見て、live 観測（snapshot_at が早い時間帯）があるか判定
+    live_dates = []
+    for d in target_list:
+        snap_path = (PROCESSED_DIR / "signal_log"
+                     / f"signal_snapshots_{d.strftime('%Y%m%d')}.csv")
+        if not snap_path.exists():
+            continue
+        try:
+            sdf = pd.read_csv(snap_path, usecols=["snapshot_at"])
+        except Exception:
+            continue
+        if sdf.empty:
+            continue
+        # snapshot_at が 22:00 より前の行があれば「live 観測あり」とみなす
+        # backfill は全部 23:59:00 固定なので、それより早ければ実 watch_signal
+        ts = pd.to_datetime(sdf["snapshot_at"], errors="coerce")
+        if (ts.dt.hour < 22).any():
+            live_dates.append(d)
+
+    # 過去に scrape を試した日（成功/失敗問わず）を読み込み → 二度試さない
+    attempted_path = RAW_DIR / ".schedule_scrape_attempted.txt"
+    attempted: set[str] = set()
+    if attempted_path.exists():
+        try:
+            attempted = {ln.strip() for ln in
+                         attempted_path.read_text(encoding="utf-8").splitlines()
+                         if ln.strip()}
+        except Exception:
+            pass
+
+    missing = []
+    for d in live_dates:
+        prefix = d.strftime("%Y%m%d")
+        if any(rid.startswith(prefix) for rid in schedule):
+            continue
+        if prefix in attempted:
+            continue
+        missing.append(d)
+    if not missing:
+        return schedule
+
+    print(f"schedule 不足: {len(missing)}日分を scrape します（live 観測あり日のみ）...")
+    new_attempts: list[str] = []
+    for d in missing:
+        print(f"  → scrape_schedule --date {d}")
+        rc = subprocess.call(
+            [sys.executable, "-m", "scripts.scrape_schedule",
+             "--date", d.isoformat(), "--workers", "4"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if rc != 0:
+            logger.warning("scrape_schedule 失敗 (rc=%d) date=%s", rc, d)
+        # 成功/失敗どちらでも attempted に記録 → 次回スキップ
+        new_attempts.append(d.strftime("%Y%m%d"))
+
+    if new_attempts:
+        attempted_path.parent.mkdir(parents=True, exist_ok=True)
+        with attempted_path.open("a", encoding="utf-8") as f:
+            for s in new_attempts:
+                f.write(s + "\n")
+
+    return _load_schedule_map()
+
+
+def _classify_persisted(deadline: datetime | None,
+                        last_seen_pre: datetime | None,
+                        persist_threshold_min: float = 10.0) -> str:
+    """シグナルが「ライブでベット可能な状態で締切まで持続したか」判定。
+
+    Args:
+        deadline: race の締切時刻（None なら不明扱い）
+        last_seen_pre: 締切 *以前* に観測された最後の snapshot 時刻
+                       (None = 締切前のスナップが1件も無い)
+
+    Returns:
+        "persisted": 締切前 last_seen が締切まで残り persist_threshold_min 分以内
+        "dropped":   締切前 last_seen はあるが、それより早く候補から外れた
+        "post_only": 締切後のスナップしか無い（後追い分析のみ・ライブで賭けられなかった）
+        "unknown":   schedule に該当 race_id 無し or パース失敗
+    """
+    if deadline is None or pd.isna(deadline):
+        return "unknown"
+    if last_seen_pre is None or pd.isna(last_seen_pre):
+        return "post_only"
+    delta_min = (deadline - last_seen_pre).total_seconds() / 60.0
+    return "persisted" if delta_min <= persist_threshold_min else "dropped"
+
+
+def _enrich_row(rid: str, latest_stake: int, winners: dict) -> dict:
+    """payouts と突合して finished/hit/pnl/settled_odds を返す。
+
+    settled_odds: 1号艇が勝った時のみ payout/100 で確定オッズが分かる。
+    負けレースは settled_odds=NaN（1号艇の確定オッズが payouts に無いため）。
+    """
+    result = winners.get(rid)
+    if not result or pd.isna(result["winner_lane"]):
+        return {"finished": False, "hit": False, "pnl": 0,
+                "winner_lane": None, "settled_odds": float("nan")}
+    winner = int(result["winner_lane"])
+    hit = (winner == 1)
+    if hit:
+        payout = float(result["payout_yen"])
+        pnl = int(latest_stake * payout / 100.0 - latest_stake)
+        settled_odds = payout / 100.0
+    else:
+        pnl = -latest_stake
+        settled_odds = float("nan")
+    return {"finished": True, "hit": hit, "pnl": pnl,
+            "winner_lane": winner, "settled_odds": settled_odds}
+
+
+def _collect(targets: Iterable[date], winners: dict,
+             schedule: dict[str, str] | None = None) -> pd.DataFrame:
+    """対象日それぞれの snapshot を集計し1つの DataFrame に。
+    各行に date / finished / hit / pnl / winner_lane / persisted を付与。
+
+    persisted: "persisted" (締切まで持続) / "dropped" (途中消失) /
+               "post_only" (締切後スナップのみ) / "unknown" (schedule無し)
+    """
+    if schedule is None:
+        schedule = {}
+    parts: list[pd.DataFrame] = []
+    for t in targets:
+        df = _load_snapshots(t)
+        if df.empty:
+            continue
+        agg = _aggregate(df, schedule)
+        agg["date"] = t.isoformat()
+        parts.append(agg)
+    if not parts:
+        return pd.DataFrame()
+    combined = pd.concat(parts, ignore_index=True)
+    enriched = combined.apply(
+        lambda r: _enrich_row(str(r["race_id"]),
+                              int(r["latest_stake"]) if pd.notna(r["latest_stake"]) else 0,
+                              winners),
+        axis=1, result_type="expand",
+    )
+    combined = pd.concat([combined, enriched], axis=1)
+    combined["persisted"] = combined.apply(
+        lambda r: _classify_persisted(r.get("deadline"), r.get("last_seen_pre")),
+        axis=1,
+    )
+    return combined
+
+
+def _print_daily_summary(df: pd.DataFrame) -> None:
+    print("【日別サマリ】")
+    fmt = "{date:<11} {n:>5} {fin:>5} {hit:>5} {rate:>7} {stake:>10} {pnl:>10} {roi:>8}"
+    print(fmt.format(date="日付", n="件数", fin="確定", hit="的中",
+                     rate="勝率", stake="ステーク", pnl="PnL", roi="ROI"))
+    print("-" * 75)
+    for d, g in df.groupby("date"):
+        n = len(g)
+        fin = int(g["finished"].sum())
+        hit = int(g["hit"].sum())
+        rate = f"{hit / fin * 100:.1f}%" if fin else "-"
+        stake = int(g[g["finished"]]["latest_stake"].sum())
+        pnl = int(g["pnl"].sum())
+        roi = f"{pnl / stake * 100:+.1f}%" if stake else "-"
+        sign = "+" if pnl > 0 else ""
+        print(fmt.format(date=d, n=f"{n}", fin=f"{fin}", hit=f"{hit}",
+                         rate=rate, stake=f"¥{stake:,}",
+                         pnl=f"{sign}¥{pnl:,}", roi=roi))
+
+
+def _print_details(df: pd.DataFrame) -> None:
+    print("【個別レース】 (持続=締切まで候補だった / 消失=途中で外れた)")
+    fmt = "{date:<11} {venue:>10} {rno:>4} {seen:>11} {persist:>4} {ev_max:>7} {odds:>6} {stake:>9}  {status}"
+    print(fmt.format(date="日付", venue="場", rno="R", seen="観測時間",
+                     persist="持続", ev_max="最高EV", odds="オッズ",
+                     stake="ステーク", status="結果"))
+    print("-" * 100)
+    persist_short = {"persisted": "🔵", "dropped": "🟡", "post_only": "⚫", "unknown": "─"}
+    persist_order = {"persisted": 0, "dropped": 1, "post_only": 2, "unknown": 3}
+    df_sorted = df.copy()
+    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(4)
+    df_sorted = df_sorted.sort_values(
+        ["date", "_porder", "max_ev"], ascending=[True, True, False]
+    )
+    for _, r in df_sorted.iterrows():
+        rid = str(r["race_id"])
+        parts = rid.split("-")
+        venue = VENUE_CODES.get(parts[1], "?") if len(parts) > 1 else "?"
+        rno = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        seen = f"{r['first_seen'].strftime('%H:%M')}-{r['last_seen'].strftime('%H:%M')}"
+        stake = int(r["latest_stake"]) if pd.notna(r["latest_stake"]) else 0
+        persist_icon = persist_short.get(str(r.get("persisted", "unknown")), "─")
+        if r["finished"]:
+            if r["hit"]:
+                status = f"🟢 1着 +¥{int(r['pnl']):,}"
+            else:
+                status = f"✕ {int(r['winner_lane'])}号艇1着 -¥{stake:,}"
+        else:
+            status = "⏳ 未確定"
+        print(fmt.format(date=r["date"], venue=f"{venue}({parts[1]})",
+                         rno=f"{rno}R", seen=seen, persist=persist_icon,
+                         ev_max=f"{r['max_ev']:.2f}",
+                         odds=f"{r['latest_odds']:.2f}",
+                         stake=f"¥{stake:,}", status=status))
+
+
+def _strategy_stats(df: pd.DataFrame) -> dict:
+    """戦略の実績を計算。確定レースのみ集計。"""
+    fin_df = df[df["finished"]]
+    n = len(df)
+    n_fin = len(fin_df)
+    hit = int(fin_df["hit"].sum())
+    stake = int(fin_df["latest_stake"].sum())
+    pnl = int(fin_df["pnl"].sum())
+    return {
+        "n": n, "n_fin": n_fin, "hit": hit, "stake": stake, "pnl": pnl,
+        "hit_rate": (hit / n_fin) if n_fin else 0.0,
+        "roi": (pnl / stake) if stake else 0.0,
+    }
+
+
+def _print_grand_total(df: pd.DataFrame, label: str = "合計") -> None:
+    n = len(df)
+    fin = int(df["finished"].sum())
+    n_persist = int((df["persisted"] == "persisted").sum())
+    n_drop = int((df["persisted"] == "dropped").sum())
+    n_post = int((df["persisted"] == "post_only").sum())
+    print()
+    print(f"=== {label} ===")
+    print(f"レース数: {n} 件 (確定 {fin} / 未確定 {n - fin})")
+    print(f"  └─ 持続: {n_persist} 件 / 途中消失: {n_drop} 件 / 事後のみ: {n_post} 件")
+
+    # watch していた期間（post_only/unknown を除外）の比較
+    live_df = df[df["persisted"].isin(["persisted", "dropped"])]
+    if len(live_df) == 0:
+        if n_post:
+            print()
+            print("⚠ watch_signal で観測したシグナルがありません（全て事後のみ）")
+            print("   → 比較不可。watch_signal を稼働させてください")
+        return
+
+    immediate = _strategy_stats(live_df)
+    wait = _strategy_stats(live_df[live_df["persisted"] == "persisted"])
+
+    print()
+    print(f"=== 戦略比較（watch 観測の {len(live_df)} 件のみ） ===")
+    fmt = "{label:<32} {n:>5} {fin:>5} {rate:>7} {stake:>11} {pnl:>12} {roi:>8}"
+    print(fmt.format(label="戦略", n="件数", fin="確定", rate="勝率",
+                     stake="ステーク", pnl="PnL", roi="ROI"))
+    print("-" * 86)
+    for lbl, s in [("検知即発注 (全シグナル買い)", immediate),
+                   ("締切まで観察 (持続のみ買い)", wait)]:
+        sign = "+" if s["pnl"] > 0 else ""
+        roi = f"{sign}{s['roi'] * 100:.1f}%" if s["stake"] else "-"
+        rate = f"{s['hit_rate'] * 100:.1f}%" if s["n_fin"] else "-"
+        print(fmt.format(
+            label=lbl, n=f"{s['n']}", fin=f"{s['n_fin']}", rate=rate,
+            stake=f"¥{s['stake']:,}", pnl=f"{sign}¥{s['pnl']:,}", roi=roi,
+        ))
+    diff_pnl = wait["pnl"] - immediate["pnl"]
+    diff_sign = "+" if diff_pnl > 0 else ""
+    print(f"\n  差分: 観察すると {diff_sign}¥{diff_pnl:,} ({len(live_df) - wait['n']} 件を見送り)")
+
+
+_HTML_TEMPLATE = """<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><title>シグナル履歴 {period}</title>
+<style>
+:root {{
+  --bg: #0f1117; --bg-card: #1a1d27; --bg-header: #1f2330; --bg-hover: #252937;
+  --border: #2a2f3d; --text: #e4e6eb; --text-dim: #9aa0b0;
+  --pos: #4ade80; --neg: #f87171; --warn: #fbbf24; --link: #60a5fa; --accent: #818cf8;
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Yu Gothic", sans-serif;
+  max-width: 1280px; margin: 0 auto; padding: 24px 16px 60px;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}}
+h1 {{ font-size: 28px; margin: 0 0 4px; font-weight: 700; }}
+h1 .accent {{ color: var(--accent); }}
+.meta {{ color: var(--text-dim); font-size: 12px; margin-bottom: 24px; }}
+.kpi {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 24px; }}
+.kpi .card {{ background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }}
+.kpi .label {{ color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }}
+.kpi .value {{ font-size: 24px; font-weight: 700; margin-top: 4px; }}
+.pos {{ color: var(--pos); }} .neg {{ color: var(--neg); }}
+.section-title {{ font-size: 14px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin: 28px 0 10px; font-weight: 600; }}
+table {{ width: 100%; border-collapse: collapse; background: var(--bg-card); border-radius: 12px; overflow: hidden; }}
+th, td {{ text-align: right; padding: 11px 14px; border-bottom: 1px solid var(--border); }}
+th:nth-child(-n+2), td:nth-child(-n+2) {{ text-align: left; }}
+th:last-child, td:last-child {{ text-align: center; }}
+th {{ background: var(--bg-header); font-size: 11px; color: var(--text-dim); font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }}
+tbody tr:last-child td {{ border-bottom: none; }}
+tbody tr:hover td {{ background: var(--bg-hover); }}
+.totals {{ background: var(--bg-header) !important; font-weight: 700; border-top: 2px solid var(--border); }}
+.badge {{ display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; }}
+.badge-hit {{ background: rgba(74,222,128,0.15); color: var(--pos); }}
+.badge-miss {{ background: rgba(248,113,113,0.15); color: var(--neg); }}
+.badge-pending {{ background: rgba(154,160,176,0.12); color: var(--text-dim); }}
+.badge-persisted {{ background: rgba(96,165,250,0.18); color: var(--link); }}
+.badge-dropped {{ background: rgba(251,191,36,0.18); color: var(--warn); }}
+.badge-unknown {{ background: rgba(154,160,176,0.08); color: var(--text-dim); }}
+</style></head><body>
+
+<h1>シグナル履歴 <span class="accent">{period}</span></h1>
+<div class="meta">生成: {generated} ｜ 戦略: <code>lane1_kelly</code> ｜ レース数: {n_races}件 (確定 {n_finished} / 未確定 {n_pending})</div>
+
+<div class="kpi">
+  <div class="card"><div class="label">勝率</div><div class="value">{hit_rate}</div></div>
+  <div class="card"><div class="label">合計ステーク</div><div class="value">¥{stake_total}</div></div>
+  <div class="card"><div class="label">合計PnL</div><div class="value {pnl_cls}">{pnl_sign}¥{pnl_total}</div></div>
+  <div class="card"><div class="label">ROI</div><div class="value {pnl_cls}">{pnl_sign}{roi}</div></div>
+  <div class="card"><div class="label">持続シグナル</div><div class="value">{n_persisted}</div></div>
+  <div class="card"><div class="label">持続のみPnL</div><div class="value {persist_pnl_cls}">{persist_pnl_sign}¥{persist_pnl}</div></div>
+</div>
+
+{comparison_section}
+
+{daily_section}
+
+<div class="section-title">▼ 個別レース</div>
+<table><thead><tr>
+<th>日付</th><th>場</th><th>R</th><th>観測時間</th><th>持続</th><th>最高EV</th><th>記録オッズ</th><th>確定オッズ</th><th>ステーク</th><th>結果</th><th>PnL</th>
+</tr></thead><tbody>{detail_rows}</tbody></table>
+
+</body></html>
+"""
+
+
+_PERSIST_BADGE = {
+    "persisted": "<span class='badge badge-persisted'>🔵 持続</span>",
+    "dropped":   "<span class='badge badge-dropped'>🟡 途中消失</span>",
+    "post_only": "<span class='badge badge-unknown'>⚫ 事後のみ</span>",
+    "unknown":   "<span class='badge badge-unknown'>─ 不明</span>",
+}
+
+
+def _to_html(df: pd.DataFrame, period: str) -> str:
+    n = len(df)
+    fin = int(df["finished"].sum())
+    pending = n - fin
+    hit = int(df["hit"].sum())
+    stake_total = int(df[df["finished"]]["latest_stake"].sum())
+    pnl_total = int(df["pnl"].sum())
+    pnl_cls = "pos" if pnl_total > 0 else ("neg" if pnl_total < 0 else "")
+    pnl_sign = "+" if pnl_total > 0 else ""
+    hit_rate = f"{hit / fin * 100:.1f}%" if fin else "-"
+    roi = f"{pnl_total / stake_total * 100:.1f}%" if stake_total else "-"
+
+    # 持続シグナルだけの集計（賭けるべきだったレース）
+    persisted = df[df["persisted"] == "persisted"]
+    n_persisted = len(persisted)
+    persist_pnl = int(persisted["pnl"].sum())
+    persist_pnl_cls = "pos" if persist_pnl > 0 else ("neg" if persist_pnl < 0 else "")
+    persist_pnl_sign = "+" if persist_pnl > 0 else ""
+
+    # watch 観測ありの行のみで「検知即発注 vs 締切まで観察」を比較
+    live_df = df[df["persisted"].isin(["persisted", "dropped"])]
+    comparison_section = ""
+    if len(live_df) > 0:
+        immediate = _strategy_stats(live_df)
+        wait = _strategy_stats(live_df[live_df["persisted"] == "persisted"])
+
+        def _cell(s, key, fmt_str, neg_ok=False):
+            v = s[key]
+            sign = "+" if v > 0 else ""
+            cls = "pos" if v > 0 else ("neg" if v < 0 and neg_ok else "")
+            return f"<td class='{cls}'>{sign}{fmt_str.format(v)}</td>"
+
+        def _row(label_main, label_sub, s):
+            sign = "+" if s["pnl"] > 0 else ""
+            pnl_cls = "pos" if s["pnl"] > 0 else ("neg" if s["pnl"] < 0 else "")
+            roi_str = f"{sign}{s['roi'] * 100:.1f}%" if s["stake"] else "-"
+            rate_str = f"{s['hit_rate'] * 100:.1f}%" if s["n_fin"] else "-"
+            return (
+                "<tr>"
+                f"<td>{label_main}<br><span style='color:var(--text-dim);font-size:11px'>{label_sub}</span></td>"
+                f"<td>{s['n']:,}</td>"
+                f"<td>{s['n_fin']:,}</td>"
+                f"<td>{rate_str}</td>"
+                f"<td>¥{s['stake']:,}</td>"
+                f"<td class='{pnl_cls}'>{sign}¥{s['pnl']:,}</td>"
+                f"<td class='{pnl_cls}'>{roi_str}</td>"
+                "</tr>"
+            )
+
+        diff_pnl = wait["pnl"] - immediate["pnl"]
+        diff_sign = "+" if diff_pnl > 0 else ""
+        diff_cls = "pos" if diff_pnl > 0 else ("neg" if diff_pnl < 0 else "")
+        skipped = len(live_df) - wait["n"]
+        comparison_section = (
+            '<div class="section-title">▼ 戦略比較 — 検知即発注 vs 締切まで観察</div>'
+            f'<div style="color:var(--text-dim);font-size:12px;margin-bottom:8px">'
+            f'watch_signal で観測したシグナル {len(live_df)} 件のみ対象 '
+            f'（事後のみ・不明は除外）</div>'
+            '<table style="margin-bottom:8px"><thead><tr>'
+            '<th>戦略</th><th>件数</th><th>確定</th><th>勝率</th>'
+            '<th>ステーク</th><th>PnL</th><th>ROI</th>'
+            '</tr></thead><tbody>'
+            + _row("検知即発注", "シグナル出現時に即買い", immediate)
+            + _row("締切まで観察", "持続したものだけ買い", wait)
+            + '</tbody></table>'
+            f'<div style="color:var(--text-dim);font-size:12px">'
+            f'差分: 観察すると <span class="{diff_cls}">{diff_sign}¥{diff_pnl:,}</span>'
+            f' ／ {skipped} 件を見送り</div>'
+        )
+
+    # 日別サマリ（複数日の時のみ）
+    daily_section = ""
+    if df["date"].nunique() > 1:
+        rows = []
+        for d, g in df.groupby("date"):
+            n_d = len(g)
+            n_persist_d = int((g["persisted"] == "persisted").sum())
+            n_drop_d = int((g["persisted"] == "dropped").sum())
+            fin_d = int(g["finished"].sum())
+            hit_d = int(g["hit"].sum())
+            stake_d = int(g[g["finished"]]["latest_stake"].sum())
+            pnl_d = int(g["pnl"].sum())
+            persist_pnl_d = int(g[g["persisted"] == "persisted"]["pnl"].sum())
+            rate_d = f"{hit_d / fin_d * 100:.1f}%" if fin_d else "-"
+            roi_d = f"{pnl_d / stake_d * 100:+.1f}%" if stake_d else "-"
+            cls = "pos" if pnl_d > 0 else ("neg" if pnl_d < 0 else "")
+            sign = "+" if pnl_d > 0 else ""
+            p_cls = "pos" if persist_pnl_d > 0 else ("neg" if persist_pnl_d < 0 else "")
+            p_sign = "+" if persist_pnl_d > 0 else ""
+            rows.append(
+                f"<tr><td>{d}</td><td>{n_d}</td>"
+                f"<td>{n_persist_d}</td><td>{n_drop_d}</td>"
+                f"<td>{fin_d}</td><td>{hit_d}</td>"
+                f"<td>{rate_d}</td><td>¥{stake_d:,}</td>"
+                f"<td class='{cls}'>{sign}¥{pnl_d:,}</td>"
+                f"<td class='{p_cls}'>{p_sign}¥{persist_pnl_d:,}</td>"
+                f"<td class='{cls}'>{roi_d}</td></tr>"
+            )
+        daily_section = (
+            '<div class="section-title">▼ 日別サマリ</div>'
+            '<table style="margin-bottom:24px"><thead><tr>'
+            '<th>日付</th><th>件数</th><th>持続</th><th>消失</th>'
+            '<th>確定</th><th>的中</th>'
+            '<th>勝率</th><th>ステーク</th><th>PnL</th>'
+            '<th>持続のみPnL</th><th>ROI</th>'
+            f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        )
+
+    # 個別レース行（持続→消失→事後のみ→不明の順、各内では最高EV降順）
+    persist_order = {"persisted": 0, "dropped": 1, "post_only": 2, "unknown": 3}
+    df_sorted = df.copy()
+    df_sorted["_porder"] = df_sorted["persisted"].map(persist_order).fillna(4)
+    df_sorted = df_sorted.sort_values(
+        ["date", "_porder", "max_ev"], ascending=[True, True, False]
+    )
+    detail_rows: list[str] = []
+    for _, r in df_sorted.iterrows():
+        rid = str(r["race_id"])
+        parts = rid.split("-")
+        venue = VENUE_CODES.get(parts[1], "?") if len(parts) > 1 else "?"
+        rno = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        seen = f"{r['first_seen'].strftime('%H:%M')}〜{r['last_seen'].strftime('%H:%M')}"
+        stake = int(r["latest_stake"]) if pd.notna(r["latest_stake"]) else 0
+        odds = float(r["latest_odds"]) if pd.notna(r["latest_odds"]) else 0.0
+        settled = float(r.get("settled_odds", float("nan")))
+        # 確定オッズ表示: 的中時は確定値、外れは不明扱い
+        if pd.notna(settled) and settled > 0:
+            ratio = settled / odds if odds > 0 else 1.0
+            # 30%以上下落 = 大幅shrinkage → 色付き警告
+            if ratio < 0.7:
+                settled_html = f"<span class='neg'>{settled:.2f}</span>"
+            elif ratio > 1.3:
+                settled_html = f"<span class='pos'>{settled:.2f}</span>"
+            else:
+                settled_html = f"{settled:.2f}"
+        else:
+            settled_html = "<span style='color:var(--text-dim)'>-</span>"
+        persist_html = _PERSIST_BADGE.get(str(r.get("persisted", "unknown")),
+                                          _PERSIST_BADGE["unknown"])
+        if r["finished"]:
+            if r["hit"]:
+                status = "<span class='badge badge-hit'>🟢 1着</span>"
+                pnl_v = int(r["pnl"])
+                pnl_html = f"<span class='pos'>+¥{pnl_v:,}</span>"
+            else:
+                status = f"<span class='badge badge-miss'>✕ {int(r['winner_lane'])}号艇1着</span>"
+                pnl_html = f"<span class='neg'>-¥{stake:,}</span>"
+        else:
+            status = "<span class='badge badge-pending'>⏳ 未確定</span>"
+            pnl_html = "-"
+        detail_rows.append(
+            "<tr>"
+            f"<td>{r['date']}</td>"
+            f"<td>{venue}({parts[1]})</td>"
+            f"<td>{rno}R</td>"
+            f"<td>{seen}</td>"
+            f"<td>{persist_html}</td>"
+            f"<td>{r['max_ev']:.3f}</td>"
+            f"<td>{odds:.2f}</td>"
+            f"<td>{settled_html}</td>"
+            f"<td>¥{stake:,}</td>"
+            f"<td>{status}</td>"
+            f"<td>{pnl_html}</td>"
+            "</tr>"
+        )
+
+    return _HTML_TEMPLATE.format(
+        period=period,
+        generated=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        n_races=n,
+        n_finished=fin,
+        n_pending=pending,
+        hit_rate=hit_rate,
+        stake_total=f"{stake_total:,}",
+        pnl_total=f"{abs(pnl_total):,}",
+        pnl_sign=pnl_sign,
+        pnl_cls=pnl_cls,
+        roi=roi,
+        n_persisted=n_persisted,
+        persist_pnl=f"{abs(persist_pnl):,}",
+        persist_pnl_sign=persist_pnl_sign,
+        persist_pnl_cls=persist_pnl_cls,
+        comparison_section=comparison_section,
+        daily_section=daily_section,
+        detail_rows="".join(detail_rows),
+    )
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--date", default=None, help="単日指定 YYYY-MM-DD")
+    p.add_argument("--days", type=int, default=None,
+                   help="過去N日（今日含む）の集計。指定時は日別サマリも表示")
+    p.add_argument("--from", dest="date_from", default=None,
+                   help="期間開始 YYYY-MM-DD（--to と組み合わせる）")
+    p.add_argument("--to", dest="date_to", default=None,
+                   help="期間終了 YYYY-MM-DD（--from と組み合わせる）")
+    p.add_argument("--verbose", "-v", action="store_true",
+                   help="ターミナルモード時に集計だけでなく個別レースも全表示")
+    p.add_argument("--html", default=None,
+                   help="HTML 出力先のパスを明示指定（省略時は data/processed/ 配下に自動命名）")
+    p.add_argument("--no-open", action="store_true",
+                   help="HTMLは生成するがブラウザを自動で開かない")
+    p.add_argument("--terminal", "-t", action="store_true",
+                   help="HTML を生成せずターミナルだけに表示")
+    p.add_argument("--no-backfill", action="store_true",
+                   help="signal_log が無い過去日の自動 backfill を無効化")
+    p.add_argument("--no-schedule-scrape", action="store_true",
+                   help="不足しているスケジュールの自動スクレイプを無効化。"
+                        "長期間の集計を高速に出したい時に使う（持続判定の精度は落ちる）")
+    args = p.parse_args()
+
+    if args.date:
+        targets = [date.fromisoformat(args.date)]
+    elif args.date_from and args.date_to:
+        s = date.fromisoformat(args.date_from)
+        e = date.fromisoformat(args.date_to)
+        targets = [s + timedelta(days=i) for i in range((e - s).days + 1)]
+    elif args.days:
+        end = date.today()
+        targets = [end - timedelta(days=i) for i in range(args.days - 1, -1, -1)]
+    else:
+        targets = [date.today()]
+
+    # 過去日で signal_log 不足の日を自動 backfill (オプトアウト可)
+    if not args.no_backfill:
+        _ensure_signal_log(targets)
+    winners = _load_winners()
+    schedule = _ensure_schedule(targets, skip_scrape=args.no_schedule_scrape)
+    df = _collect(targets, winners, schedule=schedule)
+    if df.empty:
+        print(f"対象期間にシグナルログなし: {targets[0]} 〜 {targets[-1]}")
+        return
+
+    period_label = (f"{targets[0]} 〜 {targets[-1]}"
+                    if len(targets) > 1 else str(targets[0]))
+
+    # HTML がデフォルト動作。--terminal でターミナル出力モードに切り替え可。
+    if not args.terminal:
+        if args.html:
+            html_path = Path(args.html)
+        else:
+            if len(targets) > 1:
+                fname = f"signals_history_{targets[0]:%Y%m%d}_{targets[-1]:%Y%m%d}.html"
+            else:
+                fname = f"signals_history_{targets[0]:%Y%m%d}.html"
+            html_path = PROCESSED_DIR / fname
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        html_path.write_text(_to_html(df, period_label), encoding="utf-8")
+        print(f"HTML 保存: {html_path}")
+        if not args.no_open:
+            uri = html_path.resolve().as_uri()
+            print(f"ブラウザで開く: {uri}")
+            try:
+                webbrowser.open(uri)
+            except Exception as e:
+                print(f"  (ブラウザ自動オープン失敗: {e} — URLを手動でコピーしてください)")
+        return
+
+    # --terminal モード
+    print(f"=== シグナル履歴 ({period_label}) — {len(df)} レース ===")
+    print()
+
+    multi_day = len(targets) > 1
+    if multi_day:
+        _print_daily_summary(df)
+        print()
+
+    if args.verbose or not multi_day:
+        _print_details(df)
+
+    _print_grand_total(df, label="期間合計" if multi_day else "合計")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,14 @@
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+# LZH解凍。Pythonバインディングが入らない環境では 7-Zip CLI に自動フォールバック。
+lhafile>=0.3.0; platform_system != "Windows"
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0
+scikit-learn>=1.3.0
+lightgbm>=4.0.0
+joblib>=1.3.0
+tqdm>=4.66.0
+python-dateutil>=2.8.0
+PyYAML>=6.0
